@@ -9,9 +9,18 @@ import SwiftUI
 
 @main
 struct FlowDictateApp: App {
+    @StateObject private var coordinator = DictationCoordinator()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            Phase0Menu(coordinator: coordinator)
+        } label: {
+            Image(systemName: coordinator.state.symbolName)
+        }
+        .menuBarExtraStyle(.menu)
+
+        Settings {
+            Phase0SettingsView(coordinator: coordinator)
         }
     }
 }

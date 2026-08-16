@@ -1,0 +1,12 @@
+# Xcode user state and build products
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
