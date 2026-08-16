@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -16,7 +17,17 @@ enum FlowPermissionError: LocalizedError {
     }
 }
 
-struct PermissionManager {
+@MainActor
+protocol PermissionManaging {
+    func ensureMicrophoneAccess() async throws
+    func ensureEventPostingAccess() throws
+    var hasMicrophoneAccess: Bool { get }
+    var hasEventPostingAccess: Bool { get }
+    func openMicrophoneSettings()
+    func openAccessibilitySettings()
+}
+
+struct PermissionManager: PermissionManaging {
     func ensureMicrophoneAccess() async throws {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
@@ -45,5 +56,20 @@ struct PermissionManager {
 
     var hasEventPostingAccess: Bool {
         CGPreflightPostEventAccess()
+    }
+
+    func openMicrophoneSettings() {
+        openPrivacySettings(anchor: "Privacy_Microphone")
+    }
+
+    func openAccessibilitySettings() {
+        openPrivacySettings(anchor: "Privacy_Accessibility")
+    }
+
+    private func openPrivacySettings(anchor: String) {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 }

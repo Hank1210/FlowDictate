@@ -1,8 +1,7 @@
 import Carbon.HIToolbox
-import Combine
 import Foundation
 
-struct HotKeyConfiguration: Identifiable, Hashable, Sendable {
+struct HotKeyConfiguration: Codable, Identifiable, Hashable, Sendable {
     let id: String
     let keyCode: UInt32
     let modifiers: UInt32
@@ -29,24 +28,45 @@ struct HotKeyConfiguration: Identifiable, Hashable, Sendable {
         displayName: "Option + D"
     )
 
-    static let presets = [optionSpace, controlSpace, optionD]
-}
+    static let optionShiftSpace = HotKeyConfiguration(
+        id: "option-shift-space",
+        keyCode: UInt32(kVK_Space),
+        modifiers: UInt32(optionKey | shiftKey),
+        displayName: "Option + Shift + Space"
+    )
 
-@MainActor
-final class ShortcutSettings: ObservableObject {
-    private static let defaultsKey = "dictationHotKey"
-    private let defaults: UserDefaults
+    static let controlShiftSpace = HotKeyConfiguration(
+        id: "control-shift-space",
+        keyCode: UInt32(kVK_Space),
+        modifiers: UInt32(controlKey | shiftKey),
+        displayName: "Control + Shift + Space"
+    )
 
-    @Published private(set) var selected: HotKeyConfiguration
+    static let optionShiftD = HotKeyConfiguration(
+        id: "option-shift-d",
+        keyCode: UInt32(kVK_ANSI_D),
+        modifiers: UInt32(optionKey | shiftKey),
+        displayName: "Option + Shift + D"
+    )
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        let savedID = defaults.string(forKey: Self.defaultsKey)
-        selected = HotKeyConfiguration.presets.first { $0.id == savedID } ?? .optionSpace
-    }
+    static let dictationPresets = [optionSpace, controlSpace, optionD]
+    static let cancelPresets = [optionShiftSpace, controlShiftSpace, optionShiftD]
 
-    func select(_ configuration: HotKeyConfiguration) {
-        selected = configuration
-        defaults.set(configuration.id, forKey: Self.defaultsKey)
+    static func custom(keyCode: UInt32, modifiers: UInt32, keyName: String) -> Self {
+        let modifierName = [
+            (UInt32(controlKey), "Control"),
+            (UInt32(optionKey), "Option"),
+            (UInt32(shiftKey), "Shift"),
+            (UInt32(cmdKey), "Command")
+        ]
+        .compactMap { mask, name in modifiers & mask != 0 ? name : nil }
+        .joined(separator: " + ")
+        let displayName = modifierName.isEmpty ? keyName : "\(modifierName) + \(keyName)"
+        return HotKeyConfiguration(
+            id: "custom-\(keyCode)-\(modifiers)",
+            keyCode: keyCode,
+            modifiers: modifiers,
+            displayName: displayName
+        )
     }
 }

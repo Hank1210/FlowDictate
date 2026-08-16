@@ -24,7 +24,7 @@ enum TranscriptionProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            "OPENAI_API_KEY is missing from the Xcode scheme environment."
+            "No OpenAI API key is configured. Add one in FlowDictate Settings → Transcription."
         case .invalidResponse:
             "The transcription service returned an invalid response."
         case .emptyTranscript:

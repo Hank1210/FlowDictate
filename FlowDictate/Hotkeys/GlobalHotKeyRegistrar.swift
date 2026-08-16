@@ -23,12 +23,27 @@ protocol HotKeyRegistering: AnyObject {
 }
 
 @MainActor
+final class DisabledHotKeyRegistrar: HotKeyRegistering {
+    func register(
+        _ configuration: HotKeyConfiguration,
+        handler: @escaping @MainActor () -> Void
+    ) throws {}
+
+    func unregister() {}
+}
+
+@MainActor
 final class GlobalHotKeyRegistrar: HotKeyRegistering {
     nonisolated private static let signature: OSType = 0x464C4F57 // "FLOW"
 
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRef: EventHotKeyRef?
     private var handler: (@MainActor () -> Void)?
+    private let registrationID: UInt32
+
+    init(registrationID: UInt32 = 1) {
+        self.registrationID = registrationID
+    }
 
     deinit {
         if let hotKeyRef {
@@ -64,7 +79,7 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
             }
         }
 
-        let hotKeyID = EventHotKeyID(signature: Self.signature, id: 1)
+        let hotKeyID = EventHotKeyID(signature: Self.signature, id: registrationID)
         let status = RegisterEventHotKey(
             configuration.keyCode,
             configuration.modifiers,
@@ -104,11 +119,15 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
             nil,
             &hotKeyID
         )
-        guard status == noErr, hotKeyID.signature == signature else {
+        let registrar = Unmanaged<GlobalHotKeyRegistrar>.fromOpaque(userData).takeUnretainedValue()
+        guard
+            status == noErr,
+            hotKeyID.signature == signature,
+            hotKeyID.id == registrar.registrationID
+        else {
             return OSStatus(eventNotHandledErr)
         }
 
-        let registrar = Unmanaged<GlobalHotKeyRegistrar>.fromOpaque(userData).takeUnretainedValue()
         MainActor.assumeIsolated {
             registrar.invokeHandler()
         }

@@ -1,4 +1,6 @@
 @preconcurrency import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 import OSLog
 
@@ -26,9 +28,23 @@ enum AudioRecorderError: LocalizedError {
     }
 }
 
+enum AudioLevelMeter {
+    nonisolated static func normalizedRMS(_ samples: UnsafeBufferPointer<Float>) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum: Float = 0
+        for sample in samples {
+            sum += sample * sample
+        }
+        let rms = sqrt(sum / Float(samples.count))
+        return min(max(rms * 8, 0), 1)
+    }
+}
+
 @MainActor
 protocol AudioRecording: AnyObject {
     var isRecording: Bool { get }
+    var levelHandler: (@MainActor (Float) -> Void)? { get set }
+    func selectInputDevice(_ deviceID: AudioDeviceID?)
     func start() throws
     func stop() throws -> AudioRecordingResult
 }
@@ -41,6 +57,9 @@ final class MicrophoneRecorder: AudioRecording {
     private var recordingID: UUID?
     private var recordingURL: URL?
     private var startedAt: Date?
+    private var selectedDeviceID: AudioDeviceID?
+
+    var levelHandler: (@MainActor (Float) -> Void)?
 
     var isRecording: Bool { engine?.isRunning == true }
 
@@ -52,6 +71,10 @@ final class MicrophoneRecorder: AudioRecording {
         self.store = store
     }
 
+    func selectInputDevice(_ deviceID: AudioDeviceID?) {
+        selectedDeviceID = deviceID
+    }
+
     func start() throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
 
@@ -59,6 +82,22 @@ final class MicrophoneRecorder: AudioRecording {
         let url = try store.makeRecordingURL(id: id)
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+
+        if let selectedDeviceID, let audioUnit = inputNode.audioUnit {
+            var deviceID = selectedDeviceID
+            let status = AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &deviceID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            guard status == noErr else {
+                throw AudioDeviceServiceError.propertyUnavailable(status)
+            }
+        }
+
         let format = inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw AudioRecorderError.unavailableInput
@@ -70,6 +109,15 @@ final class MicrophoneRecorder: AudioRecording {
                 try file.write(from: buffer)
             } catch {
                 FlowLogger.audio.error("Audio file write failed: \(error.localizedDescription, privacy: .public)")
+            }
+
+            guard let channel = buffer.floatChannelData?[0] else { return }
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return }
+            let samples = UnsafeBufferPointer(start: channel, count: frameCount)
+            let normalized = AudioLevelMeter.normalizedRMS(samples)
+            Task { @MainActor [weak self] in
+                self?.levelHandler?(normalized)
             }
         }
 
@@ -106,6 +154,7 @@ final class MicrophoneRecorder: AudioRecording {
         recordingID = nil
         recordingURL = nil
         self.startedAt = nil
+        levelHandler?(0)
 
         let result = AudioRecordingResult(
             id: id,

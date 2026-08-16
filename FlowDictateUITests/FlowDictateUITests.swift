@@ -15,8 +15,13 @@ final class FlowDictateUITests: XCTestCase {
     @MainActor
     func testMenuBarApplicationLaunches() throws {
         let app = XCUIApplication()
+        app.launchEnvironment["FLOWDICTATE_UI_TESTING"] = "1"
+        app.launchEnvironment["OPENAI_API_KEY"] = "ui-test-key"
+        if app.state != .notRunning {
+            app.terminate()
+        }
         app.launch()
-        XCTAssertNotEqual(app.state, .notRunning)
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10) || app.state == .runningBackground)
         app.terminate()
     }
 }

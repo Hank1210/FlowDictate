@@ -13,14 +13,14 @@ struct FlowDictateApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Phase0Menu(coordinator: coordinator)
+            FlowDictateMenu(coordinator: coordinator)
         } label: {
             Image(systemName: coordinator.state.symbolName)
         }
         .menuBarExtraStyle(.menu)
 
         Settings {
-            Phase0SettingsView(coordinator: coordinator)
+            FlowDictateSettingsView(coordinator: coordinator)
         }
     }
 }

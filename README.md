@@ -1,53 +1,52 @@
 # FlowDictate
 
-FlowDictate is a native macOS dictation utility. The repository is currently limited to the Phase 0 technical spike described in `FlowDictate_PRD_v1.1.md`.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 1 of `FlowDictate_PRD_v1.1.md`.
 
-## Phase 0 scope
+## Phase 1 features
 
-The current prototype provides:
+- global start/stop and cancel shortcuts
+- microphone recording with local WAV backup
+- selectable audio input and live level metering
+- OpenAI transcription with model and language settings
+- clipboard-safe insertion into the application that originally had focus
+- a non-activating recording and processing overlay on the display containing the mouse
+- API credentials stored in macOS Keychain
+- microphone and Accessibility permission guidance
+- configurable clipboard restoration delay
+- launch at login enabled on first installed start, with a Settings toggle to disable it
 
-- a menu bar application with no permanent Dock icon
-- a configurable native global shortcut (default: Option + Space)
-- microphone and event-posting permission checks
-- microphone recording to a durable local WAV file
-- an abstract `TranscriptionProvider` with an initial OpenAI implementation
-- focus preservation and insertion through a clipboard-safe Command-V operation
-- local structured logging and retained audio after failures
-
-It intentionally does not include the recording overlay, history UI, writing styles, dictionary, launch at login, statistics, or other Phase 1+ features.
+History, retry transcription, restore-last, writing styles, dictionary, statistics and streaming are intentionally reserved for later phases.
 
 ## Requirements
 
 - Xcode 26.6 or a compatible Xcode version
 - macOS 14 or later
-- an OpenAI API key for the Phase 0 transcription provider
+- an OpenAI API key
 
-## Configure Xcode
+## Configure and run
 
-1. Open `FlowDictate.xcodeproj`.
-2. Select **Product → Scheme → Manage Schemes…** and duplicate `FlowDictate` as `FlowDictate Local`.
-3. Leave **Shared** unchecked for the local duplicate, select it, then choose **Edit…**.
-4. Under **Run → Arguments → Environment Variables** (the lower table), add:
-   - `OPENAI_API_KEY` with your API key.
-   - Optionally, `FLOWDICTATE_TRANSCRIPTION_MODEL`. The default is `gpt-4o-mini-transcribe`.
-5. Ensure the variable is enabled. Do **not** add `OPENAI_API_KEY=...` to **Arguments Passed On Launch**.
-6. Run the app with the `FlowDictate Local` scheme. Choose a Development Team under the FlowDictate target's **Signing & Capabilities** tab if Xcode requires one.
+1. Open `FlowDictate.xcodeproj` and run the `FlowDictate` scheme.
+2. Open the menu bar item and choose **Settings → Transcription**.
+3. Enter the OpenAI API key and choose **Save in Keychain**.
+4. Grant Microphone and Accessibility permissions when prompted.
+5. Place the cursor in another application and press Option + Space.
+6. Speak, then press Option + Space again to transcribe and insert the text.
 
-Never place a real API key in source code, `.env.example`, or the shared `FlowDictate` scheme. The local, unshared scheme keeps this machine-specific value out of the repository.
+Option + Shift + Space cancels a recording without sending it for transcription. The recording remains local so cancellation never destroys captured audio.
+
+During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` may be supplied through a local, unshared Xcode scheme. Never put credentials in **Arguments Passed On Launch**, source code, `.env.example`, or a shared scheme.
+
+## Settings
+
+- **General:** launch at login and permission status
+- **Dictation:** start/stop and cancel shortcuts
+- **Audio:** input device and live level
+- **Transcription:** Keychain credential, OpenAI model and automatic/German/English recognition
+- **Advanced:** clipboard restoration delay and recordings folder
+
+If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload under the app's Application Support container in `FlowDictate/Recordings`.
 
 ## Build from the command line
-
-If `xcode-select` already points to Xcode:
-
-```sh
-xcodebuild clean build \
-  -project FlowDictate.xcodeproj \
-  -scheme FlowDictate \
-  -configuration Debug \
-  -destination 'platform=macOS,arch=arm64'
-```
-
-If it points to Command Line Tools, invoke the full Xcode toolchain:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
@@ -57,18 +56,6 @@ xcodebuild clean build \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64'
 ```
-
-## Run the Phase 0 manual test
-
-1. Build and run FlowDictate from Xcode so it has a stable signed application identity.
-2. Grant Microphone permission when requested.
-3. Grant FlowDictate permission under **System Settings → Privacy & Security → Accessibility** when requested. If macOS asks you to relaunch the app, do so from Xcode.
-4. Open TextEdit or Notes and place the cursor in an editable text field.
-5. Press Option + Space and speak a sentence.
-6. Press Option + Space again.
-7. Confirm that the transcription appears at the original cursor and the previous clipboard contents are restored.
-
-Recordings are written before upload under the app's Application Support container in `FlowDictate/Recordings`. If transcription or insertion fails, open the menu bar item and choose **Show Retained Recording**.
 
 ## Tests
 
@@ -80,4 +67,20 @@ xcodebuild test \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-UI tests do not automate microphone, Accessibility, or cross-application insertion because those checks require macOS TCC approval and a foreground target application.
+The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
+
+Automated tests cover configuration, transcription request construction, state rules, start/stop/cancel orchestration, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Accessibility, overlay placement and insertion into third-party applications require manual macOS testing.
+
+The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
+
+## Phase 1 manual verification
+
+Test short, long, German, English and mixed-language dictation in Notes, Safari, Chrome, Mail, VS Code and Word or an equivalent editor. Also verify:
+
+- rapid shortcut presses do not create overlapping recordings
+- cancel does not call the transcription provider
+- the overlay appears on the display containing the mouse and never steals focus
+- microphone switching and default-device fallback
+- text and non-text clipboard restoration
+- invalid key and offline errors retain the audio file
+- launch at login works from an installed, consistently signed build; if macOS requires approval, follow the link to Login Items shown in Settings
