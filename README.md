@@ -2,6 +2,8 @@
 
 FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 2 as specified in `FlowDictate_PRD_Phase_2.md`.
 
+FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
+
 ## Phase 2 features
 
 - global start/stop and cancel shortcuts
@@ -66,6 +68,16 @@ For a free build intended for personal use and a trusted circle, run:
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
 `scripts/build-release.sh` remains available for a future Developer ID signed and notarized release. Both workflows are documented in `RELEASE.md`.
+
+Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
+
+## Privacy
+
+FlowDictate contains no analytics, advertising or developer-operated backend. Recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
+
+## License
+
+FlowDictate is available under the [MIT License](LICENSE). You may use, modify and redistribute it subject to that license.
 
 ## Build from the command line
 
