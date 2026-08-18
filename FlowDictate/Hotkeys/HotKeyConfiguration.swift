@@ -49,8 +49,23 @@ struct HotKeyConfiguration: Codable, Identifiable, Hashable, Sendable {
         displayName: "Option + Shift + D"
     )
 
+    static let optionShiftZ = HotKeyConfiguration(
+        id: "option-shift-z",
+        keyCode: UInt32(kVK_ANSI_Z),
+        modifiers: UInt32(optionKey | shiftKey),
+        displayName: "Option + Shift + Z"
+    )
+
+    static let controlShiftZ = HotKeyConfiguration(
+        id: "control-shift-z",
+        keyCode: UInt32(kVK_ANSI_Z),
+        modifiers: UInt32(controlKey | shiftKey),
+        displayName: "Control + Shift + Z"
+    )
+
     static let dictationPresets = [optionSpace, controlSpace, optionD]
     static let cancelPresets = [optionShiftSpace, controlShiftSpace, optionShiftD]
+    static let restorePresets = [optionShiftZ, controlShiftZ]
 
     static func custom(keyCode: UInt32, modifiers: UInt32, keyName: String) -> Self {
         let modifierName = [

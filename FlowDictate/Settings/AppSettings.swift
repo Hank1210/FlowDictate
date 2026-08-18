@@ -28,10 +28,14 @@ final class AppSettings: ObservableObject {
         static let cancelHotKey = "cancelHotKey"
         static let dictationHotKeyData = "dictationHotKeyData"
         static let cancelHotKeyData = "cancelHotKeyData"
+        static let restoreHotKeyData = "restoreHotKeyData"
         static let inputDeviceUID = "inputDeviceUID"
         static let transcriptionModel = "transcriptionModel"
         static let transcriptionLanguage = "transcriptionLanguage"
         static let clipboardRestoreDelay = "clipboardRestoreDelay"
+        static let onboardingVersion = "onboardingVersion"
+        static let automaticRetryEnabled = "automaticRetryEnabled"
+        static let audioRetentionDays = "audioRetentionDays"
     }
 
     private let defaults: UserDefaults
@@ -47,6 +51,12 @@ final class AppSettings: ObservableObject {
         didSet {
             defaults.set(cancelHotKey.id, forKey: Key.cancelHotKey)
             defaults.set(try? JSONEncoder().encode(cancelHotKey), forKey: Key.cancelHotKeyData)
+        }
+    }
+
+    @Published var restoreHotKey: HotKeyConfiguration {
+        didSet {
+            defaults.set(try? JSONEncoder().encode(restoreHotKey), forKey: Key.restoreHotKeyData)
         }
     }
 
@@ -66,6 +76,18 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(clipboardRestoreDelay, forKey: Key.clipboardRestoreDelay) }
     }
 
+    @Published var onboardingVersion: Int {
+        didSet { defaults.set(onboardingVersion, forKey: Key.onboardingVersion) }
+    }
+
+    @Published var automaticRetryEnabled: Bool {
+        didSet { defaults.set(automaticRetryEnabled, forKey: Key.automaticRetryEnabled) }
+    }
+
+    @Published var audioRetentionDays: Int {
+        didSet { defaults.set(audioRetentionDays, forKey: Key.audioRetentionDays) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -79,6 +101,9 @@ final class AppSettings: ObservableObject {
             ?? HotKeyConfiguration.cancelPresets.first { $0.id == cancelID }
             ?? .optionShiftSpace
 
+        restoreHotKey = Self.savedHotKey(defaults, key: Key.restoreHotKeyData)
+            ?? .optionShiftZ
+
         inputDeviceUID = defaults.string(forKey: Key.inputDeviceUID)
         transcriptionModel = defaults.string(forKey: Key.transcriptionModel)
             ?? "gpt-4o-mini-transcribe"
@@ -88,6 +113,11 @@ final class AppSettings: ObservableObject {
 
         let storedDelay = defaults.object(forKey: Key.clipboardRestoreDelay) as? Double
         clipboardRestoreDelay = storedDelay ?? 0.6
+
+        onboardingVersion = defaults.integer(forKey: Key.onboardingVersion)
+        automaticRetryEnabled = defaults.object(forKey: Key.automaticRetryEnabled) as? Bool ?? true
+        let storedRetention = defaults.integer(forKey: Key.audioRetentionDays)
+        audioRetentionDays = storedRetention == 0 ? 30 : storedRetention
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

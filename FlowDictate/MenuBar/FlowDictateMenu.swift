@@ -17,6 +17,14 @@ struct FlowDictateMenu: View {
         }
         .disabled(!coordinator.canCancel)
 
+        Button("Restore Last Dictation") {
+            coordinator.restoreLastDictation()
+        }
+
+        Button("History…") {
+            coordinator.showHistory()
+        }
+
         Divider()
 
         Menu("Microphone") {
@@ -52,6 +60,12 @@ struct FlowDictateMenu: View {
 
         SettingsLink {
             Text("Settings…")
+        }
+
+        if coordinator.needsOnboarding {
+            Button("Continue Setup…") {
+                coordinator.showOnboarding()
+            }
         }
 
         Divider()
@@ -93,6 +107,8 @@ struct FlowDictateSettingsView: View {
                 .tabItem { Label("Audio", systemImage: "mic") }
             transcriptionSettings
                 .tabItem { Label("Transcription", systemImage: "text.bubble") }
+            storageSettings
+                .tabItem { Label("Storage", systemImage: "externaldrive") }
             advancedSettings
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
         }
@@ -145,6 +161,15 @@ struct FlowDictateSettingsView: View {
                     action: coordinator.openAccessibilitySettings
                 )
             }
+
+            Section("Setup") {
+                Button("Open Setup Assistant…") {
+                    coordinator.showOnboarding()
+                }
+                Button("Open Dictation History…") {
+                    coordinator.showHistory()
+                }
+            }
         }
     }
 
@@ -160,6 +185,11 @@ struct FlowDictateSettingsView: View {
                     title: "Cancel",
                     configuration: settings.cancelHotKey,
                     onChange: coordinator.setCancelHotKey
+                )
+                ShortcutRecorderView(
+                    title: "Restore Last",
+                    configuration: settings.restoreHotKey,
+                    onChange: coordinator.setRestoreHotKey
                 )
                 Text("Click a shortcut, then press a key combination. Escape cancels recording the shortcut.")
                     .font(.caption)
@@ -255,10 +285,63 @@ struct FlowDictateSettingsView: View {
             }
 
             Section("Local Audio") {
-                Text("Recordings are retained locally. History and retention controls follow in Phase 2.")
+                Text("Recordings are retained locally and remain recoverable after transcription errors.")
                     .foregroundStyle(.secondary)
                 Button("Show Recordings Folder") {
                     coordinator.revealRecordingsFolder()
+                }
+            }
+
+            Section("Reliability") {
+                Toggle("Automatically retry temporary transcription failures", isOn: $settings.automaticRetryEnabled)
+            }
+
+            Section("Diagnostics") {
+                Button("Export Diagnostics…") {
+                    coordinator.exportDiagnostics()
+                }
+                Text("The export excludes API keys, transcripts, audio, clipboard contents and folder bookmarks.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var storageSettings: some View {
+        settingsForm {
+            Section("Recordings Folder") {
+                LabeledContent("Location") {
+                    Text(coordinator.recordingLocationPath ?? "Not configured")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                HStack {
+                    Button("Use Documents/Recordings…") {
+                        coordinator.chooseRecordingDirectory(recommended: true)
+                    }
+                    Button("Choose Another Folder…") {
+                        coordinator.chooseRecordingDirectory(recommended: false)
+                    }
+                    Button("Show in Finder") {
+                        coordinator.revealRecordingsFolder()
+                    }
+                    .disabled(!coordinator.recordingLocationConfigured)
+                }
+            }
+
+            Section("Retention") {
+                Picker("Keep successful audio", selection: $settings.audioRetentionDays) {
+                    Text("7 days").tag(7)
+                    Text("30 days").tag(30)
+                    Text("90 days").tag(90)
+                    Text("Forever").tag(-1)
+                }
+                Text("Failed and recovered recordings are never deleted automatically.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Migration") {
+                Button("Import Phase 1 Recordings") {
+                    coordinator.migrateLegacyRecordings()
                 }
             }
         }

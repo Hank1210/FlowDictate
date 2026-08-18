@@ -84,19 +84,27 @@ struct FlowDictateTests {
             keyName: "K"
         )
         settings.cancelHotKey = .controlShiftSpace
+        settings.restoreHotKey = .controlShiftZ
         settings.inputDeviceUID = "test-microphone"
         settings.transcriptionModel = "test-model"
         settings.transcriptionLanguage = .german
         settings.clipboardRestoreDelay = 1.2
+        settings.onboardingVersion = 2
+        settings.automaticRetryEnabled = false
+        settings.audioRetentionDays = 90
 
         let restored = AppSettings(defaults: defaults)
 
         #expect(restored.dictationHotKey == settings.dictationHotKey)
         #expect(restored.cancelHotKey == .controlShiftSpace)
+        #expect(restored.restoreHotKey == .controlShiftZ)
         #expect(restored.inputDeviceUID == "test-microphone")
         #expect(restored.transcriptionModel == "test-model")
         #expect(restored.transcriptionLanguage == .german)
         #expect(restored.clipboardRestoreDelay == 1.2)
+        #expect(restored.onboardingVersion == 2)
+        #expect(!restored.automaticRetryEnabled)
+        #expect(restored.audioRetentionDays == 90)
     }
 
     @Test func transcriptionLanguageMapsAutomaticToNil() {
@@ -159,8 +167,63 @@ struct FlowDictateTests {
         #expect(LaunchAtLoginState(serviceStatus: .notFound) == .unavailable)
     }
 
+    @Test func failureClassifierRetriesOnlyTemporaryFailures() {
+        #expect(DictationFailureClassifier.isRetryable(URLError(.notConnectedToInternet)))
+        #expect(DictationFailureClassifier.isRetryable(
+            TranscriptionProviderError.server(statusCode: 503, message: "Unavailable")
+        ))
+        #expect(!DictationFailureClassifier.isRetryable(
+            TranscriptionProviderError.server(statusCode: 401, message: "Unauthorized")
+        ))
+        #expect(DictationFailureClassifier.category(for:
+            TranscriptionProviderError.server(statusCode: 429, message: "Limited")
+        ) == .rateLimit)
+    }
+
+    @Test func historyStorePersistsAndRecoversInterruptedStates() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateHistoryTests-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("history.json")
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let now = Date()
+        let id = UUID()
+        let record = DictationRecord(
+            id: id, createdAt: now, recordingStartedAt: now, recordingEndedAt: now,
+            duration: 1, status: .transcribing, audioRelativePath: "test.wav",
+            audioFileSize: 1, originalTranscript: nil, finalText: nil,
+            providerID: "OpenAI", modelID: "test", language: "de",
+            targetBundleIdentifier: "test.app", targetApplicationName: "Test",
+            attemptCount: 1, lastAttemptAt: now, errorCategory: nil, errorCode: nil,
+            errorMessage: nil, cancelled: false, updatedAt: now, schemaVersion: 1
+        )
+        try await store.upsert(record)
+        #expect(try await store.record(id: id)?.status == .transcribing)
+
+        let recovered = try await store.recoverInterrupted()
+        #expect(recovered.count == 1)
+        #expect(try await store.record(id: id)?.status == .transcriptionFailed)
+
+        let reloaded = DictationHistoryStore(fileURL: fileURL)
+        #expect(try await reloaded.record(id: id)?.errorCategory == .interrupted)
+    }
+
+    @Test @MainActor func apiKeyIsReadOnlyOncePerAppSession() async {
+        let credentialStore = CountingCredentialStore()
+        let harness = makeCoordinatorHarness(credentialStore: credentialStore)
+        #expect(credentialStore.readCount == 1)
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        #expect(credentialStore.readCount == 1)
+    }
+
     @MainActor
-    private func makeCoordinatorHarness() -> CoordinatorHarness {
+    private func makeCoordinatorHarness(
+        credentialStore: any CredentialStoring = MockCredentialStore()
+    ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -181,16 +244,22 @@ struct FlowDictateTests {
             settings: AppSettings(defaults: defaults),
             dictationHotKeyRegistrar: MockHotKeyRegistrar(),
             cancelHotKeyRegistrar: MockHotKeyRegistrar(),
+            restoreHotKeyRegistrar: MockHotKeyRegistrar(),
             permissionManager: MockPermissionManager(),
             recorder: recorder,
             provider: provider,
             inserter: inserter,
-            credentialStore: MockCredentialStore(),
+            credentialStore: credentialStore,
             audioDeviceService: MockAudioDeviceService(),
             launchAtLogin: LaunchAtLoginManager(automaticallyEnableOnFirstLaunch: false),
             overlay: overlay,
             focusTargetProvider: { target },
-            environment: [:]
+            environment: [:],
+            recordingLocationStore: configuredRecordingLocationStore(defaults: defaults),
+            historyStore: DictationHistoryStore(
+                fileURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FlowDictateHistory-\(UUID()).json")
+            )
         )
 
         return CoordinatorHarness(
@@ -200,6 +269,14 @@ struct FlowDictateTests {
             inserter: inserter,
             overlay: overlay
         )
+    }
+
+    private func configuredRecordingLocationStore(defaults: UserDefaults) -> RecordingLocationStore {
+        let store = RecordingLocationStore(defaults: defaults)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateRecordings-\(UUID())", isDirectory: true)
+        try? store.configure(directory: directory)
+        return store
     }
 }
 
@@ -285,6 +362,18 @@ private struct MockPermissionManager: PermissionManaging {
 
 private struct MockCredentialStore: CredentialStoring {
     func readAPIKey() throws -> String? { "test-key" }
+    func saveAPIKey(_ value: String) throws {}
+    func deleteAPIKey() throws {}
+}
+
+private final class CountingCredentialStore: CredentialStoring, @unchecked Sendable {
+    private(set) var readCount = 0
+
+    func readAPIKey() throws -> String? {
+        readCount += 1
+        return "test-key"
+    }
+
     func saveAPIKey(_ value: String) throws {}
     func deleteAPIKey() throws {}
 }

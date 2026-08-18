@@ -48,18 +48,16 @@ struct KeychainCredentialStore: CredentialStoring {
     func saveAPIKey(_ value: String) throws {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let data = Data(normalized.utf8)
-        let update = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
+        let deleteStatus = SecItemDelete(baseQuery as CFDictionary)
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+            throw CredentialStoreError.unexpectedStatus(deleteStatus)
+        }
 
-        if updateStatus == errSecItemNotFound {
-            var query = baseQuery
-            query[kSecValueData as String] = data
-            let addStatus = SecItemAdd(query as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw CredentialStoreError.unexpectedStatus(addStatus)
-            }
-        } else if updateStatus != errSecSuccess {
-            throw CredentialStoreError.unexpectedStatus(updateStatus)
+        var query = baseQuery
+        query[kSecValueData as String] = data
+        let addStatus = SecItemAdd(query as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw CredentialStoreError.unexpectedStatus(addStatus)
         }
     }
 

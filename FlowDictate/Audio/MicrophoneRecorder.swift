@@ -63,8 +63,8 @@ final class MicrophoneRecorder: AudioRecording {
 
     var isRecording: Bool { engine?.isRunning == true }
 
-    convenience init() {
-        self.init(store: AudioStore())
+    convenience init(locationStore: RecordingLocationStore? = nil) {
+        self.init(store: AudioStore(locationStore: locationStore))
     }
 
     init(store: AudioStore) {
