@@ -15,11 +15,13 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var apiKeyConfigured = false
     @Published private(set) var microphonePermissionGranted = false
     @Published private(set) var accessibilityPermissionGranted = false
+    @Published private(set) var speechPermissionState: SpeechPermissionState = .notDetermined
     @Published private(set) var recordingLocationConfigured = false
     @Published private(set) var recordingLocationPath: String?
     @Published private(set) var historyRecords: [DictationRecord] = []
     @Published private(set) var retryingRecordIDs: Set<UUID> = []
     @Published private(set) var setupMessage: String?
+    @Published private(set) var isPreviewTestRunning = false
 
     let settings: AppSettings
     let launchAtLogin: LaunchAtLoginManager
@@ -43,6 +45,9 @@ final class DictationCoordinator: ObservableObject {
     private let historyStore: DictationHistoryStore
     private let audioStore: AudioStore
     private let transcriptionRunner: TranscriptionRunner
+    private let livePreviewCoordinator: LivePreviewCoordinator
+    private let livePreviewAvailabilityProvider:
+        @MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability
 
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
@@ -52,6 +57,8 @@ final class DictationCoordinator: ObservableObject {
     private var onboardingWindowController: NSWindowController?
     private var historyWindowController: NSWindowController?
     private var audioPlayer: AVAudioPlayer?
+    private var previewTestTask: Task<Void, Never>?
+    private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
     private var didLoadAPIKeyFromKeychain = false
 
@@ -102,6 +109,9 @@ final class DictationCoordinator: ObservableObject {
         recordingLocationStore: RecordingLocationStore,
         historyStore: DictationHistoryStore = DictationHistoryStore(),
         audioStore: AudioStore? = nil,
+        livePreviewProvider: (any LivePreviewProviding)? = nil,
+        livePreviewAvailabilityProvider:
+            (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         automaticallyPresentOnboarding: Bool = false
     ) {
         self.settings = settings
@@ -122,11 +132,45 @@ final class DictationCoordinator: ObservableObject {
         self.historyStore = historyStore
         self.audioStore = audioStore ?? AudioStore(locationStore: recordingLocationStore)
         transcriptionRunner = TranscriptionRunner(historyStore: historyStore)
+        livePreviewCoordinator = LivePreviewCoordinator(
+            provider: livePreviewProvider ?? AppleSpeechLivePreviewProvider()
+        )
+        self.livePreviewAvailabilityProvider = livePreviewAvailabilityProvider
+            ?? { language, permission in
+                LivePreviewAvailabilityResolver.resolve(
+                    language: language,
+                    permission: permission
+                )
+            }
 
         recorder.levelHandler = { [weak self] level in
             let activeLevel = self?.recorder.isRecording == true ? level : 0
             self?.audioLevel = activeLevel
             self?.overlay.updateLevel(activeLevel)
+        }
+        livePreviewCoordinator.stateDidChange = { [weak self] state in
+            self?.overlay.updatePreview(state)
+            switch state {
+            case .waiting:
+                FlowLogger.audio.info("Live Preview recognition started")
+            case .active:
+                if self?.didLogLivePreviewText == false {
+                    self?.didLogLivePreviewText = true
+                    FlowLogger.audio.info("Live Preview produced provisional text")
+                }
+            case let .unavailable(message):
+                self?.recorder.previewBufferHandler = nil
+                FlowLogger.audio.notice(
+                    "Live Preview unavailable: \(message, privacy: .public)"
+                )
+            case let .failed(message):
+                self?.recorder.previewBufferHandler = nil
+                FlowLogger.audio.error(
+                    "Live Preview recognition failed: \(message, privacy: .public)"
+                )
+            case .disabled:
+                break
+            }
         }
 
         registerInitialHotKeys()
@@ -142,7 +186,10 @@ final class DictationCoordinator: ObservableObject {
         FlowLogger.app.info("FlowDictate \(FlowDictateVersion.displayString, privacy: .public) started")
     }
 
-    deinit { overlayDismissTask?.cancel() }
+    deinit {
+        overlayDismissTask?.cancel()
+        previewTestTask?.cancel()
+    }
 
     var primaryActionTitle: String { recorder.isRecording ? "Stop Dictation" : "Start Dictation" }
     var canCancel: Bool { recorder.isRecording }
@@ -165,9 +212,15 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func requestCancel() {
+        if isPreviewTestRunning {
+            previewTestTask?.cancel()
+            return
+        }
         guard recorder.isRecording else { return }
         do {
             let recording = try recorder.stop()
+            recorder.previewBufferHandler = nil
+            livePreviewCoordinator.cancel()
             let target = focusTarget
             focusTarget = nil
             state = .idle
@@ -280,6 +333,7 @@ final class DictationCoordinator: ObservableObject {
     func refreshPermissionStatus() {
         microphonePermissionGranted = permissionManager.hasMicrophoneAccess
         accessibilityPermissionGranted = permissionManager.hasEventPostingAccess
+        speechPermissionState = permissionManager.speechRecognitionStatus
     }
 
     func chooseRecordingDirectory(recommended: Bool) {
@@ -480,6 +534,101 @@ final class DictationCoordinator: ObservableObject {
 
     func openMicrophoneSettings() { permissionManager.openMicrophoneSettings() }
     func openAccessibilitySettings() { permissionManager.openAccessibilitySettings() }
+    func openSpeechRecognitionSettings() { permissionManager.openSpeechRecognitionSettings() }
+    func openKeyboardSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    var livePreviewAvailability: LivePreviewAvailability {
+        livePreviewAvailabilityProvider(settings.transcriptionLanguage, speechPermissionState)
+    }
+
+    func requestSpeechRecognitionPermission() {
+        Task {
+            speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+            switch speechPermissionState {
+            case .authorized:
+                setupMessage = "Speech Recognition is enabled for local Live Preview."
+            case .denied:
+                setupMessage = "Speech Recognition was denied. You can enable it later in System Settings."
+            case .restricted:
+                setupMessage = "Speech Recognition is restricted on this Mac."
+            case .notDetermined:
+                setupMessage = "Speech Recognition permission has not been decided yet."
+            }
+        }
+    }
+
+    func testLivePreview() {
+        guard !isPreviewTestRunning, !recorder.isRecording, state.acceptsStart else { return }
+        guard settings.livePreviewEnabled else {
+            setupMessage = "Enable Live Preview before starting the test."
+            return
+        }
+        isPreviewTestRunning = true
+        previewTestTask = Task { [weak self] in
+            guard let self else { return }
+            var testAudioURL: URL?
+            do {
+                try await permissionManager.ensureMicrophoneAccess()
+                if permissionManager.speechRecognitionStatus == .notDetermined {
+                    speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+                } else {
+                    refreshPermissionStatus()
+                }
+                guard speechPermissionState == .authorized else {
+                    throw FlowPermissionError.speechRecognitionDenied
+                }
+                recorder.selectInputDevice(
+                    try audioDeviceService.deviceID(forUID: settings.inputDeviceUID)
+                )
+                try recorder.start()
+                prepareLivePreview()
+                guard recorder.previewBufferHandler != nil else {
+                    throw LivePreviewProviderError.recognizerUnavailable
+                }
+                overlay.show(status: .recording, reposition: true)
+                setupMessage = "Live Preview test is running for 5 seconds…"
+                try await Task.sleep(for: .seconds(5))
+            } catch is CancellationError {
+                setupMessage = "Live Preview test cancelled."
+            } catch {
+                setupMessage = error.localizedDescription
+                FlowLogger.audio.error(
+                    "Live Preview test could not start: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+
+            if recorder.isRecording {
+                do {
+                    testAudioURL = try recorder.stop().url
+                } catch {
+                    FlowLogger.audio.error(
+                        "Preview test recorder cleanup failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+            }
+            recorder.previewBufferHandler = nil
+            livePreviewCoordinator.cancel()
+            overlay.hide()
+            if let testAudioURL {
+                do { try FileManager.default.removeItem(at: testAudioURL) }
+                catch {
+                    FlowLogger.audio.error(
+                        "Preview test audio cleanup failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+            }
+            if setupMessage?.hasPrefix("Live Preview test is running") == true {
+                setupMessage = "Live Preview test completed."
+            }
+            isPreviewTestRunning = false
+            previewTestTask = nil
+        }
+    }
 
     func requestRequiredPermissions() {
         Task {
@@ -494,7 +643,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func toggleDictation() async {
-        guard !isHandlingToggle else { return }
+        guard !isHandlingToggle, !isPreviewTestRunning else { return }
         isHandlingToggle = true
         defer { isHandlingToggle = false }
         if recorder.isRecording { await stopAndTranscribe() }
@@ -649,6 +798,7 @@ final class DictationCoordinator: ObservableObject {
             refreshPermissionStatus()
             recorder.selectInputDevice(try audioDeviceService.deviceID(forUID: settings.inputDeviceUID))
             try recorder.start()
+            prepareLivePreview()
             overlayDismissTask?.cancel()
             focusTarget = target
             lastExternalFocusTarget = target
@@ -659,6 +809,7 @@ final class DictationCoordinator: ObservableObject {
             recorder.selectInputDevice(nil)
             do {
                 try recorder.start()
+                prepareLivePreview()
                 focusTarget = target
                 lastExternalFocusTarget = target
                 state = .recording
@@ -672,6 +823,9 @@ final class DictationCoordinator: ObservableObject {
         let recording: AudioRecordingResult
         do { recording = try recorder.stop() }
         catch { fail(error, retainedAudioURL: nil); return }
+        recorder.previewBufferHandler = nil
+        livePreviewCoordinator.finish()
+        overlay.show(status: .finalizing)
         guard let target = focusTarget else { fail(TextInsertionError.targetUnavailable, retainedAudioURL: recording.url); return }
 
         var record = makeRecord(from: recording, target: target, status: .recorded)
@@ -683,7 +837,6 @@ final class DictationCoordinator: ObservableObject {
         }
 
         state = .transcribing
-        overlay.show(status: .processing)
         do {
             record = try await transcriptionRunner.run(
                 record: record,
@@ -773,6 +926,42 @@ final class DictationCoordinator: ObservableObject {
         )
     }
 
+    private func prepareLivePreview() {
+        recorder.previewBufferHandler = nil
+        livePreviewCoordinator.cancel()
+        didLogLivePreviewText = false
+        overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
+        guard settings.livePreviewEnabled else {
+            overlay.updatePreview(.disabled)
+            FlowLogger.audio.debug("Live Preview is disabled in Settings")
+            return
+        }
+        let availability = livePreviewAvailability
+        guard case let .available(localeIdentifier) = availability else {
+            overlay.updatePreview(.unavailable(availability.statusText))
+            FlowLogger.audio.notice(
+                "Live Preview was not started: \(availability.statusText, privacy: .public)"
+            )
+            return
+        }
+        FlowLogger.audio.info(
+            "Starting local Live Preview with locale \(localeIdentifier, privacy: .public)"
+        )
+        do {
+            recorder.previewBufferHandler = try livePreviewCoordinator.start(
+                configuration: LivePreviewConfiguration(
+                    localeIdentifier: localeIdentifier,
+                    characterLimit: settings.livePreviewCharacterLimit
+                )
+            )
+        } catch {
+            recorder.previewBufferHandler = nil
+            FlowLogger.audio.notice(
+                "Live Preview could not start: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     private func insertionTarget(for record: DictationRecord) -> FocusTarget? {
         if let current = focusTargetProvider() {
             lastExternalFocusTarget = current
@@ -814,6 +1003,8 @@ final class DictationCoordinator: ObservableObject {
         failMessage(message ?? error.localizedDescription, retainedAudioURL: retainedAudioURL)
     }
     private func failMessage(_ message: String, retainedAudioURL: URL? = nil) {
+        recorder.previewBufferHandler = nil
+        livePreviewCoordinator.cancel()
         state = .failed(message: message, retainedAudioURL: retainedAudioURL)
         focusTarget = nil; audioLevel = 0
         overlay.show(status: .error(message))

@@ -4,6 +4,7 @@ import OSLog
 @MainActor
 final class OpenAITranscriptionProvider: TranscriptionProvider {
     static let maximumAudioFileBytes: Int64 = 24_500_000
+    static let minimumAudioFileBytes: Int64 = 1_024
 
     private let apiKey: String
     private let model: String
@@ -45,6 +46,9 @@ final class OpenAITranscriptionProvider: TranscriptionProvider {
 
         let values = try prepared.fileURL.resourceValues(forKeys: [.fileSizeKey])
         let audioByteCount = Int64(values.fileSize ?? 0)
+        guard audioByteCount >= Self.minimumAudioFileBytes else {
+            throw TranscriptionProviderError.audioFileContainsNoSamples
+        }
         guard audioByteCount <= Self.maximumAudioFileBytes else {
             throw TranscriptionProviderError.audioFileTooLarge(
                 actualBytes: audioByteCount,

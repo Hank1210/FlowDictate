@@ -2,10 +2,12 @@ import AVFoundation
 import AppKit
 import CoreGraphics
 import Foundation
+import Speech
 
 enum FlowPermissionError: LocalizedError {
     case microphoneDenied
     case eventPostingDenied
+    case speechRecognitionDenied
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,8 @@ enum FlowPermissionError: LocalizedError {
             "Microphone access is required. Enable FlowDictate in System Settings → Privacy & Security → Microphone."
         case .eventPostingDenied:
             "Accessibility access is required to paste text. Enable FlowDictate in System Settings → Privacy & Security → Accessibility, then try again."
+        case .speechRecognitionDenied:
+            "Speech Recognition access is unavailable. Live Preview will stay off, but dictation still works."
         }
     }
 }
@@ -21,10 +25,13 @@ enum FlowPermissionError: LocalizedError {
 protocol PermissionManaging {
     func ensureMicrophoneAccess() async throws
     func ensureEventPostingAccess() throws
+    func requestSpeechRecognitionAccess() async -> SpeechPermissionState
     var hasMicrophoneAccess: Bool { get }
     var hasEventPostingAccess: Bool { get }
+    var speechRecognitionStatus: SpeechPermissionState { get }
     func openMicrophoneSettings()
     func openAccessibilitySettings()
+    func openSpeechRecognitionSettings()
 }
 
 struct PermissionManager: PermissionManaging {
@@ -58,12 +65,40 @@ struct PermissionManager: PermissionManaging {
         CGPreflightPostEventAccess()
     }
 
+    func requestSpeechRecognitionAccess() async -> SpeechPermissionState {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: Self.speechState(status))
+            }
+        }
+    }
+
+    var speechRecognitionStatus: SpeechPermissionState {
+        Self.speechState(SFSpeechRecognizer.authorizationStatus())
+    }
+
     func openMicrophoneSettings() {
         openPrivacySettings(anchor: "Privacy_Microphone")
     }
 
     func openAccessibilitySettings() {
         openPrivacySettings(anchor: "Privacy_Accessibility")
+    }
+
+    func openSpeechRecognitionSettings() {
+        openPrivacySettings(anchor: "Privacy_SpeechRecognition")
+    }
+
+    private static func speechState(
+        _ status: SFSpeechRecognizerAuthorizationStatus
+    ) -> SpeechPermissionState {
+        switch status {
+        case .notDetermined: .notDetermined
+        case .authorized: .authorized
+        case .denied: .denied
+        case .restricted: .restricted
+        @unknown default: .restricted
+        }
     }
 
     private func openPrivacySettings(anchor: String) {

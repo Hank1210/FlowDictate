@@ -10,7 +10,7 @@ struct FlowDictateMenu: View {
         Button(coordinator.primaryActionTitle) {
             coordinator.requestToggle()
         }
-        .disabled(coordinator.isProcessing)
+        .disabled(coordinator.isProcessing || coordinator.isPreviewTestRunning)
 
         Button("Cancel Dictation") {
             coordinator.requestCancel()
@@ -160,6 +160,7 @@ struct FlowDictateSettingsView: View {
                     granted: coordinator.accessibilityPermissionGranted,
                     action: coordinator.openAccessibilitySettings
                 )
+                speechRecognitionPermissionRow
             }
 
             Section("Setup") {
@@ -194,6 +195,65 @@ struct FlowDictateSettingsView: View {
                 Text("Click a shortcut, then press a key combination. Escape cancels recording the shortcut.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Live Preview") {
+                Toggle("Show Live Preview", isOn: $settings.livePreviewEnabled)
+                Text(coordinator.livePreviewAvailability.statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if settings.livePreviewEnabled
+                    && coordinator.speechPermissionState == .notDetermined {
+                    Button("Allow Speech Recognition…") {
+                        coordinator.requestSpeechRecognitionPermission()
+                    }
+                } else if settings.livePreviewEnabled
+                    && coordinator.speechPermissionState != .authorized {
+                    Button("Open Speech Recognition Settings") {
+                        coordinator.openSpeechRecognitionSettings()
+                    }
+                }
+                if settings.livePreviewEnabled,
+                   coordinator.speechPermissionState == .authorized,
+                   case .unavailable = coordinator.livePreviewAvailability {
+                    Button("Open Keyboard & Dictation Settings") {
+                        coordinator.openKeyboardSettings()
+                    }
+                }
+
+                Picker("Overlay size", selection: $settings.overlaySize) {
+                    ForEach(OverlaySize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                Picker("Overlay position", selection: $settings.overlayPosition) {
+                    ForEach(OverlayPosition.allCases) { position in
+                        Text(position.title).tag(position)
+                    }
+                }
+                HStack {
+                    Text("Preview characters")
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.livePreviewCharacterLimit) },
+                            set: { settings.livePreviewCharacterLimit = Int($0.rounded()) }
+                        ),
+                        in: 50...800,
+                        step: 25
+                    )
+                    Text("\(settings.livePreviewCharacterLimit)")
+                        .monospacedDigit()
+                        .frame(width: 36, alignment: .trailing)
+                }
+                Button("Test Preview for 5 Seconds…") {
+                    coordinator.testLivePreview()
+                }
+                .disabled(
+                    !settings.livePreviewEnabled
+                        || coordinator.isPreviewTestRunning
+                        || coordinator.isProcessing
+                )
             }
         }
     }
@@ -387,6 +447,35 @@ struct FlowDictateSettingsView: View {
             )
             .foregroundStyle(granted ? .green : .orange)
             Button("Open System Settings", action: action)
+        }
+    }
+
+    private var speechRecognitionPermissionRow: some View {
+        HStack {
+            Text("Speech Recognition")
+            Spacer()
+            Label(
+                coordinator.speechPermissionState.title,
+                systemImage: coordinator.speechPermissionState == .authorized
+                    ? "checkmark.circle.fill"
+                    : "exclamationmark.circle"
+            )
+            .foregroundStyle(
+                coordinator.speechPermissionState == .authorized ? .green : .orange
+            )
+
+            switch coordinator.speechPermissionState {
+            case .notDetermined:
+                Button("Allow…") {
+                    coordinator.requestSpeechRecognitionPermission()
+                }
+            case .denied, .restricted:
+                Button("Open System Settings") {
+                    coordinator.openSpeechRecognitionSettings()
+                }
+            case .authorized:
+                EmptyView()
+            }
         }
     }
 }

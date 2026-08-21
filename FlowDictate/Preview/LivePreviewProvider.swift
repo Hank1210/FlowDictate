@@ -20,7 +20,8 @@ protocol LivePreviewProviding: AnyObject {
     func start(
         buffers: AsyncStream<LivePreviewAudioBuffer>,
         localeIdentifier: String,
-        updateHandler: @escaping @MainActor (String) -> Void
+        eventHandler: @escaping @MainActor (LivePreviewEvent) -> Void
     ) throws
-    func stop()
+    func finish()
+    func cancel()
 }

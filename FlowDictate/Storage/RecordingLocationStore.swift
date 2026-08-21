@@ -31,6 +31,7 @@ final class RecordingLocationStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let lock = NSLock()
     private var activeDirectory: URL?
+    private var activeDirectoryUsesSecurityScope = false
 
     init(defaults: UserDefaults = .standard, fileManager: FileManager = .default) {
         self.defaults = defaults
@@ -38,7 +39,9 @@ final class RecordingLocationStore: @unchecked Sendable {
     }
 
     deinit {
-        activeDirectory?.stopAccessingSecurityScopedResource()
+        if activeDirectoryUsesSecurityScope {
+            activeDirectory?.stopAccessingSecurityScopedResource()
+        }
     }
 
     var isConfigured: Bool {
@@ -57,8 +60,11 @@ final class RecordingLocationStore: @unchecked Sendable {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: activeDirectory.path, isDirectory: &isDirectory),
                   isDirectory.boolValue else {
-                activeDirectory.stopAccessingSecurityScopedResource()
+                if activeDirectoryUsesSecurityScope {
+                    activeDirectory.stopAccessingSecurityScopedResource()
+                }
                 self.activeDirectory = nil
+                activeDirectoryUsesSecurityScope = false
                 throw RecordingLocationError.bookmarkInvalid
             }
             return activeDirectory
@@ -81,26 +87,25 @@ final class RecordingLocationStore: @unchecked Sendable {
             throw RecordingLocationError.bookmarkInvalid
         }
 
-        guard url.startAccessingSecurityScopedResource() else {
-            throw RecordingLocationError.accessDenied
-        }
+        let usesSecurityScope = url.startAccessingSecurityScopedResource()
 
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            url.stopAccessingSecurityScopedResource()
+            if usesSecurityScope { url.stopAccessingSecurityScopedResource() }
             throw RecordingLocationError.bookmarkInvalid
         }
         guard fileManager.isWritableFile(atPath: url.path) else {
-            url.stopAccessingSecurityScopedResource()
+            if usesSecurityScope { url.stopAccessingSecurityScopedResource() }
             throw RecordingLocationError.accessDenied
         }
         do {
             if isStale { try saveBookmark(for: url) }
         } catch {
-            url.stopAccessingSecurityScopedResource()
+            if usesSecurityScope { url.stopAccessingSecurityScopedResource() }
             throw error
         }
         activeDirectory = url
+        activeDirectoryUsesSecurityScope = usesSecurityScope
         return url
     }
 
@@ -169,9 +174,13 @@ final class RecordingLocationStore: @unchecked Sendable {
     private func deactivateDirectoryAccess() {
         lock.lock()
         let directory = activeDirectory
+        let usesSecurityScope = activeDirectoryUsesSecurityScope
         activeDirectory = nil
+        activeDirectoryUsesSecurityScope = false
         lock.unlock()
-        directory?.stopAccessingSecurityScopedResource()
+        if usesSecurityScope {
+            directory?.stopAccessingSecurityScopedResource()
+        }
     }
 
     private func saveBookmark(for url: URL) throws {

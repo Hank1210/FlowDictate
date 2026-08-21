@@ -127,14 +127,38 @@ struct OnboardingView: View {
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label("Allow system access", systemImage: "checkmark.shield.fill").font(.title2.bold())
-            Text("Microphone access records your voice. Accessibility access lets FlowDictate paste the transcript into the app that had focus.")
+            Text("Microphone records your voice. Speech Recognition can show an optional local live preview. Accessibility lets FlowDictate paste the final transcript.")
                 .foregroundStyle(.secondary)
             statusRow("Microphone", value: coordinator.microphonePermissionGranted ? "Allowed" : "Required",
                       ready: coordinator.microphonePermissionGranted)
             statusRow("Accessibility", value: coordinator.accessibilityPermissionGranted ? "Allowed" : "Required",
                       ready: coordinator.accessibilityPermissionGranted)
+            statusRow(
+                "Speech Recognition (optional)",
+                value: coordinator.speechPermissionState.title,
+                ready: coordinator.speechPermissionState == .authorized
+                    || !coordinator.settings.livePreviewEnabled
+            )
+            Toggle(
+                "Show local Live Preview while recording",
+                isOn: Binding(
+                    get: { coordinator.settings.livePreviewEnabled },
+                    set: { coordinator.settings.livePreviewEnabled = $0 }
+                )
+            )
             HStack {
                 Button("Request Permissions") { coordinator.requestRequiredPermissions() }
+                if coordinator.settings.livePreviewEnabled
+                    && coordinator.speechPermissionState == .notDetermined {
+                    Button("Allow Live Preview") {
+                        coordinator.requestSpeechRecognitionPermission()
+                    }
+                } else if coordinator.settings.livePreviewEnabled
+                    && coordinator.speechPermissionState != .authorized {
+                    Button("Speech Recognition Settings") {
+                        coordinator.openSpeechRecognitionSettings()
+                    }
+                }
                 Button("Microphone Settings") { coordinator.openMicrophoneSettings() }
                 Button("Accessibility Settings") { coordinator.openAccessibilitySettings() }
             }

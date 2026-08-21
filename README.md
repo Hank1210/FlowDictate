@@ -1,10 +1,10 @@
 # FlowDictate
 
-FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 2 as specified in `FlowDictate_PRD_Phase_2.md`.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 2 plus the Phase 3.1 Live Preview described in `FlowDictate_PRD_Phase_3.md`.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
-## Phase 2 features
+## Current features
 
 - global start/stop and cancel shortcuts
 - microphone recording with local WAV backup
@@ -24,8 +24,11 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - manual retry plus bounded automatic retry for temporary provider failures
 - configurable Restore Last Dictation hotkey
 - separate, configurable retention for successful audio and visible history while failed recordings remain protected
+- optional on-device Apple Speech Live Preview while recording
+- compact, standard and expanded non-activating overlays with configurable placement
+- an explicit five-second Preview test that never calls OpenAI or writes to History
 
-Writing styles, personal dictionary, local speech models, statistics and streaming remain reserved for later phases.
+Writing styles, personal dictionary, local final transcription, statistics and cloud streaming remain reserved for later phases.
 
 ## Requirements
 
@@ -39,7 +42,7 @@ Writing styles, personal dictionary, local speech models, statistics and streami
 2. Follow the first-run setup assistant.
 3. Confirm `Documents/Recordings` or choose another recordings folder.
 4. Enter and verify the owner's OpenAI API key; it is stored in macOS Keychain.
-5. Grant Microphone and Accessibility permissions when prompted.
+5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for Live Preview.
 6. Place the cursor in another application and press Option + Space.
 7. Speak, then press Option + Space again to transcribe and insert the text.
 
@@ -50,7 +53,7 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 ## Settings
 
 - **General:** launch at login and permission status
-- **Dictation:** start/stop, cancel and restore-last shortcuts
+- **Dictation:** shortcuts plus Live Preview, overlay size, position, text limit and Preview test
 - **Audio:** input device and live level
 - **Transcription:** Keychain credential, OpenAI model and automatic/German/English recognition
 - **Storage:** recordings folder, retention and Phase 1 migration
@@ -77,6 +80,8 @@ Prebuilt Community editions are published separately under [GitHub Releases](htt
 ## Privacy
 
 FlowDictate contains no analytics, advertising or developer-operated backend. Recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
+
+Live Preview uses Apple's on-device speech recognizer only. Its provisional text stays in memory and is never stored, logged, inserted into another app or used as the final transcript.
 
 ## License
 
@@ -105,13 +110,11 @@ xcodebuild test \
 
 The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
-Automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded preview buffering, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement and insertion into third-party applications require manual macOS testing.
-
-The pre-Phase-3.1 foundation includes a bounded single-tap audio-buffer path and a local Apple Speech provider abstraction. It is deliberately not connected to the user interface yet; Live Preview remains disabled until Phase 3.1 implements its complete lifecycle, permission guidance and fallback behavior.
+Automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded Preview buffering, Preview lifecycle and failure isolation, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement and insertion into third-party applications require manual macOS testing.
 
 The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
 
-## Phase 2 manual verification
+## Manual verification
 
 Test short, long, German, English and mixed-language dictation in Notes, Safari, Chrome, Mail, VS Code and Word or an equivalent editor. Also verify:
 
@@ -125,3 +128,8 @@ Test short, long, German, English and mixed-language dictation in Notes, Safari,
 - `Documents/Recordings` access survives an app restart
 - Restore Last Dictation inserts at the current cursor
 - launch at login works from an installed, consistently signed build; if macOS requires approval, follow the link to Login Items shown in Settings
+- Live Preview works for German and English and is clearly marked as provisional
+- denying Speech Recognition or using an unsupported locale does not interrupt recording or final transcription
+- disabling Live Preview causes no Speech prompt and leaves normal dictation unchanged
+- Compact, Standard and Expanded remain non-activating at every supported position
+- the five-second Preview test deletes its temporary recording and creates no History entry

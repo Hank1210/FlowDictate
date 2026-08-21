@@ -152,6 +152,10 @@ struct FlowDictateTests {
         settings.audioRetentionDays = 90
         settings.historyRetentionDays = 365
         settings.historyMaximumRecordCount = 500
+        settings.livePreviewEnabled = true
+        settings.overlaySize = .expanded
+        settings.livePreviewCharacterLimit = 320
+        settings.overlayPosition = .bottomCenter
 
         let restored = AppSettings(defaults: defaults)
 
@@ -167,6 +171,31 @@ struct FlowDictateTests {
         #expect(restored.audioRetentionDays == 90)
         #expect(restored.historyRetentionDays == 365)
         #expect(restored.historyMaximumRecordCount == 500)
+        #expect(restored.livePreviewEnabled)
+        #expect(restored.overlaySize == .expanded)
+        #expect(restored.livePreviewCharacterLimit == 320)
+        #expect(restored.overlayPosition == .bottomCenter)
+    }
+
+    @MainActor
+    @Test func livePreviewDefaultsAreMigrationSafeAndCharacterLimitIsClamped() {
+        let newSuite = "FlowDictateNewPreviewSettings-\(UUID())"
+        let newDefaults = UserDefaults(suiteName: newSuite)!
+        defer { newDefaults.removePersistentDomain(forName: newSuite) }
+        let newSettings = AppSettings(defaults: newDefaults)
+        #expect(newSettings.livePreviewEnabled)
+        #expect(newSettings.overlaySize == .standard)
+        #expect(newSettings.livePreviewCharacterLimit == 150)
+        #expect(newSettings.overlayPosition == .bottomTrailing)
+        newSettings.livePreviewCharacterLimit = 5_000
+        #expect(newSettings.livePreviewCharacterLimit == 800)
+
+        let existingSuite = "FlowDictateExistingPreviewSettings-\(UUID())"
+        let existingDefaults = UserDefaults(suiteName: existingSuite)!
+        defer { existingDefaults.removePersistentDomain(forName: existingSuite) }
+        existingDefaults.set(2, forKey: "onboardingVersion")
+        let existingSettings = AppSettings(defaults: existingDefaults)
+        #expect(!existingSettings.livePreviewEnabled)
     }
 
     @Test func transcriptionLanguageMapsAutomaticToNil() {
@@ -236,6 +265,41 @@ struct FlowDictateTests {
 
         #expect(harness.inserter.insertCount == 2)
         #expect(harness.inserter.insertedText == "Transcribed text")
+    }
+
+    @MainActor
+    @Test func previewFailureDoesNotInterruptRecordingOrFinalTranscription() async throws {
+        let previewProvider = MockLivePreviewProvider()
+        let harness = makeCoordinatorHarness(
+            livePreviewProvider: previewProvider,
+            livePreviewEnabled: true
+        )
+
+        await harness.coordinator.toggleDictation()
+        #expect(harness.recorder.previewBufferHandler != nil)
+        #expect(previewProvider.startCount == 1)
+        previewProvider.emit(.failed("Preview test failure"))
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.recorder.previewBufferHandler == nil)
+
+        await harness.coordinator.toggleDictation()
+        #expect(harness.provider.transcribeCount == 1)
+        #expect(harness.inserter.insertCount == 1)
+        #expect(harness.coordinator.state == .success)
+    }
+
+    @MainActor
+    @Test func disabledPreviewDoesNotStartProviderOrAttachAudioHandler() async throws {
+        let previewProvider = MockLivePreviewProvider()
+        let harness = makeCoordinatorHarness(livePreviewProvider: previewProvider)
+
+        await harness.coordinator.toggleDictation()
+
+        #expect(harness.coordinator.state == .recording)
+        #expect(previewProvider.startCount == 0)
+        #expect(harness.recorder.previewBufferHandler == nil)
+
+        harness.coordinator.requestCancel()
     }
 
     @MainActor
@@ -446,6 +510,37 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func livePreviewCoordinatorLimitsTextAndIgnoresEventsAfterCancel() async throws {
+        let provider = MockLivePreviewProvider()
+        let coordinator = LivePreviewCoordinator(
+            provider: provider,
+            updateInterval: .milliseconds(1)
+        )
+        var states: [LivePreviewState] = []
+        coordinator.stateDidChange = { states.append($0) }
+        let handler = try coordinator.start(configuration: LivePreviewConfiguration(
+            localeIdentifier: "de-DE",
+            characterLimit: 50
+        ))
+        handler(LivePreviewAudioBuffer(
+            sampleRate: 16_000,
+            channelCount: 1,
+            frameCount: 1,
+            channelSamples: [[0]]
+        ))
+        provider.emit(.partial(String(repeating: "a", count: 70)))
+        try await Task.sleep(for: .milliseconds(10))
+
+        #expect(provider.startCount == 1)
+        #expect(states.contains(.active(String(repeating: "a", count: 50))))
+        coordinator.cancel()
+        provider.emit(.partial("must be ignored"))
+        try await Task.sleep(for: .milliseconds(10))
+        #expect(coordinator.state == .disabled)
+        #expect(provider.cancelCount >= 1)
+    }
+
+    @MainActor
     @Test func transcriptionRunnerRetriesTemporaryFailure() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateRunner-\(UUID()).json")
@@ -488,7 +583,9 @@ struct FlowDictateTests {
 
     @MainActor
     private func makeCoordinatorHarness(
-        credentialStore: any CredentialStoring = MockCredentialStore()
+        credentialStore: any CredentialStoring = MockCredentialStore(),
+        livePreviewProvider: (any LivePreviewProviding)? = nil,
+        livePreviewEnabled: Bool = false
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -508,9 +605,11 @@ struct FlowDictateTests {
             localizedName: "FlowDictate Tests"
         )
         let focusTargetBox = FocusTargetBox(target)
+        let settings = AppSettings(defaults: defaults)
+        settings.livePreviewEnabled = livePreviewEnabled
 
         let coordinator = DictationCoordinator(
-            settings: AppSettings(defaults: defaults),
+            settings: settings,
             dictationHotKeyRegistrar: MockHotKeyRegistrar(),
             cancelHotKeyRegistrar: MockHotKeyRegistrar(),
             restoreHotKeyRegistrar: MockHotKeyRegistrar(),
@@ -528,7 +627,11 @@ struct FlowDictateTests {
             historyStore: DictationHistoryStore(
                 fileURL: FileManager.default.temporaryDirectory
                     .appendingPathComponent("FlowDictateHistory-\(UUID()).json")
-            )
+            ),
+            livePreviewProvider: livePreviewProvider,
+            livePreviewAvailabilityProvider: { _, _ in
+                .available(localeIdentifier: "de-DE")
+            }
         )
 
         return CoordinatorHarness(
@@ -628,6 +731,28 @@ private final class RetryingMockTranscriptionProvider: TranscriptionProvider {
 }
 
 @MainActor
+private final class MockLivePreviewProvider: LivePreviewProviding {
+    var isAvailable = true
+    private(set) var startCount = 0
+    private(set) var finishCount = 0
+    private(set) var cancelCount = 0
+    private var eventHandler: (@MainActor (LivePreviewEvent) -> Void)?
+
+    func start(
+        buffers: AsyncStream<LivePreviewAudioBuffer>,
+        localeIdentifier: String,
+        eventHandler: @escaping @MainActor (LivePreviewEvent) -> Void
+    ) throws {
+        startCount += 1
+        self.eventHandler = eventHandler
+    }
+
+    func finish() { finishCount += 1 }
+    func cancel() { cancelCount += 1 }
+    func emit(_ event: LivePreviewEvent) { eventHandler?(event) }
+}
+
+@MainActor
 private final class MockTextInserter: TextInserting {
     private(set) var insertCount = 0
     private(set) var insertedText: String?
@@ -654,8 +779,11 @@ private struct MockPermissionManager: PermissionManaging {
     func ensureEventPostingAccess() throws {}
     var hasMicrophoneAccess: Bool { true }
     var hasEventPostingAccess: Bool { true }
+    var speechRecognitionStatus: SpeechPermissionState { .authorized }
+    func requestSpeechRecognitionAccess() async -> SpeechPermissionState { .authorized }
     func openMicrophoneSettings() {}
     func openAccessibilitySettings() {}
+    func openSpeechRecognitionSettings() {}
 }
 
 private struct MockCredentialStore: CredentialStoring {
@@ -703,12 +831,17 @@ private struct MockAudioDeviceService: AudioDeviceServing {
 private final class MockRecordingOverlay: RecordingOverlayPresenting {
     private(set) var presentations: [OverlayStatus] = []
     private(set) var hideCount = 0
+    private(set) var previewStates: [LivePreviewState] = []
 
     func show(status: OverlayStatus, level: Float, reposition: Bool) {
         presentations.append(status)
     }
 
     func updateLevel(_ level: Float) {}
+
+    func updatePreview(_ state: LivePreviewState) { previewStates.append(state) }
+
+    func configure(size: OverlaySize, position: OverlayPosition) {}
 
     func hide() {
         hideCount += 1

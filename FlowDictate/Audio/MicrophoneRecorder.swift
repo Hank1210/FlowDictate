@@ -100,13 +100,18 @@ final class MicrophoneRecorder: AudioRecording {
             }
         }
 
-        let format = inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
+        let hardwareFormat = inputNode.inputFormat(forBus: 0)
+        let tapFormat = inputNode.outputFormat(forBus: 0)
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0,
+              tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
             throw AudioRecorderError.unavailableInput
         }
+        FlowLogger.audio.info(
+            "Opening microphone: hardware \(hardwareFormat.sampleRate, privacy: .public) Hz/\(hardwareFormat.channelCount, privacy: .public) ch, tap \(tapFormat.sampleRate, privacy: .public) Hz/\(tapFormat.channelCount, privacy: .public) ch"
+        )
 
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+        let file = try AVAudioFile(forWriting: url, settings: tapFormat.settings)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
             do {
                 try file.write(from: buffer)
             } catch {

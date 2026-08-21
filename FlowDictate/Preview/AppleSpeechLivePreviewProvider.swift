@@ -1,8 +1,10 @@
 import Foundation
+import OSLog
 import Speech
 
 @MainActor
 final class AppleSpeechLivePreviewProvider: LivePreviewProviding {
+    private var recognizer: SFSpeechRecognizer?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var feedTask: Task<Void, Never>?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -14,9 +16,9 @@ final class AppleSpeechLivePreviewProvider: LivePreviewProviding {
     func start(
         buffers: AsyncStream<LivePreviewAudioBuffer>,
         localeIdentifier: String,
-        updateHandler: @escaping @MainActor (String) -> Void
+        eventHandler: @escaping @MainActor (LivePreviewEvent) -> Void
     ) throws {
-        stop()
+        cancel()
         guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
             throw LivePreviewProviderError.permissionDenied
         }
@@ -25,20 +27,36 @@ final class AppleSpeechLivePreviewProvider: LivePreviewProviding {
               recognizer.supportsOnDeviceRecognition else {
             throw LivePreviewProviderError.recognizerUnavailable
         }
+        self.recognizer = recognizer
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
+        request.taskHint = .dictation
+        request.addsPunctuation = true
         self.request = request
 
         recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-            guard error == nil, let result else { return }
-            let text = result.bestTranscription.formattedString
-            Task { @MainActor in updateHandler(text) }
+            if let error {
+                Task { @MainActor in eventHandler(.failed(error.localizedDescription)) }
+                return
+            }
+            guard let result else { return }
+            let event: LivePreviewEvent = result.isFinal
+                ? .finalSegment(result.bestTranscription.formattedString)
+                : .partial(result.bestTranscription.formattedString)
+            Task { @MainActor in eventHandler(event) }
         }
 
         feedTask = Task {
+            var didLogFirstBuffer = false
             for await buffer in buffers {
+                if !didLogFirstBuffer {
+                    didLogFirstBuffer = true
+                    FlowLogger.audio.info(
+                        "Live Preview received audio: \(buffer.sampleRate, privacy: .public) Hz, \(buffer.channelCount, privacy: .public) channel(s)"
+                    )
+                }
                 guard !Task.isCancelled, let pcmBuffer = buffer.makePCMBuffer() else { continue }
                 request.append(pcmBuffer)
             }
@@ -46,13 +64,22 @@ final class AppleSpeechLivePreviewProvider: LivePreviewProviding {
         }
     }
 
-    func stop() {
+    func finish() {
+        cleanup()
+    }
+
+    func cancel() {
+        cleanup()
+    }
+
+    private func cleanup() {
         feedTask?.cancel()
         feedTask = nil
         request?.endAudio()
         request = nil
         recognitionTask?.cancel()
         recognitionTask = nil
+        recognizer = nil
     }
 
     deinit {

@@ -38,6 +38,10 @@ final class AppSettings: ObservableObject {
         static let audioRetentionDays = "audioRetentionDays"
         static let historyRetentionDays = "historyRetentionDays"
         static let historyMaximumRecordCount = "historyMaximumRecordCount"
+        static let livePreviewEnabled = "livePreviewEnabled"
+        static let overlaySize = "overlaySize"
+        static let livePreviewCharacterLimit = "livePreviewCharacterLimit"
+        static let overlayPosition = "overlayPosition"
     }
 
     private let defaults: UserDefaults
@@ -98,6 +102,28 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(historyMaximumRecordCount, forKey: Key.historyMaximumRecordCount) }
     }
 
+    @Published var livePreviewEnabled: Bool {
+        didSet { defaults.set(livePreviewEnabled, forKey: Key.livePreviewEnabled) }
+    }
+
+    @Published var overlaySize: OverlaySize {
+        didSet { defaults.set(overlaySize.rawValue, forKey: Key.overlaySize) }
+    }
+
+    @Published var livePreviewCharacterLimit: Int {
+        didSet {
+            let clamped = min(max(livePreviewCharacterLimit, 50), 800)
+            if clamped != livePreviewCharacterLimit {
+                livePreviewCharacterLimit = clamped
+            }
+            defaults.set(clamped, forKey: Key.livePreviewCharacterLimit)
+        }
+    }
+
+    @Published var overlayPosition: OverlayPosition {
+        didSet { defaults.set(overlayPosition.rawValue, forKey: Key.overlayPosition) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -141,6 +167,20 @@ final class AppSettings: ObservableObject {
         } else {
             historyMaximumRecordCount = existingInstallation ? -1 : 1_000
         }
+
+        if let storedLivePreview = defaults.object(forKey: Key.livePreviewEnabled) as? Bool {
+            livePreviewEnabled = storedLivePreview
+        } else {
+            livePreviewEnabled = !existingInstallation
+        }
+        overlaySize = OverlaySize(
+            rawValue: defaults.string(forKey: Key.overlaySize) ?? ""
+        ) ?? .standard
+        let storedPreviewLimit = defaults.object(forKey: Key.livePreviewCharacterLimit) as? Int
+        livePreviewCharacterLimit = min(max(storedPreviewLimit ?? 150, 50), 800)
+        overlayPosition = OverlayPosition(
+            rawValue: defaults.string(forKey: Key.overlayPosition) ?? ""
+        ) ?? .bottomTrailing
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

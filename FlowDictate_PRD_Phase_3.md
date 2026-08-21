@@ -7,7 +7,7 @@
 **Teilphasen:** 3.1 Live Preview, 3.2 Smart Dictation, 3.3 App Integration & Delivery
 **Zielplattform:** macOS 14 oder neuer
 **Technologie:** Swift, SwiftUI, AppKit, AVFoundation, Speech, Accessibility APIs
-**Status:** Umsetzungsgrundlage
+**Status:** Phase 3.1 technisch umgesetzt; manuelle Abnahme ausstehend. Phasen 3.2 und 3.3 geplant.
 
 ---
 
