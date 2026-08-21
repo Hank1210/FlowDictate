@@ -74,7 +74,19 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var audioRelativePath: String
     var audioFileSize: Int64
     var originalTranscript: String?
+    var formattedTranscript: String? = nil
+    var dictionaryTranscript: String? = nil
     var finalText: String?
+    var writingStyleID: UUID? = BuiltInWritingStyles.originalID
+    var processingStatus: SmartProcessingStatus = .notStarted
+    var enhancementProviderID: String? = nil
+    var enhancementModelID: String? = nil
+    var enhancementAttemptCount: Int = 0
+    var enhancementErrorCategory: DictationErrorCategory? = nil
+    var enhancementErrorMessage: String? = nil
+    var enhancementFallback: SmartDictationFallback? = nil
+    var dictionaryReplacementCount: Int = 0
+    var spokenFormattingEnabled: Bool = false
     var providerID: String
     var modelID: String
     var language: String?
@@ -104,8 +116,18 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
         return !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    nonisolated var canRetryEnhancement: Bool {
+        processingStatus == .enhancementFailed
+            && dictionaryTranscript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            && writingStyleID != nil
+            && writingStyleID != BuiltInWritingStyles.originalID
+    }
+
     nonisolated var isAutomaticallyProtected: Bool {
-        switch status {
+        if processingStatus == .enhancing || processingStatus == .enhancementFailed {
+            return true
+        }
+        return switch status {
         case .transcriptionFailed, .insertionFailed, .insertionUnknown, .recovered,
              .audioMissing, .audioCorrupt, .transcribing, .inserting:
             true
@@ -195,5 +217,61 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
             message: "Recovered from the Phase 1 recordings folder.",
             now: now
         )
+    }
+}
+
+extension DictationRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id, createdAt, recordingStartedAt, recordingEndedAt, duration, status
+        case audioRelativePath, audioFileSize, originalTranscript, formattedTranscript
+        case dictionaryTranscript, finalText, writingStyleID, processingStatus
+        case enhancementProviderID, enhancementModelID, enhancementAttemptCount
+        case enhancementErrorCategory, enhancementErrorMessage, dictionaryReplacementCount
+        case enhancementFallback, spokenFormattingEnabled, providerID, modelID, language
+        case targetBundleIdentifier, targetApplicationName, attemptCount, lastAttemptAt
+        case errorCategory, errorCode, errorMessage, cancelled, updatedAt, schemaVersion, archivedAt
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        recordingStartedAt = try values.decode(Date.self, forKey: .recordingStartedAt)
+        recordingEndedAt = try values.decode(Date.self, forKey: .recordingEndedAt)
+        duration = try values.decode(TimeInterval.self, forKey: .duration)
+        status = try values.decode(DictationRecordStatus.self, forKey: .status)
+        audioRelativePath = try values.decode(String.self, forKey: .audioRelativePath)
+        audioFileSize = try values.decode(Int64.self, forKey: .audioFileSize)
+        originalTranscript = try values.decodeIfPresent(String.self, forKey: .originalTranscript)
+        formattedTranscript = try values.decodeIfPresent(String.self, forKey: .formattedTranscript)
+        dictionaryTranscript = try values.decodeIfPresent(String.self, forKey: .dictionaryTranscript)
+        finalText = try values.decodeIfPresent(String.self, forKey: .finalText)
+        writingStyleID = try values.decodeIfPresent(UUID.self, forKey: .writingStyleID)
+            ?? BuiltInWritingStyles.originalID
+        let inferredStatus: SmartProcessingStatus = originalTranscript == nil ? .notStarted : .completed
+        processingStatus = try values.decodeIfPresent(SmartProcessingStatus.self, forKey: .processingStatus)
+            ?? inferredStatus
+        enhancementProviderID = try values.decodeIfPresent(String.self, forKey: .enhancementProviderID)
+        enhancementModelID = try values.decodeIfPresent(String.self, forKey: .enhancementModelID)
+        enhancementAttemptCount = try values.decodeIfPresent(Int.self, forKey: .enhancementAttemptCount) ?? 0
+        enhancementErrorCategory = try values.decodeIfPresent(DictationErrorCategory.self, forKey: .enhancementErrorCategory)
+        enhancementErrorMessage = try values.decodeIfPresent(String.self, forKey: .enhancementErrorMessage)
+        enhancementFallback = try values.decodeIfPresent(SmartDictationFallback.self, forKey: .enhancementFallback)
+        dictionaryReplacementCount = try values.decodeIfPresent(Int.self, forKey: .dictionaryReplacementCount) ?? 0
+        spokenFormattingEnabled = try values.decodeIfPresent(Bool.self, forKey: .spokenFormattingEnabled) ?? false
+        providerID = try values.decode(String.self, forKey: .providerID)
+        modelID = try values.decode(String.self, forKey: .modelID)
+        language = try values.decodeIfPresent(String.self, forKey: .language)
+        targetBundleIdentifier = try values.decodeIfPresent(String.self, forKey: .targetBundleIdentifier)
+        targetApplicationName = try values.decodeIfPresent(String.self, forKey: .targetApplicationName)
+        attemptCount = try values.decode(Int.self, forKey: .attemptCount)
+        lastAttemptAt = try values.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
+        errorCategory = try values.decodeIfPresent(DictationErrorCategory.self, forKey: .errorCategory)
+        errorCode = try values.decodeIfPresent(String.self, forKey: .errorCode)
+        errorMessage = try values.decodeIfPresent(String.self, forKey: .errorMessage)
+        cancelled = try values.decode(Bool.self, forKey: .cancelled)
+        updatedAt = try values.decode(Date.self, forKey: .updatedAt)
+        schemaVersion = FlowDictateVersion.dictationRecordSchema
+        archivedAt = try values.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 }

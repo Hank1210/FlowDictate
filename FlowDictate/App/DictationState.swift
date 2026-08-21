@@ -4,6 +4,7 @@ enum DictationState: Equatable {
     case idle
     case recording
     case transcribing
+    case enhancing
     case inserting
     case success
     case failed(message: String, retainedAudioURL: URL?)
@@ -16,6 +17,8 @@ enum DictationState: Equatable {
             "Recording"
         case .transcribing:
             "Transcribing"
+        case .enhancing:
+            "Improving text"
         case .inserting:
             "Inserting"
         case .success:
@@ -31,7 +34,7 @@ enum DictationState: Equatable {
             "waveform"
         case .recording:
             "record.circle.fill"
-        case .transcribing, .inserting:
+        case .transcribing, .enhancing, .inserting:
             "ellipsis.circle"
         case .success:
             "checkmark.circle"
@@ -44,7 +47,7 @@ enum DictationState: Equatable {
         switch self {
         case .idle, .success, .failed:
             true
-        case .recording, .transcribing, .inserting:
+        case .recording, .transcribing, .enhancing, .inserting:
             false
         }
     }

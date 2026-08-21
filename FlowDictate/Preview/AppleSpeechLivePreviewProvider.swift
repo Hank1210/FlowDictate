@@ -57,8 +57,8 @@ final class AppleSpeechLivePreviewProvider: LivePreviewProviding {
                         "Live Preview received audio: \(buffer.sampleRate, privacy: .public) Hz, \(buffer.channelCount, privacy: .public) channel(s)"
                     )
                 }
-                guard !Task.isCancelled, let pcmBuffer = buffer.makePCMBuffer() else { continue }
-                request.append(pcmBuffer)
+                guard !Task.isCancelled, let speechBuffer = buffer.makePCMBuffer() else { continue }
+                request.append(speechBuffer)
             }
             request.endAudio()
         }

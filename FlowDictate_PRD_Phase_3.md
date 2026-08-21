@@ -7,7 +7,7 @@
 **Teilphasen:** 3.1 Live Preview, 3.2 Smart Dictation, 3.3 App Integration & Delivery
 **Zielplattform:** macOS 14 oder neuer
 **Technologie:** Swift, SwiftUI, AppKit, AVFoundation, Speech, Accessibility APIs
-**Status:** Phase 3.1 technisch umgesetzt; manuelle Abnahme ausstehend. Phasen 3.2 und 3.3 geplant.
+**Status:** Phasen 3.1 und 3.2 technisch umgesetzt; manuelle Abnahme von 3.2 ausstehend. Phase 3.3 geplant.
 
 ---
 
@@ -46,10 +46,10 @@ Phase 2 enthält bereits:
 
 ### 2.1 Aktuelle Einschränkungen
 
-- Während der Aufnahme zeigt das Overlay nur Status und Audiopegel, aber keinen Text.
+- Während der Aufnahme ist eine optionale lokale Live Preview verfügbar.
 - Das OpenAI-Ergebnis entsteht erst nach dem Stoppen der Aufnahme.
-- Rohtranskript und eingefügter Text sind inhaltlich identisch.
-- Es gibt keine Schreibstile, gesprochenen Formatierungsbefehle oder persönliche Ersetzungen.
+- Rohtranskript und verarbeitete Textstufen werden getrennt gespeichert.
+- Schreibstile, gesprochene Formatierungsbefehle und persönliche Ersetzungen sind in Phase 3.2 umgesetzt.
 - Einstellungen gelten global und nicht abhängig von der Ziel-App.
 - Texte werden primär über die Zwischenablage eingefügt.
 - Es gibt keinen gedrückt-halten-Modus und keine fortlaufende Diktierkette.

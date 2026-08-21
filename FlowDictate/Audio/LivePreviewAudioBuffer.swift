@@ -32,6 +32,8 @@ nonisolated struct LivePreviewAudioBuffer: Sendable {
         }
     }
 
+    // Rebuild the Speech buffer on the feed task, outside the real-time audio
+    // callback. Immutable samples cannot be overwritten by a later tap.
     nonisolated func makePCMBuffer() -> AVAudioPCMBuffer? {
         guard
             let format = AVAudioFormat(
@@ -50,9 +52,8 @@ nonisolated struct LivePreviewAudioBuffer: Sendable {
         buffer.frameLength = AVAudioFrameCount(frameCount)
         for channel in 0..<channelCount {
             channelSamples[channel].withUnsafeBufferPointer { samples in
-                if let address = samples.baseAddress {
-                    channels[channel].update(from: address, count: frameCount)
-                }
+                guard let address = samples.baseAddress else { return }
+                channels[channel].update(from: address, count: frameCount)
             }
         }
         return buffer

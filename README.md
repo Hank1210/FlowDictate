@@ -1,6 +1,6 @@
 # FlowDictate
 
-FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 2 plus the Phase 3.1 Live Preview described in `FlowDictate_PRD_Phase_3.md`.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current repository implements Phase 2, Phase 3.1 Live Preview and Phase 3.2 Smart Dictation described in `FlowDictate_PRD_Phase_3.md`.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
@@ -27,8 +27,14 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - optional on-device Apple Speech Live Preview while recording
 - compact, standard and expanded non-activating overlays with configurable placement
 - an explicit five-second Preview test that never calls OpenAI or writes to History
+- deterministic spoken formatting commands for German and English
+- a local personal dictionary with language, case and whole-word rules
+- built-in and custom writing styles with optional OpenAI text enhancement
+- separate Original, Formatted, Dictionary and Final stages in History
+- enhancement retry, reprocessing and safe local/original fallbacks without retranscribing audio
+- versioned dictionary and writing-style JSON import/export
 
-Writing styles, personal dictionary, local final transcription, statistics and cloud streaming remain reserved for later phases.
+App-specific profiles, direct Accessibility insertion, push-to-talk, statistics and release notifications remain reserved for Phase 3.3. Cloud audio streaming and fully local final transcription are not part of Phase 3.
 
 ## Requirements
 
@@ -56,6 +62,7 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 - **Dictation:** shortcuts plus Live Preview, overlay size, position, text limit and Preview test
 - **Audio:** input device and live level
 - **Transcription:** Keychain credential, OpenAI model and automatic/German/English recognition
+- **Smart Dictation:** spoken formatting, personal dictionary, writing styles, optional enhancement model and fallback behavior
 - **Storage:** recordings folder, retention and Phase 1 migration
 - **Advanced:** clipboard restoration delay and automatic retries
 
@@ -79,7 +86,7 @@ Prebuilt Community editions are published separately under [GitHub Releases](htt
 
 ## Privacy
 
-FlowDictate contains no analytics, advertising or developer-operated backend. Recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
+FlowDictate contains no analytics, advertising or developer-operated backend. Recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. If an AI writing style is selected, the locally processed transcript and style instruction are sent in a separate request. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
 
 Live Preview uses Apple's on-device speech recognizer only. Its provisional text stays in memory and is never stored, logged, inserted into another app or used as the final transcript.
 
@@ -110,7 +117,7 @@ xcodebuild test \
 
 The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
-Automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded Preview buffering, Preview lifecycle and failure isolation, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement and insertion into third-party applications require manual macOS testing.
+Automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded Preview buffering, Preview lifecycle and failure isolation, spoken formatting, dictionary matching, Smart Dictation stages and fallbacks, JSON stores, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
 
 The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
 
@@ -133,3 +140,9 @@ Test short, long, German, English and mixed-language dictation in Notes, Safari,
 - disabling Live Preview causes no Speech prompt and leaves normal dictation unchanged
 - Compact, Standard and Expanded remain non-activating at every supported position
 - the five-second Preview test deletes its temporary recording and creates no History entry
+- Original style performs only local processing and makes no enhancement request
+- German and English formatting commands, literal escape and URL preservation
+- dictionary word boundaries, capitalization, language filters and overlapping rules
+- every writing style, custom style creation and dictionary/style import/export
+- failed enhancement retains every text stage and supports Retry, Local and Original recovery
+- numbers, URLs and dictionary terms remain intact after AI enhancement

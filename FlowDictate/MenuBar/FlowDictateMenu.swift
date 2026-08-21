@@ -25,6 +25,28 @@ struct FlowDictateMenu: View {
             coordinator.showHistory()
         }
 
+        if let failedRecord = coordinator.latestEnhancementFailure {
+            Menu("Smart Dictation Needs Attention") {
+                Button("Retry Enhancement") {
+                    coordinator.retryEnhancement(failedRecord)
+                }
+                .disabled(coordinator.retryingEnhancementRecordIDs.contains(failedRecord.id))
+
+                Button("Insert Locally Processed Text") {
+                    coordinator.insertLocallyProcessedText(failedRecord)
+                }
+
+                Button("Insert Original Transcript") {
+                    coordinator.insertOriginalText(failedRecord)
+                }
+
+                Divider()
+                Button("Review in History…") {
+                    coordinator.showHistory()
+                }
+            }
+        }
+
         Divider()
 
         Menu("Microphone") {
@@ -107,13 +129,19 @@ struct FlowDictateSettingsView: View {
                 .tabItem { Label("Audio", systemImage: "mic") }
             transcriptionSettings
                 .tabItem { Label("Transcription", systemImage: "text.bubble") }
+            SmartDictationSettingsView(coordinator: coordinator)
+                .tabItem { Label("Smart Dictation", systemImage: "sparkles") }
             storageSettings
                 .tabItem { Label("Storage", systemImage: "externaldrive") }
             advancedSettings
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
         }
-        .frame(width: 560, height: 390)
+        .frame(width: 680, height: 520)
         .onAppear {
+            if coordinator.isRecording {
+                coordinator.restoreRecordingOverlayAfterSettingsActivation()
+                return
+            }
             coordinator.refreshInputDevices()
             coordinator.refreshConfigurationStatus()
             coordinator.refreshPermissionStatus()
@@ -122,6 +150,10 @@ struct FlowDictateSettingsView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
         ) { _ in
+            if coordinator.isRecording {
+                coordinator.restoreRecordingOverlayAfterSettingsActivation()
+                return
+            }
             coordinator.refreshPermissionStatus()
             coordinator.refreshInputDevices()
             launchAtLogin.refresh()
@@ -274,6 +306,7 @@ struct FlowDictateSettingsView: View {
                             .tag(Optional(device.uid))
                     }
                 }
+                .disabled(coordinator.isRecording)
 
                 HStack {
                     Text("Input level")
@@ -285,6 +318,13 @@ struct FlowDictateSettingsView: View {
 
                 Button("Refresh Devices") {
                     coordinator.refreshInputDevices()
+                }
+                .disabled(coordinator.isRecording)
+
+                if coordinator.isRecording {
+                    Text("Microphone controls are paused while a recording is running.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

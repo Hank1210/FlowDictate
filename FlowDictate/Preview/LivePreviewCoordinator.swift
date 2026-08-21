@@ -20,7 +20,7 @@ final class LivePreviewCoordinator {
 
     init(
         provider: any LivePreviewProviding,
-        updateInterval: Duration = .milliseconds(100)
+        updateInterval: Duration = .milliseconds(120)
     ) {
         self.provider = provider
         self.updateInterval = updateInterval
@@ -97,12 +97,16 @@ final class LivePreviewCoordinator {
         pendingText = String(trimmed.suffix(characterLimit))
         guard presentationTask == nil else { return }
         presentationTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: updateInterval)
-            guard !Task.isCancelled, let text = pendingText else { return }
-            pendingText = nil
-            presentationTask = nil
-            state = .active(text)
+            while let self, !Task.isCancelled {
+                try? await Task.sleep(for: updateInterval)
+                guard !Task.isCancelled else { return }
+                guard let text = pendingText else {
+                    presentationTask = nil
+                    return
+                }
+                pendingText = nil
+                state = .active(text)
+            }
         }
     }
 

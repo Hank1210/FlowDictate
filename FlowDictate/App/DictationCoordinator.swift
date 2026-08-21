@@ -4,6 +4,7 @@ import Combine
 import CoreAudio
 import Foundation
 import OSLog
+import UniformTypeIdentifiers
 
 @MainActor
 final class DictationCoordinator: ObservableObject {
@@ -20,8 +21,13 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var recordingLocationPath: String?
     @Published private(set) var historyRecords: [DictationRecord] = []
     @Published private(set) var retryingRecordIDs: Set<UUID> = []
+    @Published private(set) var retryingEnhancementRecordIDs: Set<UUID> = []
+    @Published private(set) var dictionaryEntries: [DictionaryEntry] = []
+    @Published private(set) var writingStyles: [WritingStyleProfile] = BuiltInWritingStyles.all
     @Published private(set) var setupMessage: String?
     @Published private(set) var isPreviewTestRunning = false
+    @Published private(set) var isSmartDictationTestRunning = false
+    @Published private(set) var smartDictationTestOutput: String?
 
     let settings: AppSettings
     let launchAtLogin: LaunchAtLoginManager
@@ -45,6 +51,10 @@ final class DictationCoordinator: ObservableObject {
     private let historyStore: DictationHistoryStore
     private let audioStore: AudioStore
     private let transcriptionRunner: TranscriptionRunner
+    private let dictionaryStore: DictionaryStore
+    private let writingStyleStore: WritingStyleStore
+    private let smartDictationPipeline: SmartDictationPipeline
+    private let injectedEnhancer: (any TranscriptEnhancing)?
     private let livePreviewCoordinator: LivePreviewCoordinator
     private let livePreviewAvailabilityProvider:
         @MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability
@@ -110,6 +120,9 @@ final class DictationCoordinator: ObservableObject {
         historyStore: DictationHistoryStore = DictationHistoryStore(),
         audioStore: AudioStore? = nil,
         livePreviewProvider: (any LivePreviewProviding)? = nil,
+        dictionaryStore: DictionaryStore? = nil,
+        writingStyleStore: WritingStyleStore? = nil,
+        transcriptEnhancer: (any TranscriptEnhancing)? = nil,
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         automaticallyPresentOnboarding: Bool = false
@@ -132,6 +145,10 @@ final class DictationCoordinator: ObservableObject {
         self.historyStore = historyStore
         self.audioStore = audioStore ?? AudioStore(locationStore: recordingLocationStore)
         transcriptionRunner = TranscriptionRunner(historyStore: historyStore)
+        self.dictionaryStore = dictionaryStore ?? DictionaryStore()
+        self.writingStyleStore = writingStyleStore ?? WritingStyleStore()
+        smartDictationPipeline = SmartDictationPipeline(historyStore: historyStore)
+        injectedEnhancer = transcriptEnhancer
         livePreviewCoordinator = LivePreviewCoordinator(
             provider: livePreviewProvider ?? AppleSpeechLivePreviewProvider()
         )
@@ -178,6 +195,7 @@ final class DictationCoordinator: ObservableObject {
         refreshConfigurationStatus()
         refreshPermissionStatus()
         Task { [weak self] in
+            await self?.refreshSmartDictationData()
             await self?.recoverAndRefreshHistory()
             guard automaticallyPresentOnboarding, let self, self.needsOnboarding else { return }
             try? await Task.sleep(for: .milliseconds(400))
@@ -192,12 +210,16 @@ final class DictationCoordinator: ObservableObject {
     }
 
     var primaryActionTitle: String { recorder.isRecording ? "Stop Dictation" : "Start Dictation" }
+    var isRecording: Bool { recorder.isRecording }
     var canCancel: Bool { recorder.isRecording }
     var isProcessing: Bool {
         switch state {
-        case .transcribing, .inserting: true
+        case .transcribing, .enhancing, .inserting: true
         default: false
         }
+    }
+    var latestEnhancementFailure: DictationRecord? {
+        historyRecords.first { $0.processingStatus == .enhancementFailed }
     }
     var needsOnboarding: Bool {
         settings.onboardingVersion < Self.currentOnboardingVersion
@@ -271,6 +293,9 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func refreshInputDevices() {
+        // Core Audio device enumeration can briefly contend with the active input graph.
+        // Keep the running recording untouched when Settings becomes active.
+        guard !recorder.isRecording else { return }
         do {
             inputDevices = try audioDeviceService.inputDevices()
             if let uid = settings.inputDeviceUID, !inputDevices.contains(where: { $0.uid == uid }) {
@@ -280,6 +305,14 @@ final class DictationCoordinator: ObservableObject {
             inputDevices = []
             FlowLogger.audio.error("Could not enumerate input devices: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    func restoreRecordingOverlayAfterSettingsActivation() {
+        guard recorder.isRecording else { return }
+        // Opening a Settings scene can reorder auxiliary AppKit panels. Reassert the
+        // existing overlay without restarting the recorder or Speech recognition.
+        overlay.show(status: .recording, level: audioLevel, reposition: false)
+        overlay.updatePreview(livePreviewCoordinator.state)
     }
 
     func saveAPIKey(_ value: String) {
@@ -402,6 +435,22 @@ final class DictationCoordinator: ObservableObject {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
 
+    func copyOriginalText(from record: DictationRecord) {
+        guard let text = record.originalTranscript else { return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func insertOriginalText(_ record: DictationRecord) {
+        guard let text = record.originalTranscript, let target = insertionTarget(for: record) else {
+            fail(TextInsertionError.targetUnavailable, retainedAudioURL: try? audioURL(for: record)); return
+        }
+        var resolved = record
+        resolved.finalText = text
+        resolved.processingStatus = .completed
+        resolved.enhancementFallback = .useOriginal
+        Task { await insertStoredText(text, record: resolved, target: target) }
+    }
+
     func exportText(from record: DictationRecord) {
         guard let text = record.finalText ?? record.originalTranscript else { return }
         let panel = NSSavePanel()
@@ -419,6 +468,10 @@ final class DictationCoordinator: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let statusCounts = Dictionary(grouping: historyRecords, by: { $0.status.rawValue })
             .mapValues(\.count)
+        let processingStatusCounts = Dictionary(
+            grouping: historyRecords,
+            by: { $0.processingStatus.rawValue }
+        ).mapValues(\.count)
         let payload: [String: Any] = [
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
@@ -428,6 +481,11 @@ final class DictationCoordinator: ObservableObject {
             "microphonePermission": microphonePermissionGranted,
             "accessibilityPermission": accessibilityPermissionGranted,
             "historyStatusCounts": statusCounts,
+            "smartProcessingStatusCounts": processingStatusCounts,
+            "spokenFormattingEnabled": settings.spokenFormattingEnabled,
+            "personalDictionaryEnabled": settings.personalDictionaryEnabled,
+            "dictionaryEntryCount": dictionaryEntries.count,
+            "customWritingStyleCount": writingStyles.filter { !$0.isBuiltIn }.count,
             "onboardingVersion": settings.onboardingVersion
         ]
         do {
@@ -471,15 +529,34 @@ final class DictationCoordinator: ObservableObject {
                     maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
                     provider: try activeProvider()
                 )
+                let style = selectedWritingStyle
+                updated = try await smartDictationPipeline.run(
+                    record: updated,
+                    spokenFormattingEnabled: settings.spokenFormattingEnabled,
+                    dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                    style: style,
+                    enhancementModel: settings.enhancementModel,
+                    fallback: settings.smartDictationFallback,
+                    enhancer: style.usesAI ? try activeEnhancer() : nil
+                )
             } catch let failure as TranscriptionRunFailure {
                 updated = failure.record
             } catch let failure as TranscriptionPersistenceFailure {
                 FlowLogger.app.error("Retry history persistence failed: \(failure.localizedDescription, privacy: .public)")
                 fail(failure, retainedAudioURL: try? audioURL(for: record))
+            } catch let failure as SmartDictationRunFailure {
+                updated = failure.record
+                setupMessage = "Transcription recovered, but Smart Dictation still needs attention."
             } catch {
-                updated.status = .transcriptionFailed
-                updated.errorCategory = DictationFailureClassifier.category(for: error)
-                updated.errorMessage = error.localizedDescription
+                if updated.originalTranscript == nil {
+                    updated.status = .transcriptionFailed
+                    updated.errorCategory = DictationFailureClassifier.category(for: error)
+                    updated.errorMessage = error.localizedDescription
+                } else {
+                    updated.processingStatus = .enhancementFailed
+                    updated.enhancementErrorCategory = DictationFailureClassifier.category(for: error)
+                    updated.enhancementErrorMessage = error.localizedDescription
+                }
                 updated.updatedAt = Date()
                 await persistBestEffort(updated, context: "transcription retry failure")
             }
@@ -585,8 +662,7 @@ final class DictationCoordinator: ObservableObject {
                 recorder.selectInputDevice(
                     try audioDeviceService.deviceID(forUID: settings.inputDeviceUID)
                 )
-                try recorder.start()
-                prepareLivePreview()
+                try startRecorderWithPreview()
                 guard recorder.previewBufferHandler != nil else {
                     throw LivePreviewProviderError.recognizerUnavailable
                 }
@@ -655,6 +731,182 @@ final class DictationCoordinator: ObservableObject {
         catch { FlowLogger.app.error("History load failed: \(error.localizedDescription, privacy: .public)") }
     }
 
+    func refreshSmartDictationData() async {
+        do {
+            dictionaryEntries = try await dictionaryStore.all()
+            writingStyles = try await writingStyleStore.all()
+            if !writingStyles.contains(where: { $0.id == settings.writingStyleID && $0.isEnabled }) {
+                settings.writingStyleID = BuiltInWritingStyles.originalID
+            }
+        } catch {
+            FlowLogger.app.error("Smart Dictation data load failed: \(error.localizedDescription, privacy: .public)")
+            setupMessage = error.localizedDescription
+        }
+    }
+
+    func saveDictionaryEntry(_ entry: DictionaryEntry) {
+        Task {
+            do {
+                try await dictionaryStore.upsert(entry)
+                await refreshSmartDictationData()
+                setupMessage = "Dictionary entry saved."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func deleteDictionaryEntry(_ entry: DictionaryEntry) {
+        Task {
+            do {
+                try await dictionaryStore.delete(id: entry.id)
+                await refreshSmartDictationData()
+                setupMessage = "Dictionary entry deleted."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func saveWritingStyle(_ style: WritingStyleProfile) {
+        Task {
+            do {
+                try await writingStyleStore.upsert(style)
+                await refreshSmartDictationData()
+                settings.writingStyleID = style.id
+                setupMessage = "Writing style saved."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func duplicateWritingStyle(_ style: WritingStyleProfile) {
+        Task {
+            do {
+                let copy = try await writingStyleStore.duplicate(style)
+                await refreshSmartDictationData()
+                settings.writingStyleID = copy.id
+                setupMessage = "Writing style duplicated."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func deleteWritingStyle(_ style: WritingStyleProfile) {
+        Task {
+            do {
+                try await writingStyleStore.delete(id: style.id)
+                if settings.writingStyleID == style.id {
+                    settings.writingStyleID = BuiltInWritingStyles.originalID
+                }
+                await refreshSmartDictationData()
+                setupMessage = "Writing style deleted."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func exportDictionary() { chooseSmartDictationExport(filename: "FlowDictate-Dictionary.json") { url in try await self.dictionaryStore.export(to: url) } }
+    func exportWritingStyles() { chooseSmartDictationExport(filename: "FlowDictate-Writing-Styles.json") { url in try await self.writingStyleStore.export(to: url) } }
+    func importDictionary() { chooseSmartDictationImport { url in try await self.dictionaryStore.importFile(from: url) } }
+    func importWritingStyles() { chooseSmartDictationImport { url in try await self.writingStyleStore.importFile(from: url) } }
+
+    func testSmartDictation(_ text: String) {
+        guard !isSmartDictationTestRunning else { return }
+        let original = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !original.isEmpty else { smartDictationTestOutput = "Enter sample text first."; return }
+        isSmartDictationTestRunning = true
+        Task {
+            defer { isSmartDictationTestRunning = false }
+            let formatted = settings.spokenFormattingEnabled
+                ? SpokenFormattingProcessor().process(original, language: settings.transcriptionLanguage.apiValue).text
+                : original
+            let entries = settings.personalDictionaryEnabled ? dictionaryEntries : []
+            let local = PersonalDictionaryProcessor().process(
+                formatted,
+                entries: entries,
+                language: settings.transcriptionLanguage.apiValue
+            ).text
+            let style = selectedWritingStyle
+            guard style.usesAI else { smartDictationTestOutput = local; return }
+            do {
+                let result = try await activeEnhancer().enhance(
+                    TranscriptEnhancementRequest(
+                        text: local,
+                        styleInstruction: style.instruction,
+                        language: settings.transcriptionLanguage.apiValue,
+                        model: settings.enhancementModel,
+                        protectedTerms: entries.map(\.replacement)
+                    )
+                )
+                smartDictationTestOutput = result.text
+            } catch { smartDictationTestOutput = error.localizedDescription }
+        }
+    }
+
+    func retryEnhancement(_ record: DictationRecord) {
+        guard record.canRetryEnhancement, !retryingEnhancementRecordIDs.contains(record.id) else { return }
+        retryingEnhancementRecordIDs.insert(record.id)
+        Task {
+            defer { retryingEnhancementRecordIDs.remove(record.id) }
+            do {
+                let style = writingStyles.first { $0.id == record.writingStyleID } ?? selectedWritingStyle
+                _ = try await smartDictationPipeline.retryEnhancement(
+                    record: record,
+                    style: style,
+                    model: record.enhancementModelID ?? settings.enhancementModel,
+                    fallback: .ask,
+                    dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                    enhancer: try activeEnhancer()
+                )
+                setupMessage = "Smart Dictation completed."
+            } catch { setupMessage = error.localizedDescription }
+            await refreshHistory()
+        }
+    }
+
+    func reprocess(_ record: DictationRecord, writingStyleID: UUID) {
+        guard let style = writingStyles.first(where: { $0.id == writingStyleID }) else { return }
+        Task {
+            do {
+                _ = try await smartDictationPipeline.processWithStyle(
+                    record: record,
+                    style: style,
+                    model: settings.enhancementModel,
+                    fallback: .ask,
+                    dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                    enhancer: style.usesAI ? try activeEnhancer() : nil
+                )
+                setupMessage = "Dictation reprocessed. Review the result in History."
+            } catch { setupMessage = error.localizedDescription }
+            await refreshHistory()
+        }
+    }
+
+    func reapplyLocalRules(_ record: DictationRecord) {
+        guard record.originalTranscript != nil else { return }
+        let style = writingStyles.first { $0.id == record.writingStyleID } ?? selectedWritingStyle
+        Task {
+            do {
+                _ = try await smartDictationPipeline.recoverInterruptedLocalProcessing(
+                    record: record,
+                    spokenFormattingEnabled: settings.spokenFormattingEnabled,
+                    dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                    intendedStyle: style
+                )
+                setupMessage = style.usesAI
+                    ? "Local rules reapplied. Retry the writing style from History when ready."
+                    : "Local rules reapplied. Review the result in History."
+            } catch { setupMessage = error.localizedDescription }
+            await refreshHistory()
+        }
+    }
+
+    func insertLocallyProcessedText(_ record: DictationRecord) {
+        guard let text = record.dictionaryTranscript ?? record.formattedTranscript ?? record.originalTranscript,
+              let target = insertionTarget(for: record) else {
+            fail(TextInsertionError.targetUnavailable, retainedAudioURL: try? audioURL(for: record)); return
+        }
+        var resolved = record
+        resolved.finalText = text
+        resolved.processingStatus = .completed
+        resolved.enhancementFallback = .useLocallyProcessed
+        Task { await insertStoredText(text, record: resolved, target: target) }
+    }
+
     func applyRetentionSettings() {
         Task {
             do {
@@ -677,7 +929,20 @@ final class DictationCoordinator: ObservableObject {
 
     private func recoverAndRefreshHistory() async {
         do {
-            _ = try await historyStore.recoverInterrupted()
+            let recovered = try await historyStore.recoverInterrupted()
+            for record in recovered
+            where record.processingStatus == .notStarted
+                && record.enhancementErrorCategory == .interrupted
+                && record.originalTranscript != nil {
+                let intendedStyle = writingStyles.first { $0.id == record.writingStyleID }
+                    ?? BuiltInWritingStyles.all[0]
+                _ = try await smartDictationPipeline.recoverInterruptedLocalProcessing(
+                    record: record,
+                    spokenFormattingEnabled: record.spokenFormattingEnabled,
+                    dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                    intendedStyle: intendedStyle
+                )
+            }
             try await recoverOrphanedAudio()
             try await applyRetentionPolicy()
             let historyResult = try await historyStore.applyRetention(
@@ -796,9 +1061,11 @@ final class DictationCoordinator: ObservableObject {
             try await permissionManager.ensureMicrophoneAccess()
             try permissionManager.ensureEventPostingAccess()
             refreshPermissionStatus()
+            if settings.livePreviewEnabled, speechPermissionState == .notDetermined {
+                speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+            }
             recorder.selectInputDevice(try audioDeviceService.deviceID(forUID: settings.inputDeviceUID))
-            try recorder.start()
-            prepareLivePreview()
+            try startRecorderWithPreview()
             overlayDismissTask?.cancel()
             focusTarget = target
             lastExternalFocusTarget = target
@@ -808,8 +1075,7 @@ final class DictationCoordinator: ObservableObject {
             settings.inputDeviceUID = nil
             recorder.selectInputDevice(nil)
             do {
-                try recorder.start()
-                prepareLivePreview()
+                try startRecorderWithPreview()
                 focusTarget = target
                 lastExternalFocusTarget = target
                 state = .recording
@@ -845,6 +1111,18 @@ final class DictationCoordinator: ObservableObject {
                 maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
                 provider: try activeProvider()
             )
+            state = .enhancing
+            overlay.show(status: .processing)
+            let style = selectedWritingStyle
+            record = try await smartDictationPipeline.run(
+                record: record,
+                spokenFormattingEnabled: settings.spokenFormattingEnabled,
+                dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
+                style: style,
+                enhancementModel: settings.enhancementModel,
+                fallback: settings.smartDictationFallback,
+                enhancer: style.usesAI ? try activeEnhancer() : nil
+            )
             state = .inserting; record.status = .inserting; record.updatedAt = Date()
             try await historyStore.upsert(record)
             try await makeInserter().insert(record.finalText ?? record.originalTranscript ?? "", into: target)
@@ -858,6 +1136,13 @@ final class DictationCoordinator: ObservableObject {
         } catch let failure as TranscriptionPersistenceFailure {
             record = failure.record
             fail(failure, retainedAudioURL: recording.url)
+        } catch let failure as SmartDictationRunFailure {
+            record = failure.record
+            fail(
+                failure.underlyingError,
+                retainedAudioURL: recording.url,
+                message: "Smart Dictation failed. Your original and locally processed text were kept. \(failure.underlyingError.localizedDescription)"
+            )
         } catch {
             record.status = record.originalTranscript == nil ? .transcriptionFailed : .insertionFailed
             record.errorCategory = DictationFailureClassifier.category(for: error)
@@ -931,12 +1216,18 @@ final class DictationCoordinator: ObservableObject {
         livePreviewCoordinator.cancel()
         didLogLivePreviewText = false
         overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
+        FlowLogger.audio.info(
+            "Preparing Live Preview: enabled=\(self.settings.livePreviewEnabled, privacy: .public), speechPermission=\(self.speechPermissionState.rawValue, privacy: .public)"
+        )
         guard settings.livePreviewEnabled else {
             overlay.updatePreview(.disabled)
-            FlowLogger.audio.debug("Live Preview is disabled in Settings")
+            FlowLogger.audio.info("Live Preview is disabled in Settings")
             return
         }
         let availability = livePreviewAvailability
+        FlowLogger.audio.info(
+            "Live Preview availability: \(availability.statusText, privacy: .public)"
+        )
         guard case let .available(localeIdentifier) = availability else {
             overlay.updatePreview(.unavailable(availability.statusText))
             FlowLogger.audio.notice(
@@ -959,6 +1250,19 @@ final class DictationCoordinator: ObservableObject {
             FlowLogger.audio.notice(
                 "Live Preview could not start: \(error.localizedDescription, privacy: .public)"
             )
+        }
+    }
+
+    private func startRecorderWithPreview() throws {
+        do {
+            try recorder.start()
+            // Attach Speech only after the audio engine is stable. Starting the
+            // recognizer first can race Core Audio device initialization.
+            prepareLivePreview()
+        } catch {
+            recorder.previewBufferHandler = nil
+            livePreviewCoordinator.cancel()
+            throw error
         }
     }
 
@@ -989,6 +1293,51 @@ final class DictationCoordinator: ObservableObject {
         let model = environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]?.isEmpty == false
             ? environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]! : (configured.isEmpty ? "gpt-4o-mini-transcribe" : configured)
         return OpenAITranscriptionProvider(apiKey: key, model: model)
+    }
+
+    private var selectedWritingStyle: WritingStyleProfile {
+        writingStyles.first { $0.id == settings.writingStyleID && $0.isEnabled }
+            ?? BuiltInWritingStyles.all[0]
+    }
+
+    private func activeEnhancer() throws -> any TranscriptEnhancing {
+        if let injectedEnhancer { return injectedEnhancer }
+        let environmentKey = environment["OPENAI_API_KEY"]
+        let keychainKey = environmentKey?.isEmpty == false ? nil : try keychainAPIKey()
+        guard let key = [environmentKey, keychainKey].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
+            throw TranscriptionProviderError.missingAPIKey
+        }
+        return OpenAITranscriptEnhancer(apiKey: key)
+    }
+
+    private func chooseSmartDictationExport(
+        filename: String,
+        action: @escaping @MainActor (URL) async throws -> Void
+    ) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = filename
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await action(url); setupMessage = "Export completed." }
+            catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    private func chooseSmartDictationImport(
+        action: @escaping @MainActor (URL) async throws -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do {
+                try await action(url)
+                await refreshSmartDictationData()
+                setupMessage = "Import completed."
+            } catch { setupMessage = error.localizedDescription }
+        }
     }
 
     private func keychainAPIKey() throws -> String? {

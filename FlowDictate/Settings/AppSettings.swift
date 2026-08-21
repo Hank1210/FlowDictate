@@ -42,6 +42,11 @@ final class AppSettings: ObservableObject {
         static let overlaySize = "overlaySize"
         static let livePreviewCharacterLimit = "livePreviewCharacterLimit"
         static let overlayPosition = "overlayPosition"
+        static let spokenFormattingEnabled = "spokenFormattingEnabled"
+        static let personalDictionaryEnabled = "personalDictionaryEnabled"
+        static let writingStyleID = "writingStyleID"
+        static let enhancementModel = "enhancementModel"
+        static let smartDictationFallback = "smartDictationFallback"
     }
 
     private let defaults: UserDefaults
@@ -124,6 +129,26 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(overlayPosition.rawValue, forKey: Key.overlayPosition) }
     }
 
+    @Published var spokenFormattingEnabled: Bool {
+        didSet { defaults.set(spokenFormattingEnabled, forKey: Key.spokenFormattingEnabled) }
+    }
+
+    @Published var personalDictionaryEnabled: Bool {
+        didSet { defaults.set(personalDictionaryEnabled, forKey: Key.personalDictionaryEnabled) }
+    }
+
+    @Published var writingStyleID: UUID {
+        didSet { defaults.set(writingStyleID.uuidString, forKey: Key.writingStyleID) }
+    }
+
+    @Published var enhancementModel: String {
+        didSet { defaults.set(enhancementModel, forKey: Key.enhancementModel) }
+    }
+
+    @Published var smartDictationFallback: SmartDictationFallback {
+        didSet { defaults.set(smartDictationFallback.rawValue, forKey: Key.smartDictationFallback) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -181,6 +206,14 @@ final class AppSettings: ObservableObject {
         overlayPosition = OverlayPosition(
             rawValue: defaults.string(forKey: Key.overlayPosition) ?? ""
         ) ?? .bottomTrailing
+        spokenFormattingEnabled = defaults.object(forKey: Key.spokenFormattingEnabled) as? Bool ?? false
+        personalDictionaryEnabled = defaults.object(forKey: Key.personalDictionaryEnabled) as? Bool ?? true
+        writingStyleID = defaults.string(forKey: Key.writingStyleID).flatMap(UUID.init(uuidString:))
+            ?? BuiltInWritingStyles.originalID
+        enhancementModel = defaults.string(forKey: Key.enhancementModel) ?? "gpt-4o-mini"
+        smartDictationFallback = SmartDictationFallback(
+            rawValue: defaults.string(forKey: Key.smartDictationFallback) ?? ""
+        ) ?? .ask
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

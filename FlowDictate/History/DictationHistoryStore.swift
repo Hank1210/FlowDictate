@@ -132,17 +132,46 @@ actor DictationHistoryStore {
         record.archivedAt = now
         record.updatedAt = now
         record.originalTranscript = nil
+        record.formattedTranscript = nil
+        record.dictionaryTranscript = nil
         record.finalText = nil
         record.targetApplicationName = nil
         record.targetBundleIdentifier = nil
         record.errorCategory = nil
         record.errorMessage = nil
+        record.enhancementErrorCategory = nil
+        record.enhancementErrorMessage = nil
     }
 
     func recoverInterrupted(now: Date = Date()) throws -> [DictationRecord] {
         try loadIfNeeded()
         var recovered: [DictationRecord] = []
         for (id, var record) in recordsByID {
+            if record.processingStatus == .formatting || record.processingStatus == .formatted {
+                record.processingStatus = .notStarted
+                record.enhancementErrorCategory = .interrupted
+                record.enhancementErrorMessage = "Local Smart Dictation processing was interrupted."
+                record.updatedAt = now
+                recordsByID[id] = record
+                recovered.append(record)
+                continue
+            }
+            if record.processingStatus == .enhancing {
+                record.processingStatus = .enhancementFailed
+                record.enhancementErrorCategory = .interrupted
+                record.enhancementErrorMessage = "Smart Dictation was interrupted when FlowDictate stopped."
+                record.updatedAt = now
+                recordsByID[id] = record
+                recovered.append(record)
+                continue
+            }
+            if record.processingStatus == .enhanced {
+                record.processingStatus = .completed
+                record.updatedAt = now
+                recordsByID[id] = record
+                recovered.append(record)
+                continue
+            }
             switch record.status {
             case .transcribing:
                 record.status = .transcriptionFailed
@@ -173,6 +202,14 @@ actor DictationHistoryStore {
         let envelope = try JSONDecoder.flowDictate.decode(Envelope.self, from: data)
         recordsByID = Dictionary(uniqueKeysWithValues: envelope.records.map { ($0.id, $0) })
         loaded = true
+        if envelope.schemaVersion < FlowDictateVersion.historySchema {
+            let backupURL = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("dictations-pre-3.2.json")
+            if !fileManager.fileExists(atPath: backupURL.path) {
+                try data.write(to: backupURL, options: .atomic)
+            }
+            try persist()
+        }
     }
 
     private func persist() throws {

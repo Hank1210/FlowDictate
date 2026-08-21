@@ -2,8 +2,8 @@ import Foundation
 
 enum FlowDictateVersion {
     nonisolated static let onboardingSchema = 2
-    nonisolated static let historySchema = 2
-    nonisolated static let dictationRecordSchema = 2
+    nonisolated static let historySchema = 3
+    nonisolated static let dictationRecordSchema = 3
 
     static var displayString: String {
         let info = Bundle.main.infoDictionary

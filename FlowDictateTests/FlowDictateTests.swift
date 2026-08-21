@@ -20,6 +20,7 @@ struct FlowDictateTests {
         #expect(DictationState.failed(message: "test", retainedAudioURL: nil).acceptsStart)
         #expect(!DictationState.recording.acceptsStart)
         #expect(!DictationState.transcribing.acceptsStart)
+        #expect(!DictationState.enhancing.acceptsStart)
         #expect(!DictationState.inserting.acceptsStart)
         #expect(DictationState.success.acceptsStart)
     }
@@ -204,6 +205,223 @@ struct FlowDictateTests {
         #expect(TranscriptionLanguage.english.apiValue == "en")
     }
 
+    @Test func spokenFormattingSupportsGermanCommandsAndLiteralEscape() {
+        let processor = SpokenFormattingProcessor()
+        let result = processor.process(
+            "Hallo Komma das ist wörtlich Punkt Punkt neuer Absatz Aufzählung Ende Ausrufezeichen",
+            language: "de"
+        )
+        #expect(result.text == "Hallo, das ist Punkt.\n\n• Ende!")
+        #expect(result.replacementCount == 5)
+    }
+
+    @Test func spokenFormattingSupportsEnglishAndProtectsURLs() {
+        let processor = SpokenFormattingProcessor()
+        let result = processor.process(
+            "Visit https://example.com/period and continue comma new line done period",
+            language: "en"
+        )
+        #expect(result.text == "Visit https://example.com/period and continue,\ndone.")
+    }
+
+    @Test func personalDictionaryUsesWholeWordsLongestFirstAndDoesNotCascade() {
+        let now = Date()
+        let entries = [
+            DictionaryEntry(
+                id: UUID(), spokenForm: "Flow Diktat", replacement: "FlowDictate",
+                language: "de", caseSensitive: false, matchWholeWordsOnly: true,
+                isEnabled: true, createdAt: now, updatedAt: now
+            ),
+            DictionaryEntry(
+                id: UUID(), spokenForm: "Flow", replacement: "Stream",
+                language: "de", caseSensitive: false, matchWholeWordsOnly: true,
+                isEnabled: true, createdAt: now.addingTimeInterval(1), updatedAt: now
+            ),
+            DictionaryEntry(
+                id: UUID(), spokenForm: "FlowDictate", replacement: "MustNotCascade",
+                language: "de", caseSensitive: false, matchWholeWordsOnly: true,
+                isEnabled: true, createdAt: now.addingTimeInterval(2), updatedAt: now
+            )
+        ]
+        let result = PersonalDictionaryProcessor().process(
+            "Flow Diktat und Workflow Flow", entries: entries, language: "de"
+        )
+        #expect(result.text == "FlowDictate und Workflow Stream")
+        #expect(result.replacementCount == 2)
+    }
+
+    @MainActor
+    @Test func smartDictationSettingsPersistWithSafeDefaults() {
+        let suite = "FlowDictateSmartSettings-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var settings = AppSettings(defaults: defaults)
+        #expect(!settings.spokenFormattingEnabled)
+        #expect(settings.personalDictionaryEnabled)
+        #expect(settings.writingStyleID == BuiltInWritingStyles.originalID)
+        #expect(settings.smartDictationFallback == .ask)
+
+        settings.spokenFormattingEnabled = true
+        settings.personalDictionaryEnabled = false
+        settings.writingStyleID = BuiltInWritingStyles.emailID
+        settings.enhancementModel = "test-enhancement-model"
+        settings.smartDictationFallback = .useLocallyProcessed
+        settings = AppSettings(defaults: defaults)
+        #expect(settings.spokenFormattingEnabled)
+        #expect(!settings.personalDictionaryEnabled)
+        #expect(settings.writingStyleID == BuiltInWritingStyles.emailID)
+        #expect(settings.enhancementModel == "test-enhancement-model")
+        #expect(settings.smartDictationFallback == .useLocallyProcessed)
+    }
+
+    @Test func dictionaryAndWritingStyleStoresRoundTrip() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartStores-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let now = Date()
+        let dictionaryStore = DictionaryStore(fileURL: directory.appendingPathComponent("dictionary.json"))
+        let entry = DictionaryEntry(
+            id: UUID(), spokenForm: "Eulersche Zahl", replacement: "e",
+            language: "de", caseSensitive: false, matchWholeWordsOnly: true,
+            isEnabled: true, createdAt: now, updatedAt: now
+        )
+        try await dictionaryStore.upsert(entry)
+        #expect(try await dictionaryStore.all() == [entry])
+
+        let styleStore = WritingStyleStore(fileURL: directory.appendingPathComponent("styles.json"))
+        let style = WritingStyleProfile(
+            id: UUID(), name: "Concise", instruction: "Make the text concise without losing facts.",
+            isBuiltIn: false, isEnabled: true, schemaVersion: 1
+        )
+        try await styleStore.upsert(style)
+        #expect(try await styleStore.profile(id: style.id) == style)
+        #expect(try await styleStore.all().count == BuiltInWritingStyles.all.count + 1)
+    }
+
+    @MainActor
+    @Test func smartPipelineOriginalNeverCallsEnhancer() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartOriginal-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let pipeline = SmartDictationPipeline(historyStore: store)
+        let enhancer = MockTranscriptEnhancer(output: "must not be used")
+        var record = makeTranscribedRecord(text: "Hallo Punkt")
+        record = try await pipeline.run(
+            record: record,
+            spokenFormattingEnabled: true,
+            dictionaryEntries: [],
+            style: BuiltInWritingStyles.all[0],
+            enhancementModel: "test",
+            fallback: .ask,
+            enhancer: enhancer
+        )
+        #expect(record.originalTranscript == "Hallo Punkt")
+        #expect(record.finalText == "Hallo.")
+        #expect(record.processingStatus == .completed)
+        #expect(enhancer.callCount == 0)
+    }
+
+    @MainActor
+    @Test func smartPipelineEnhancesAndFallbackKeepsLocalText() async throws {
+        let successURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartSuccess-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: successURL) }
+        let successPipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: successURL))
+        let successEnhancer = MockTranscriptEnhancer(output: "Professioneller Text 42")
+        let success = try await successPipeline.run(
+            record: makeTranscribedRecord(text: "Text 42"), spokenFormattingEnabled: false,
+            dictionaryEntries: [], style: BuiltInWritingStyles.all[4], enhancementModel: "test-model",
+            fallback: .ask, enhancer: successEnhancer
+        )
+        #expect(success.finalText == "Professioneller Text 42")
+        #expect(success.enhancementAttemptCount == 1)
+        #expect(success.processingStatus == .completed)
+
+        let failureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartFallback-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: failureURL) }
+        let failurePipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: failureURL))
+        let fallback = try await failurePipeline.run(
+            record: makeTranscribedRecord(text: "Lokaler Text"), spokenFormattingEnabled: false,
+            dictionaryEntries: [], style: BuiltInWritingStyles.all[4], enhancementModel: "test-model",
+            fallback: .useLocallyProcessed, enhancer: MockTranscriptEnhancer(error: URLError(.notConnectedToInternet))
+        )
+        #expect(fallback.finalText == "Lokaler Text")
+        #expect(fallback.processingStatus == .completed)
+        #expect(fallback.enhancementErrorCategory == .network)
+        #expect(fallback.enhancementFallback == .useLocallyProcessed)
+    }
+
+    @MainActor
+    @Test func changingWritingStyleStartsFromExistingLocalStage() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateStyleOnly-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let pipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: fileURL))
+        var record = makeTranscribedRecord(text: "Raw Punkt")
+        record.formattedTranscript = "Previously formatted."
+        record.dictionaryTranscript = "Protected local result 42"
+        let enhancer = MockTranscriptEnhancer(output: "Styled local result 42")
+
+        let result = try await pipeline.processWithStyle(
+            record: record,
+            style: BuiltInWritingStyles.all[4],
+            model: "test-model",
+            fallback: .ask,
+            dictionaryEntries: [],
+            enhancer: enhancer
+        )
+
+        #expect(enhancer.receivedTexts == ["Protected local result 42"])
+        #expect(result.originalTranscript == "Raw Punkt")
+        #expect(result.formattedTranscript == "Previously formatted.")
+        #expect(result.finalText == "Styled local result 42")
+    }
+
+    @Test func interruptedLocalProcessingIsMarkedForDeterministicRecovery() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateInterruptedLocal-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = DictationHistoryStore(fileURL: fileURL)
+        var record = makeTranscribedRecord(text: "Recover me")
+        record.processingStatus = .formatting
+        try await store.upsert(record)
+
+        let recovered = try await store.recoverInterrupted()
+
+        #expect(recovered.first?.processingStatus == .notStarted)
+        #expect(recovered.first?.enhancementErrorCategory == .interrupted)
+        #expect(try await store.record(id: record.id)?.originalTranscript == "Recover me")
+    }
+
+    @Test func phaseThreeHistoryMigrationCreatesBackupAndPreservesText() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartMigration-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("dictations.json")
+        let record = makeTranscribedRecord(text: "Existing transcript")
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        var object = try #require(JSONSerialization.jsonObject(with: encoder.encode(record)) as? [String: Any])
+        for key in ["formattedTranscript", "dictionaryTranscript", "writingStyleID", "processingStatus",
+                    "enhancementProviderID", "enhancementModelID", "enhancementAttemptCount",
+                    "enhancementErrorCategory", "enhancementErrorMessage", "enhancementFallback",
+                    "dictionaryReplacementCount",
+                    "spokenFormattingEnabled"] {
+            object.removeValue(forKey: key)
+        }
+        try JSONSerialization.data(withJSONObject: ["schemaVersion": 2, "records": [object]])
+            .write(to: fileURL)
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let migrated = try #require(await store.all().first)
+        #expect(migrated.originalTranscript == "Existing transcript")
+        #expect(migrated.finalText == "Existing transcript")
+        #expect(migrated.writingStyleID == BuiltInWritingStyles.originalID)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("dictations-pre-3.2.json").path))
+    }
+
     @Test func audioLevelNormalizationHandlesSilenceAndClipping() {
         let silence: [Float] = [0, 0, 0]
         let quiet: [Float] = [0.05, -0.05]
@@ -214,7 +432,7 @@ struct FlowDictateTests {
         let loudLevel = loud.withUnsafeBufferPointer(AudioLevelMeter.normalizedRMS)
 
         #expect(silenceLevel == 0)
-        #expect(quietLevel > 0 && quietLevel < 1)
+        #expect(quietLevel > 0.6 && quietLevel < 1)
         #expect(loudLevel == 1)
     }
 
@@ -248,6 +466,20 @@ struct FlowDictateTests {
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.inserter.insertedText == "Transcribed text")
         #expect(harness.coordinator.state == .success)
+    }
+
+    @MainActor
+    @Test func openingSettingsDuringRecordingReassertsOverlayWithoutRestartingAudio() async throws {
+        let harness = makeCoordinatorHarness()
+        await harness.coordinator.toggleDictation()
+        let presentationCount = harness.overlay.presentations.count
+
+        harness.coordinator.restoreRecordingOverlayAfterSettingsActivation()
+
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.recorder.startCount == 1)
+        #expect(harness.overlay.presentations.count == presentationCount + 1)
+        #expect(harness.overlay.presentations.last == .recording)
     }
 
     @MainActor
@@ -509,6 +741,30 @@ struct FlowDictateTests {
         #expect(channel.droppedBufferCount == 1)
     }
 
+    @Test func livePreviewBufferOwnsImmutableAudioSamples() throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 16_000,
+            channels: 1
+        ))
+        let source = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4))
+        source.frameLength = 4
+        source.floatChannelData?[0][0] = 0.75
+
+        let preview = try #require(LivePreviewAudioBuffer(copying: source))
+        source.floatChannelData?[0][0] = 0.25
+        let speechBuffer = try #require(preview.makePCMBuffer())
+
+        #expect(preview.channelSamples[0][0] == 0.75)
+        #expect(speechBuffer.floatChannelData?[0][0] == 0.75)
+    }
+
+    @Test func audioLevelUpdatesAreLimitedToTenPerSecond() {
+        let gate = AudioLevelUpdateGate(updatesPerSecond: 10)
+        #expect(gate.shouldPublish(at: 1))
+        #expect(!gate.shouldPublish(at: 1.05))
+        #expect(gate.shouldPublish(at: 1.11))
+    }
+
     @MainActor
     @Test func livePreviewCoordinatorLimitsTextAndIgnoresEventsAfterCancel() async throws {
         let provider = MockLivePreviewProvider()
@@ -529,10 +785,13 @@ struct FlowDictateTests {
             channelSamples: [[0]]
         ))
         provider.emit(.partial(String(repeating: "a", count: 70)))
-        try await Task.sleep(for: .milliseconds(10))
+        let expectedState = LivePreviewState.active(String(repeating: "a", count: 50))
+        for _ in 0..<20 where !states.contains(expectedState) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         #expect(provider.startCount == 1)
-        #expect(states.contains(.active(String(repeating: "a", count: 50))))
+        #expect(states.contains(expectedState))
         coordinator.cancel()
         provider.emit(.partial("must be ignored"))
         try await Task.sleep(for: .milliseconds(10))
@@ -650,6 +909,19 @@ struct FlowDictateTests {
             .appendingPathComponent("FlowDictateRecordings-\(UUID())", isDirectory: true)
         try? store.configure(directory: directory)
         return store
+    }
+
+    private func makeTranscribedRecord(text: String) -> DictationRecord {
+        let now = Date()
+        var record = DictationRecord.newRecording(
+            id: UUID(), startedAt: now, endedAt: now, duration: 1,
+            status: .transcribed, audioRelativePath: "test.wav", audioFileSize: 100,
+            providerID: "Test", modelID: "test-transcribe", language: "de",
+            targetBundleIdentifier: nil, targetApplicationName: nil
+        )
+        record.originalTranscript = text
+        record.finalText = text
+        return record
     }
 }
 
@@ -819,6 +1091,27 @@ private final class CountingCredentialStore: CredentialStoring, @unchecked Senda
 
     func saveAPIKey(_ value: String) throws {}
     func deleteAPIKey() throws {}
+}
+
+private final class MockTranscriptEnhancer: TranscriptEnhancing, @unchecked Sendable {
+    private(set) var callCount = 0
+    private(set) var receivedTexts: [String] = []
+    private let output: String?
+    private let error: Error?
+
+    init(output: String) { self.output = output; error = nil }
+    init(error: Error) { output = nil; self.error = error }
+
+    func enhance(_ request: TranscriptEnhancementRequest) async throws -> TranscriptEnhancementResult {
+        callCount += 1
+        receivedTexts.append(request.text)
+        if let error { throw error }
+        return TranscriptEnhancementResult(
+            text: output ?? request.text,
+            provider: "Mock",
+            model: request.model
+        )
+    }
 }
 
 @MainActor

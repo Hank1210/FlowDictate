@@ -36,7 +36,29 @@ enum AudioLevelMeter {
             sum += sample * sample
         }
         let rms = sqrt(sum / Float(samples.count))
-        return min(max(rms * 8, 0), 1)
+        guard rms > 0.000_001 else { return 0 }
+
+        // Speech occupies only a small part of the linear amplitude range. Map a
+        // useful microphone range (-55...-8 dBFS) to the full meter and give quiet
+        // speech a little more visual weight without making silence look active.
+        let decibels = 20 * log10(rms)
+        let linear = min(max((decibels + 55) / 47, 0), 1)
+        return pow(linear, 0.65)
+    }
+}
+
+nonisolated final class AudioLevelUpdateGate: @unchecked Sendable {
+    private let minimumInterval: TimeInterval
+    private var lastUpdate = -TimeInterval.infinity
+
+    init(updatesPerSecond: Double = 10) {
+        minimumInterval = 1 / max(updatesPerSecond, 1)
+    }
+
+    func shouldPublish(at timestamp: TimeInterval) -> Bool {
+        guard timestamp - lastUpdate >= minimumInterval else { return false }
+        lastUpdate = timestamp
+        return true
     }
 }
 
@@ -111,6 +133,7 @@ final class MicrophoneRecorder: AudioRecording {
         )
 
         let file = try AVAudioFile(forWriting: url, settings: tapFormat.settings)
+        let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
             do {
                 try file.write(from: buffer)
@@ -123,6 +146,9 @@ final class MicrophoneRecorder: AudioRecording {
                 previewBufferHandler(previewBuffer)
             }
 
+            guard levelUpdateGate.shouldPublish(
+                at: ProcessInfo.processInfo.systemUptime
+            ) else { return }
             guard let channel = buffer.floatChannelData?[0] else { return }
             let frameCount = Int(buffer.frameLength)
             guard frameCount > 0 else { return }

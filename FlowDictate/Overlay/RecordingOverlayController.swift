@@ -162,6 +162,7 @@ private final class NonActivatingPanel: NSPanel {
 private struct RecordingOverlayView: View {
     @ObservedObject var model: RecordingOverlayModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var previousPreviewLineCount = 1
 
     var body: some View {
         Group {
@@ -314,6 +315,11 @@ private struct RecordingOverlayView: View {
                             Color.clear.frame(height: 1).id("preview-end")
                         }
                         .onChange(of: text) {
+                            let lineCount = text.reduce(into: 1) { count, character in
+                                if character == "\n" { count += 1 }
+                            }
+                            defer { previousPreviewLineCount = lineCount }
+                            guard lineCount > previousPreviewLineCount else { return }
                             proxy.scrollTo("preview-end", anchor: .bottom)
                         }
                     }
