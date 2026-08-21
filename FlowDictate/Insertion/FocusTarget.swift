@@ -24,6 +24,22 @@ struct FocusTarget {
         )
     }
 
+    static func capture(bundleIdentifier: String?) -> FocusTarget? {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return nil }
+        guard let application = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first(where: { !$0.isTerminated }) else { return nil }
+
+        return FocusTarget(
+            application: application,
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: application.bundleIdentifier,
+            localizedName: application.localizedName ?? "Unknown application"
+        )
+    }
+
+    var isAvailable: Bool { !application.isTerminated }
+
     func activate(timeout: Duration = .seconds(2)) async -> Bool {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier {
             return true

@@ -36,6 +36,8 @@ final class AppSettings: ObservableObject {
         static let onboardingVersion = "onboardingVersion"
         static let automaticRetryEnabled = "automaticRetryEnabled"
         static let audioRetentionDays = "audioRetentionDays"
+        static let historyRetentionDays = "historyRetentionDays"
+        static let historyMaximumRecordCount = "historyMaximumRecordCount"
     }
 
     private let defaults: UserDefaults
@@ -88,6 +90,14 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(audioRetentionDays, forKey: Key.audioRetentionDays) }
     }
 
+    @Published var historyRetentionDays: Int {
+        didSet { defaults.set(historyRetentionDays, forKey: Key.historyRetentionDays) }
+    }
+
+    @Published var historyMaximumRecordCount: Int {
+        didSet { defaults.set(historyMaximumRecordCount, forKey: Key.historyMaximumRecordCount) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -114,10 +124,23 @@ final class AppSettings: ObservableObject {
         let storedDelay = defaults.object(forKey: Key.clipboardRestoreDelay) as? Double
         clipboardRestoreDelay = storedDelay ?? 0.6
 
-        onboardingVersion = defaults.integer(forKey: Key.onboardingVersion)
+        let storedOnboardingVersion = defaults.integer(forKey: Key.onboardingVersion)
+        onboardingVersion = storedOnboardingVersion
         automaticRetryEnabled = defaults.object(forKey: Key.automaticRetryEnabled) as? Bool ?? true
         let storedRetention = defaults.integer(forKey: Key.audioRetentionDays)
         audioRetentionDays = storedRetention == 0 ? 30 : storedRetention
+
+        let existingInstallation = storedOnboardingVersion > 0
+        if let storedHistoryDays = defaults.object(forKey: Key.historyRetentionDays) as? Int {
+            historyRetentionDays = storedHistoryDays
+        } else {
+            historyRetentionDays = existingInstallation ? -1 : 365
+        }
+        if let storedHistoryMaximum = defaults.object(forKey: Key.historyMaximumRecordCount) as? Int {
+            historyMaximumRecordCount = storedHistoryMaximum
+        } else {
+            historyMaximumRecordCount = existingInstallation ? -1 : 1_000
+        }
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

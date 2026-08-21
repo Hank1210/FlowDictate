@@ -17,6 +17,7 @@ protocol TranscriptionProvider: Sendable {
 
 enum TranscriptionProviderError: LocalizedError {
     case missingAPIKey
+    case audioFileTooLarge(actualBytes: Int64, maximumBytes: Int64)
     case invalidResponse
     case emptyTranscript
     case server(statusCode: Int, message: String)
@@ -25,6 +26,8 @@ enum TranscriptionProviderError: LocalizedError {
         switch self {
         case .missingAPIKey:
             "No OpenAI API key is configured. Add one in FlowDictate Settings → Transcription."
+        case let .audioFileTooLarge(actualBytes, maximumBytes):
+            "The recording is too large to upload (\(Self.megabytes(actualBytes)) MB). The limit is \(Self.megabytes(maximumBytes)) MB. The original recording was kept."
         case .invalidResponse:
             "The transcription service returned an invalid response."
         case .emptyTranscript:
@@ -32,5 +35,9 @@ enum TranscriptionProviderError: LocalizedError {
         case let .server(statusCode, message):
             "Transcription failed (HTTP \(statusCode)): \(message)"
         }
+    }
+
+    private static func megabytes(_ bytes: Int64) -> String {
+        String(format: "%.1f", Double(bytes) / 1_000_000)
     }
 }

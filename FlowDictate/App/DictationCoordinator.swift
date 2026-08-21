@@ -7,7 +7,7 @@ import OSLog
 
 @MainActor
 final class DictationCoordinator: ObservableObject {
-    static let currentOnboardingVersion = 2
+    static let currentOnboardingVersion = FlowDictateVersion.onboardingSchema
 
     @Published private(set) var state: DictationState = .idle
     @Published private(set) var inputDevices: [AudioInputDevice] = []
@@ -42,8 +42,10 @@ final class DictationCoordinator: ObservableObject {
     private let focusTargetProvider: @MainActor () -> FocusTarget?
     private let historyStore: DictationHistoryStore
     private let audioStore: AudioStore
+    private let transcriptionRunner: TranscriptionRunner
 
     private var focusTarget: FocusTarget?
+    private var lastExternalFocusTarget: FocusTarget?
     private var isHandlingToggle = false
     private var lastHotKeyDate = Date.distantPast
     private var overlayDismissTask: Task<Void, Never>?
@@ -119,6 +121,7 @@ final class DictationCoordinator: ObservableObject {
         self.recordingLocationStore = recordingLocationStore
         self.historyStore = historyStore
         self.audioStore = audioStore ?? AudioStore(locationStore: recordingLocationStore)
+        transcriptionRunner = TranscriptionRunner(historyStore: historyStore)
 
         recorder.levelHandler = { [weak self] level in
             let activeLevel = self?.recorder.isRecording == true ? level : 0
@@ -136,7 +139,7 @@ final class DictationCoordinator: ObservableObject {
             try? await Task.sleep(for: .milliseconds(400))
             self.showOnboarding()
         }
-        FlowLogger.app.info("FlowDictate Phase 2 started")
+        FlowLogger.app.info("FlowDictate \(FlowDictateVersion.displayString, privacy: .public) started")
     }
 
     deinit { overlayDismissTask?.cancel() }
@@ -173,7 +176,7 @@ final class DictationCoordinator: ObservableObject {
             Task {
                 var record = makeRecord(from: recording, target: target, status: .cancelled)
                 record.cancelled = true
-                try? await historyStore.upsert(record)
+                await persistBestEffort(record, context: "cancelled recording")
                 await refreshHistory()
             }
         } catch { fail(error, retainedAudioURL: nil) }
@@ -381,8 +384,20 @@ final class DictationCoordinator: ObservableObject {
 
     func deleteHistoryRecord(_ record: DictationRecord, deleteAudio: Bool) {
         Task {
-            if deleteAudio, let url = try? audioURL(for: record) { try? FileManager.default.removeItem(at: url) }
-            try? await historyStore.delete(id: record.id)
+            do {
+                if deleteAudio {
+                    if let url = try? audioURL(for: record), FileManager.default.fileExists(atPath: url.path) {
+                        try FileManager.default.removeItem(at: url)
+                    }
+                    try await historyStore.delete(id: record.id)
+                } else if record.audioFileSize > 0 {
+                    try await historyStore.archive(id: record.id)
+                } else {
+                    try await historyStore.delete(id: record.id)
+                }
+            } catch {
+                FlowLogger.app.error("History deletion failed: \(error.localizedDescription, privacy: .public)")
+            }
             await refreshHistory()
         }
     }
@@ -395,36 +410,32 @@ final class DictationCoordinator: ObservableObject {
             var updated = record
             do {
                 let url = try audioURL(for: record)
-                updated.status = .transcribing
-                updated.attemptCount += 1
-                updated.lastAttemptAt = Date()
-                updated.updatedAt = Date()
-                try await historyStore.upsert(updated)
-                let result = try await activeProvider().transcribe(
-                    TranscriptionRequest(audioURL: url, language: updated.language)
+                updated = try await transcriptionRunner.run(
+                    record: updated,
+                    audioURL: url,
+                    language: updated.language,
+                    maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
+                    provider: try activeProvider()
                 )
-                updated.status = .transcribed
-                updated.originalTranscript = result.text
-                updated.finalText = result.text
-                updated.providerID = result.provider
-                updated.modelID = result.model
-                updated.errorCategory = nil
-                updated.errorMessage = nil
-                updated.updatedAt = Date()
-                try await historyStore.upsert(updated)
+            } catch let failure as TranscriptionRunFailure {
+                updated = failure.record
+            } catch let failure as TranscriptionPersistenceFailure {
+                FlowLogger.app.error("Retry history persistence failed: \(failure.localizedDescription, privacy: .public)")
+                fail(failure, retainedAudioURL: try? audioURL(for: record))
             } catch {
                 updated.status = .transcriptionFailed
                 updated.errorCategory = DictationFailureClassifier.category(for: error)
                 updated.errorMessage = error.localizedDescription
                 updated.updatedAt = Date()
-                try? await historyStore.upsert(updated)
+                await persistBestEffort(updated, context: "transcription retry failure")
             }
             await refreshHistory()
         }
     }
 
     func reinsert(_ record: DictationRecord) {
-        guard let text = record.finalText ?? record.originalTranscript, let target = focusTargetProvider() else {
+        guard let text = record.finalText ?? record.originalTranscript,
+              let target = insertionTarget(for: record) else {
             fail(TextInsertionError.targetUnavailable, retainedAudioURL: nil); return
         }
         Task { await insertStoredText(text, record: record, target: target) }
@@ -432,10 +443,15 @@ final class DictationCoordinator: ObservableObject {
 
     func restoreLastDictation() {
         Task {
-            guard let record = try? await historyStore.lastInsertable() else {
-                failMessage("No successful dictation is available to restore."); return
+            do {
+                guard let record = try await historyStore.lastInsertable() else {
+                    failMessage("No successful dictation is available to restore."); return
+                }
+                reinsert(record)
+            } catch {
+                FlowLogger.app.error("History restore lookup failed: \(error.localizedDescription, privacy: .public)")
+                fail(error, retainedAudioURL: nil)
             }
-            reinsert(record)
         }
     }
 
@@ -450,17 +466,9 @@ final class DictationCoordinator: ObservableObject {
                     let target = destination.appendingPathComponent(source.lastPathComponent)
                     if !FileManager.default.fileExists(atPath: target.path) { try FileManager.default.copyItem(at: source, to: target) }
                     let values = try target.resourceValues(forKeys: [.fileSizeKey])
-                    let now = Date()
-                    let record = DictationRecord(
-                        id: UUID(), createdAt: now, recordingStartedAt: now, recordingEndedAt: now,
-                        duration: 0, status: .recovered,
-                        audioRelativePath: try audioStore.relativePath(for: target),
-                        audioFileSize: Int64(values.fileSize ?? 0), originalTranscript: nil, finalText: nil,
-                        providerID: "", modelID: "", language: nil, targetBundleIdentifier: nil,
-                        targetApplicationName: nil, attemptCount: 0, lastAttemptAt: nil,
-                        errorCategory: .interrupted, errorCode: nil,
-                        errorMessage: "Recovered from the Phase 1 recordings folder.",
-                        cancelled: false, updatedAt: now, schemaVersion: 1
+                    let record = DictationRecord.migratedLegacyRecording(
+                        relativePath: try audioStore.relativePath(for: target),
+                        fileSize: Int64(values.fileSize ?? 0)
                     )
                     try await historyStore.upsert(record)
                 }
@@ -498,11 +506,40 @@ final class DictationCoordinator: ObservableObject {
         catch { FlowLogger.app.error("History load failed: \(error.localizedDescription, privacy: .public)") }
     }
 
+    func applyRetentionSettings() {
+        Task {
+            do {
+                try await applyRetentionPolicy()
+                let result = try await historyStore.applyRetention(
+                    maximumAgeDays: settings.historyRetentionDays,
+                    maximumRecordCount: settings.historyMaximumRecordCount
+                )
+                FlowLogger.app.info(
+                    "Manual retention removed \(result.removedCount, privacy: .public) and archived \(result.archivedCount, privacy: .public) records"
+                )
+                setupMessage = "Retention settings applied."
+            } catch {
+                FlowLogger.app.error("Manual retention failed: \(error.localizedDescription, privacy: .public)")
+                setupMessage = error.localizedDescription
+            }
+            await refreshHistory()
+        }
+    }
+
     private func recoverAndRefreshHistory() async {
         do {
             _ = try await historyStore.recoverInterrupted()
             try await recoverOrphanedAudio()
             try await applyRetentionPolicy()
+            let historyResult = try await historyStore.applyRetention(
+                maximumAgeDays: settings.historyRetentionDays,
+                maximumRecordCount: settings.historyMaximumRecordCount
+            )
+            if historyResult.removedCount > 0 || historyResult.archivedCount > 0 {
+                FlowLogger.app.info(
+                    "History retention removed \(historyResult.removedCount, privacy: .public) and archived \(historyResult.archivedCount, privacy: .public) records"
+                )
+            }
         }
         catch { FlowLogger.app.error("Recovery failed: \(error.localizedDescription, privacy: .public)") }
         await refreshHistory()
@@ -512,7 +549,7 @@ final class DictationCoordinator: ObservableObject {
         let days = settings.audioRetentionDays
         guard days >= 0, recordingLocationConfigured,
               let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: now) else { return }
-        for var record in try await historyStore.all()
+        for var record in try await historyStore.all(includeArchived: true)
         where record.status == .completed && record.recordingEndedAt < cutoff && record.audioFileSize > 0 {
             let url = try audioURL(for: record)
             if FileManager.default.fileExists(atPath: url.path) {
@@ -526,23 +563,17 @@ final class DictationCoordinator: ObservableObject {
 
     private func recoverOrphanedAudio() async throws {
         guard recordingLocationConfigured else { return }
-        let known = Set(try await historyStore.all().map(\.audioRelativePath))
+        let known = try await historyStore.knownAudioRelativePaths()
         let directory = try audioStore.recordingsDirectory()
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
         for file in files where ["wav", "recording"].contains(file.pathExtension.lowercased()) {
             let relative = try audioStore.relativePath(for: file)
             guard !known.contains(relative) else { continue }
             let values = try file.resourceValues(forKeys: [.fileSizeKey])
-            let now = Date()
-            try await historyStore.upsert(DictationRecord(
-                id: UUID(), createdAt: now, recordingStartedAt: now, recordingEndedAt: now,
-                duration: 0, status: .recovered, audioRelativePath: relative,
-                audioFileSize: Int64(values.fileSize ?? 0), originalTranscript: nil, finalText: nil,
-                providerID: "", modelID: "", language: nil, targetBundleIdentifier: nil,
-                targetApplicationName: nil, attemptCount: 0, lastAttemptAt: nil,
-                errorCategory: .interrupted, errorCode: nil,
-                errorMessage: "Audio was found without a completed history entry.",
-                cancelled: false, updatedAt: now, schemaVersion: 1
+            try await historyStore.upsert(.recoveredAudio(
+                relativePath: relative,
+                fileSize: Int64(values.fileSize ?? 0),
+                message: "Audio was found without a completed history entry."
             ))
         }
     }
@@ -620,12 +651,19 @@ final class DictationCoordinator: ObservableObject {
             try recorder.start()
             overlayDismissTask?.cancel()
             focusTarget = target
+            lastExternalFocusTarget = target
             state = .recording
             overlay.show(status: .recording, reposition: true)
         } catch AudioDeviceServiceError.selectedDeviceUnavailable {
             settings.inputDeviceUID = nil
             recorder.selectInputDevice(nil)
-            do { try recorder.start(); focusTarget = target; state = .recording; overlay.show(status: .recording, reposition: true) }
+            do {
+                try recorder.start()
+                focusTarget = target
+                lastExternalFocusTarget = target
+                state = .recording
+                overlay.show(status: .recording, reposition: true)
+            }
             catch { fail(error, retainedAudioURL: nil) }
         } catch { refreshPermissionStatus(); fail(error, retainedAudioURL: nil) }
     }
@@ -647,43 +685,34 @@ final class DictationCoordinator: ObservableObject {
         state = .transcribing
         overlay.show(status: .processing)
         do {
-            record.status = .transcribing; record.attemptCount = 1; record.lastAttemptAt = Date(); record.updatedAt = Date()
-            try await historyStore.upsert(record)
-            let result = try await transcribeWithRetry(recording.url)
-            record.status = .transcribed; record.originalTranscript = result.text; record.finalText = result.text
-            record.providerID = result.provider; record.modelID = result.model; record.updatedAt = Date()
-            try await historyStore.upsert(record)
+            record = try await transcriptionRunner.run(
+                record: record,
+                audioURL: recording.url,
+                language: settings.transcriptionLanguage.apiValue,
+                maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
+                provider: try activeProvider()
+            )
             state = .inserting; record.status = .inserting; record.updatedAt = Date()
             try await historyStore.upsert(record)
-            try await makeInserter().insert(result.text, into: target)
+            try await makeInserter().insert(record.finalText ?? record.originalTranscript ?? "", into: target)
             record.status = .completed; record.errorCategory = nil; record.errorMessage = nil; record.updatedAt = Date()
             try await historyStore.upsert(record)
             focusTarget = nil; state = .success; overlay.show(status: .success)
             scheduleOverlayDismiss(after: .milliseconds(900), transitionToIdle: true)
+        } catch let failure as TranscriptionRunFailure {
+            record = failure.record
+            fail(failure.underlyingError, retainedAudioURL: recording.url)
+        } catch let failure as TranscriptionPersistenceFailure {
+            record = failure.record
+            fail(failure, retainedAudioURL: recording.url)
         } catch {
             record.status = record.originalTranscript == nil ? .transcriptionFailed : .insertionFailed
             record.errorCategory = DictationFailureClassifier.category(for: error)
             record.errorMessage = error.localizedDescription; record.updatedAt = Date()
-            try? await historyStore.upsert(record)
+            await persistBestEffort(record, context: "dictation failure")
             fail(error, retainedAudioURL: recording.url)
         }
         await refreshHistory()
-    }
-
-    private func transcribeWithRetry(_ url: URL) async throws -> TranscriptionResult {
-        let maximum = settings.automaticRetryEnabled ? 3 : 1
-        var attempt = 0
-        while true {
-            attempt += 1
-            do {
-                return try await activeProvider().transcribe(
-                    TranscriptionRequest(audioURL: url, language: settings.transcriptionLanguage.apiValue)
-                )
-            } catch {
-                guard attempt < maximum, DictationFailureClassifier.isRetryable(error) else { throw error }
-                try? await Task.sleep(for: .milliseconds(attempt == 1 ? 500 : 1_500))
-            }
-        }
     }
 
     private func insertStoredText(_ text: String, record: DictationRecord, target: FocusTarget) async {
@@ -696,7 +725,8 @@ final class DictationCoordinator: ObservableObject {
         } catch {
             updated.status = .insertionFailed; updated.errorCategory = .insertion
             updated.errorMessage = error.localizedDescription; updated.updatedAt = Date()
-            try? await historyStore.upsert(updated); fail(error, retainedAudioURL: try? audioURL(for: record))
+            await persistBestEffort(updated, context: "insertion failure")
+            fail(error, retainedAudioURL: try? audioURL(for: record))
         }
         await refreshHistory()
     }
@@ -705,16 +735,30 @@ final class DictationCoordinator: ObservableObject {
         let attributes = try? FileManager.default.attributesOfItem(atPath: recording.url.path)
         let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
         let now = Date()
-        return DictationRecord(
-            id: recording.id, createdAt: now, recordingStartedAt: recording.startedAt,
-            recordingEndedAt: now, duration: recording.duration, status: status,
+        return .newRecording(
+            id: recording.id,
+            startedAt: recording.startedAt,
+            endedAt: now,
+            duration: recording.duration,
+            status: status,
             audioRelativePath: (try? audioStore.relativePath(for: recording.url)) ?? recording.url.path,
-            audioFileSize: size, originalTranscript: nil, finalText: nil, providerID: "OpenAI",
-            modelID: settings.transcriptionModel, language: settings.transcriptionLanguage.apiValue,
-            targetBundleIdentifier: target?.bundleIdentifier, targetApplicationName: target?.localizedName,
-            attemptCount: 0, lastAttemptAt: nil, errorCategory: nil, errorCode: nil,
-            errorMessage: nil, cancelled: status == .cancelled, updatedAt: now, schemaVersion: 1
+            audioFileSize: size,
+            providerID: "OpenAI",
+            modelID: settings.transcriptionModel,
+            language: settings.transcriptionLanguage.apiValue,
+            targetBundleIdentifier: target?.bundleIdentifier,
+            targetApplicationName: target?.localizedName
         )
+    }
+
+    private func persistBestEffort(_ record: DictationRecord, context: String) async {
+        do {
+            try await historyStore.upsert(record)
+        } catch {
+            FlowLogger.app.error(
+                "Could not persist \(context, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func audioURL(for record: DictationRecord) throws -> URL {
@@ -727,6 +771,23 @@ final class DictationCoordinator: ObservableObject {
             pasteboard: .general,
             restoreDelay: .milliseconds(Int(settings.clipboardRestoreDelay * 1_000))
         )
+    }
+
+    private func insertionTarget(for record: DictationRecord) -> FocusTarget? {
+        if let current = focusTargetProvider() {
+            lastExternalFocusTarget = current
+            return current
+        }
+        if let recordedApplication = FocusTarget.capture(
+            bundleIdentifier: record.targetBundleIdentifier
+        ) {
+            lastExternalFocusTarget = recordedApplication
+            return recordedApplication
+        }
+        if let lastExternalFocusTarget, lastExternalFocusTarget.isAvailable {
+            return lastExternalFocusTarget
+        }
+        return nil
     }
     private func activeProvider() throws -> any TranscriptionProvider {
         if let injectedProvider { return injectedProvider }

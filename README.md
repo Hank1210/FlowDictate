@@ -10,6 +10,7 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - microphone recording with local WAV backup
 - selectable audio input and live level metering
 - OpenAI transcription with model and language settings
+- compact M4A upload preparation with file-based multipart transfer and an early size check
 - clipboard-safe insertion into the application that originally had focus
 - a non-activating recording and processing overlay on the display containing the mouse
 - API credentials stored in macOS Keychain
@@ -22,7 +23,7 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - crash recovery and orphaned-recording detection
 - manual retry plus bounded automatic retry for temporary provider failures
 - configurable Restore Last Dictation hotkey
-- configurable retention for successful audio while failed recordings remain protected
+- separate, configurable retention for successful audio and visible history while failed recordings remain protected
 
 Writing styles, personal dictionary, local speech models, statistics and streaming remain reserved for later phases.
 
@@ -56,6 +57,8 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 - **Advanced:** clipboard restoration delay and automatic retries
 
 If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload in the folder selected during setup. History metadata remains local in the app's Application Support container.
+
+New installations keep at most 1,000 visible history entries and 365 days by default. Existing installations remain unlimited until the user chooses limits. A history entry whose audio must still be retained is archived instead of being treated as an orphan; its compact archive marker is removed after the separate audio-retention rule removes the file.
 
 ## Standalone release
 
@@ -102,7 +105,9 @@ xcodebuild test \
 
 The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
-Automated tests cover configuration, transcription request construction, state rules, start/stop/cancel orchestration, history persistence and recovery, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Accessibility, folder authorization, overlay placement and insertion into third-party applications require manual macOS testing.
+Automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded preview buffering, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement and insertion into third-party applications require manual macOS testing.
+
+The pre-Phase-3.1 foundation includes a bounded single-tap audio-buffer path and a local Apple Speech provider abstraction. It is deliberately not connected to the user interface yet; Live Preview remains disabled until Phase 3.1 implements its complete lifecycle, permission guidance and fallback behavior.
 
 The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
 

@@ -337,6 +337,24 @@ struct FlowDictateSettingsView: View {
                 }
                 Text("Failed and recovered recordings are never deleted automatically.")
                     .font(.caption).foregroundStyle(.secondary)
+
+                Picker("Keep history", selection: $settings.historyRetentionDays) {
+                    Text("30 days").tag(30)
+                    Text("90 days").tag(90)
+                    Text("1 year").tag(365)
+                    Text("Forever").tag(-1)
+                }
+                Picker("Maximum history entries", selection: $settings.historyMaximumRecordCount) {
+                    Text("250").tag(250)
+                    Text("500").tag(500)
+                    Text("1,000").tag(1_000)
+                    Text("Unlimited").tag(-1)
+                }
+                Text("History and audio retention are separate. Failed and recovery-required entries are protected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Apply Retention Now") {
+                    coordinator.applyRetentionSettings()
+                }
             }
 
             Section("Migration") {

@@ -44,6 +44,7 @@ enum AudioLevelMeter {
 protocol AudioRecording: AnyObject {
     var isRecording: Bool { get }
     var levelHandler: (@MainActor (Float) -> Void)? { get set }
+    var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)? { get set }
     func selectInputDevice(_ deviceID: AudioDeviceID?)
     func start() throws
     func stop() throws -> AudioRecordingResult
@@ -60,6 +61,7 @@ final class MicrophoneRecorder: AudioRecording {
     private var selectedDeviceID: AudioDeviceID?
 
     var levelHandler: (@MainActor (Float) -> Void)?
+    var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
 
     var isRecording: Bool { engine?.isRunning == true }
 
@@ -109,6 +111,11 @@ final class MicrophoneRecorder: AudioRecording {
                 try file.write(from: buffer)
             } catch {
                 FlowLogger.audio.error("Audio file write failed: \(error.localizedDescription, privacy: .public)")
+            }
+
+            if let previewBufferHandler = self.previewBufferHandler,
+               let previewBuffer = LivePreviewAudioBuffer(copying: buffer) {
+                previewBufferHandler(previewBuffer)
             }
 
             guard let channel = buffer.floatChannelData?[0] else { return }

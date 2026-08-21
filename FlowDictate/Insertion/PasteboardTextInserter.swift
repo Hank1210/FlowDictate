@@ -12,7 +12,7 @@ enum TextInsertionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .targetUnavailable:
-            "The application that had focus when dictation started is no longer available."
+            "The target application is no longer available. Place the cursor in a running application and try again."
         case .clipboardWriteFailed:
             "The transcript could not be written to the clipboard."
         case .keyboardEventCreationFailed:
