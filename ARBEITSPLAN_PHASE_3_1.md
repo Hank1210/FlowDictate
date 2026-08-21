@@ -2,7 +2,7 @@
 
 **Phase:** 3.1 – Live Preview & Overlay
 
-**Status:** Technisch umgesetzt; manuelle macOS- und Hardwareprüfung ausstehend
+**Status:** Abgeschlossen; in Phase 3.2 integriert und auf dem Referenz-Mac geprüft
 
 **Stand:** 21. August 2026
 

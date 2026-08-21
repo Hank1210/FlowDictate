@@ -1,13 +1,13 @@
 # Product Requirements Document: FlowDictate Phase 3
 
 **Version:** 3.0 Draft 1
-**Datum:** 18. August 2026
+**Datum:** 21. August 2026
 **Produkt:** FlowDictate
 **Phase:** Phase 3 – Live & Smart Dictation
 **Teilphasen:** 3.1 Live Preview, 3.2 Smart Dictation, 3.3 App Integration & Delivery
 **Zielplattform:** macOS 14 oder neuer
 **Technologie:** Swift, SwiftUI, AppKit, AVFoundation, Speech, Accessibility APIs
-**Status:** Phasen 3.1 und 3.2 technisch umgesetzt; manuelle Abnahme von 3.2 ausstehend. Phase 3.3 geplant.
+**Status:** Phasen 3.1 und 3.2 umgesetzt und auf dem Referenz-Mac manuell abgenommen; Phase 3.3 geplant.
 
 ---
 
@@ -581,6 +581,8 @@ Phase 3.2 ist abgeschlossen, wenn:
 7. eigene Stile angelegt, dupliziert, exportiert und gelöscht werden können,
 8. Migration bestehender Phase-2-Datensätze ohne Datenverlust funktioniert,
 9. Tests Reihenfolge, Wortgrenzen, Konflikte, Retry und Fallback abdecken.
+
+Die manuelle Abschlussprüfung auf dem Referenz-Mac wurde am 21. August 2026 erfolgreich durchgeführt. Geräteübergreifende Community-Installationstests bleiben Bestandteil des jeweiligen Release-Prozesses.
 
 ---
 

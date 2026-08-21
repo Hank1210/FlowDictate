@@ -5,16 +5,23 @@ SCRIPT_DIRECTORY=${0:A:h}
 PROJECT_DIRECTORY=${SCRIPT_DIRECTORY:h}
 DERIVED_DATA_DIRECTORY=${FLOWDICTATE_COMMUNITY_DERIVED_DATA:-${PROJECT_DIRECTORY}/build/CommunityDerivedData}
 DIST_DIRECTORY=${PROJECT_DIRECTORY}/dist
-VERSION=${FLOWDICTATE_VERSION:-2.0}
+VERSION=${FLOWDICTATE_VERSION:-3.2.0}
 PACKAGE_NAME=FlowDictate-${VERSION}-Community
-STAGING_DIRECTORY=${PROJECT_DIRECTORY}/build/${PACKAGE_NAME}
+STAGING_ROOT=$(/usr/bin/mktemp -d /private/tmp/FlowDictateCommunity.XXXXXX)
+STAGING_DIRECTORY=${STAGING_ROOT}/${PACKAGE_NAME}
 BUILT_APP=${DERIVED_DATA_DIRECTORY}/Build/Products/Release/FlowDictate.app
 PACKAGED_APP=${STAGING_DIRECTORY}/FlowDictate.app
 ZIP_PATH=${DIST_DIRECTORY}/${PACKAGE_NAME}-macOS.zip
 CHECKSUM_PATH=${ZIP_PATH}.sha256
+ZIP_FILENAME=${ZIP_PATH:t}
 ENTITLEMENTS_PATH=${PROJECT_DIRECTORY}/config/FlowDictateCommunity.entitlements
 INSTALLATION_GUIDE_DE=${PROJECT_DIRECTORY}/COMMUNITY_INSTALLATION.md
 INSTALLATION_GUIDE_EN=${PROJECT_DIRECTORY}/COMMUNITY_INSTALLATION_EN.md
+
+cleanup() {
+    /bin/rm -rf "${STAGING_ROOT}"
+}
+trap cleanup EXIT
 
 if [[ ! -d /Applications/Xcode.app ]]; then
     echo "Xcode was not found at /Applications/Xcode.app." >&2
@@ -26,7 +33,7 @@ if [[ ! -f ${ENTITLEMENTS_PATH} || ! -f ${INSTALLATION_GUIDE_DE} || ! -f ${INSTA
     exit 1
 fi
 
-/bin/rm -rf "${DERIVED_DATA_DIRECTORY}" "${STAGING_DIRECTORY}"
+/bin/rm -rf "${DERIVED_DATA_DIRECTORY}"
 /bin/rm -f "${ZIP_PATH}" "${CHECKSUM_PATH}"
 /bin/mkdir -p "${DIST_DIRECTORY}" "${STAGING_DIRECTORY}"
 
@@ -73,7 +80,10 @@ fi
     "${STAGING_DIRECTORY}" \
     "${ZIP_PATH}"
 
-/usr/bin/shasum -a 256 "${ZIP_PATH}" > "${CHECKSUM_PATH}"
+(
+    cd "${DIST_DIRECTORY}"
+    /usr/bin/shasum -a 256 "${ZIP_FILENAME}"
+) > "${CHECKSUM_PATH}"
 
 echo "Community release created:"
 echo "  ${ZIP_PATH}"

@@ -2,7 +2,7 @@
 
 **Phase:** 3.2 – Smart Dictation
 
-**Status:** Technisch umgesetzt; manuelle Abnahme ausstehend
+**Status:** Abgeschlossen; automatisierte Tests und manueller Referenz-Mac-Test bestanden
 
 **Stand:** 21. August 2026
 
@@ -692,6 +692,8 @@ I  Qualität, Datenschutz und Abnahme
 | Umfang wächst in Richtung Phase 3.3 | klare Nicht-Ziele und Gates je Teilschritt |
 
 ## 19. Startpunkt
+
+> Abschlussvermerk vom 21. August 2026: Die Arbeitspakete A bis I sind umgesetzt, 39 automatisierte Tests bestehen und Aufnahme, Live Preview, Transkription, Smart Dictation sowie Einfügung wurden auf dem Referenz-Mac erfolgreich geprüft.
 
 Die Implementierung beginnt mit Arbeitspaket A. Vor der ersten Codeänderung werden:
 
