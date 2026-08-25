@@ -1,6 +1,6 @@
 # FlowDictate Release Guide
 
-FlowDictate 3.3.0 runs as a standalone macOS menu bar app. A release never contains an API key; every installation collects and stores the owner's key during onboarding.
+FlowDictate 3.4.0 runs as a standalone macOS menu bar app. A release never contains an API key; every installation collects and stores the owner's key during onboarding.
 
 ## Free Community release
 
@@ -12,8 +12,8 @@ The Community release is intended for personal Macs and a trusted circle. It doe
 
 The script performs an unsigned universal Release build, applies an ad hoc signature with the required sandbox entitlements, verifies that signature, and creates these files in `dist/`:
 
-- `FlowDictate-3.3.0-Community-macOS.zip`
-- `FlowDictate-3.3.0-Community-macOS.zip.sha256`
+- `FlowDictate-3.4.0-Community-macOS.zip`
+- `FlowDictate-3.4.0-Community-macOS.zip.sha256`
 
 The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, Screen & System Audio Recording or Keychain permission to be granted again.
 
@@ -21,7 +21,7 @@ Verify the generated archive before uploading it:
 
 ```sh
 cd dist
-shasum -a 256 -c FlowDictate-3.3.0-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-3.4.0-Community-macOS.zip.sha256
 ```
 
 ## GitHub release checklist
@@ -30,8 +30,8 @@ shasum -a 256 -c FlowDictate-3.3.0-Community-macOS.zip.sha256
 2. Run the automated tests and the manual Preview/recording smoke test.
 3. Run `./scripts/build-community-release.sh` on a clean checkout.
 4. Verify the SHA-256 checksum and test the ZIP on a second macOS account or Mac.
-5. Create the annotated tag `v3.3.0` from the reviewed commit.
-6. Create a GitHub Release for that tag using `RELEASE_NOTES_3.3.0.md`.
+5. Create the annotated tag `v3.4.0` from the reviewed commit.
+6. Create a GitHub Release for that tag using `RELEASE_NOTES_3.4.0.md`.
 7. Attach only the Community ZIP and its `.sha256` file. GitHub supplies source archives automatically.
 8. Keep the release marked as a prerelease until the downloaded asset has passed the installation test; then publish it as the latest stable release.
 
@@ -39,7 +39,7 @@ Do not commit the generated `dist/` or `build/` directories. They are intentiona
 
 ## Updating an existing installation
 
-The 3.3.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused. History is migrated on first access, with a one-time `dictations-pre-3.2.json` backup when updating from a version before 3.2.0. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again. Follow the targeted permission-repair procedure in the bundled installation guide instead of resetting all permissions at once.
+The 3.4.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused. History gains migration-safe long-form fields and creates a one-time `dictations-pre-3.4.json` backup before the migrated file is written. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again. Follow the targeted permission-repair procedure in the bundled installation guide instead of resetting all permissions at once.
 
 The following sections describe the optional paid Developer ID workflow.
 
@@ -80,3 +80,7 @@ The script submits the ZIP, waits for Apple's result, staples the ticket to the 
 8. Interrupt processing, relaunch, and verify recovery in History.
 
 Never distribute builds containing an `.env` file, Xcode Scheme secret, personal API key, or notarization credential.
+
+## Additional Phase 3.4 gate
+
+Before a Phase 3.4 release, test the exact generated Community ZIP with a recording that produces at least three segments. Pause after a successful segment, relaunch the packaged app and confirm that continuation does not upload the successful segment again. Also test one temporary segment failure, insufficient working storage guidance, ordered merged text, retained original audio and deletion of temporary segment files. Do not create a tag or GitHub Release until this packaged-app test and the existing checklist both pass.

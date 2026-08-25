@@ -23,13 +23,20 @@ final class TranscriptionRunner {
 
     private let historyStore: DictationHistoryStore
     private let sleeper: Sleeper
+    private let longFormRunner: LongFormTranscriptionRunner
 
     init(
         historyStore: DictationHistoryStore,
+        sessionStore: TranscriptionSessionStore = TranscriptionSessionStore(),
         sleeper: @escaping Sleeper = { try await Task.sleep(for: $0) }
     ) {
         self.historyStore = historyStore
         self.sleeper = sleeper
+        longFormRunner = LongFormTranscriptionRunner(
+            historyStore: historyStore,
+            sessionStore: sessionStore,
+            sleeper: sleeper
+        )
     }
 
     func run(
@@ -37,8 +44,19 @@ final class TranscriptionRunner {
         audioURL: URL,
         language: String?,
         maximumAttempts: Int,
-        provider: any TranscriptionProvider
+        provider: any TranscriptionProvider,
+        progress: @escaping @MainActor (LongFormProgress) -> Void = { _ in }
     ) async throws -> DictationRecord {
+        if let result = try await longFormRunner.runIfNeeded(
+            record: record,
+            audioURL: audioURL,
+            language: language,
+            maximumAttempts: maximumAttempts,
+            provider: provider,
+            progress: progress
+        ) {
+            return result
+        }
         var updated = record
         let maximumAttempts = max(maximumAttempts, 1)
 
@@ -90,6 +108,14 @@ final class TranscriptionRunner {
         }
 
         preconditionFailure("At least one transcription attempt must run")
+    }
+
+    func recoverInterruptedLongFormSessions() async {
+        await longFormRunner.recoverInterruptedSessions()
+    }
+
+    func deleteLongFormSession(recordID: UUID) async {
+        await longFormRunner.deleteSession(recordID: recordID)
     }
 
     private func persist(_ record: DictationRecord) async throws {

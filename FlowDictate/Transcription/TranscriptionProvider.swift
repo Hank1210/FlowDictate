@@ -1,21 +1,28 @@
 import Foundation
 
-struct TranscriptionRequest: Sendable {
+nonisolated struct TranscriptionRequest: Sendable {
     let audioURL: URL
     let language: String?
+    let prompt: String?
+
+    init(audioURL: URL, language: String?, prompt: String? = nil) {
+        self.audioURL = audioURL
+        self.language = language
+        self.prompt = prompt
+    }
 }
 
-struct TranscriptionResult: Equatable, Sendable {
+nonisolated struct TranscriptionResult: Equatable, Sendable {
     let text: String
     let provider: String
     let model: String
 }
 
-protocol TranscriptionProvider: Sendable {
+nonisolated protocol TranscriptionProvider: Sendable {
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult
 }
 
-enum TranscriptionProviderError: LocalizedError {
+nonisolated enum TranscriptionProviderError: LocalizedError {
     case missingAPIKey
     case audioFileContainsNoSamples
     case audioFileTooLarge(actualBytes: Int64, maximumBytes: Int64)

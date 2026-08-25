@@ -1,8 +1,7 @@
 import Foundation
 import OSLog
 
-@MainActor
-final class OpenAITranscriptionProvider: TranscriptionProvider {
+nonisolated final class OpenAITranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     static let maximumAudioFileBytes: Int64 = 24_500_000
     static let minimumAudioFileBytes: Int64 = 1_024
 
@@ -61,7 +60,11 @@ final class OpenAITranscriptionProvider: TranscriptionProvider {
             boundary: boundary,
             fileManager: fileManager
         ).build(
-            fields: [("model", model), ("language", request.language)],
+            fields: [
+                ("model", model),
+                ("language", request.language),
+                ("prompt", request.prompt)
+            ],
             fileFieldName: "file",
             filename: prepared.filename,
             mimeType: prepared.mimeType,
@@ -109,8 +112,8 @@ nonisolated struct OpenAITranscriptionPayload: Decodable {
     let text: String
 }
 
-private struct OpenAIErrorEnvelope: Decodable {
-    struct APIError: Decodable {
+private nonisolated struct OpenAIErrorEnvelope: Decodable {
+    nonisolated struct APIError: Decodable {
         let message: String
     }
 

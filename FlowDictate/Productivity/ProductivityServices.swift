@@ -1,5 +1,29 @@
 import Foundation
 
+nonisolated enum UsageStatisticsPeriod: String, CaseIterable, Identifiable, Sendable {
+    case total
+    case thirtyDays
+    case fourteenDays
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .total: "Total"
+        case .thirtyDays: "30 Days"
+        case .fourteenDays: "14 Days"
+        }
+    }
+
+    func startDate(relativeTo now: Date) -> Date? {
+        switch self {
+        case .total: nil
+        case .thirtyDays: now.addingTimeInterval(-30 * 86_400)
+        case .fourteenDays: now.addingTimeInterval(-14 * 86_400)
+        }
+    }
+}
+
 nonisolated struct UsageStatistics: Equatable, Sendable {
     var successfulDictations: Int = 0
     var totalDuration: TimeInterval = 0
@@ -7,6 +31,16 @@ nonisolated struct UsageStatistics: Equatable, Sendable {
     var characterCount: Int = 0
     var retryCount: Int = 0
     var estimatedSecondsSaved: TimeInterval = 0
+
+    var averageWordsPerDictation: Double {
+        guard successfulDictations > 0 else { return 0 }
+        return Double(wordCount) / Double(successfulDictations)
+    }
+
+    var averageDuration: TimeInterval {
+        guard successfulDictations > 0 else { return 0 }
+        return totalDuration / Double(successfulDictations)
+    }
 
     static func calculate(
         records: [DictationRecord],

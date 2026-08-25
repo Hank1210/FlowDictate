@@ -79,6 +79,15 @@ enum DictationErrorCategory: String, Codable, Sendable {
     case directInsertionUnknown
     case clipboardConflict
     case interrupted
+    case transcriptionPreflight
+    case insufficientWorkingStorage
+    case segmentPlanning
+    case segmentExport
+    case segmentValidation
+    case segmentTranscription
+    case transcriptMerge
+    case sessionPersistence
+    case sourceChanged
     case unknown
 }
 
@@ -118,6 +127,11 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var errorCategory: DictationErrorCategory?
     var errorCode: String?
     var errorMessage: String?
+    var transcriptionSessionID: UUID? = nil
+    var transcriptionSegmentCount: Int? = nil
+    var completedTranscriptionSegmentCount: Int = 0
+    var hasPartialTranscript: Bool = false
+    var partialTranscript: String? = nil
     var cancelled: Bool
     var updatedAt: Date
     var schemaVersion: Int
@@ -145,6 +159,9 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     }
 
     nonisolated var isAutomaticallyProtected: Bool {
+        if transcriptionSessionID != nil || hasPartialTranscript {
+            return true
+        }
         if processingStatus == .enhancing || processingStatus == .enhancementFailed {
             return true
         }
@@ -255,7 +272,10 @@ extension DictationRecord {
         case enhancementErrorCategory, enhancementErrorMessage, dictionaryReplacementCount
         case enhancementFallback, spokenFormattingEnabled, providerID, modelID, language
         case targetBundleIdentifier, targetApplicationName, attemptCount, lastAttemptAt
-        case errorCategory, errorCode, errorMessage, cancelled, updatedAt, schemaVersion, archivedAt
+        case errorCategory, errorCode, errorMessage, transcriptionSessionID
+        case transcriptionSegmentCount, completedTranscriptionSegmentCount
+        case hasPartialTranscript, partialTranscript
+        case cancelled, updatedAt, schemaVersion, archivedAt
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -299,6 +319,14 @@ extension DictationRecord {
         errorCategory = try values.decodeIfPresent(DictationErrorCategory.self, forKey: .errorCategory)
         errorCode = try values.decodeIfPresent(String.self, forKey: .errorCode)
         errorMessage = try values.decodeIfPresent(String.self, forKey: .errorMessage)
+        transcriptionSessionID = try values.decodeIfPresent(UUID.self, forKey: .transcriptionSessionID)
+        transcriptionSegmentCount = try values.decodeIfPresent(Int.self, forKey: .transcriptionSegmentCount)
+        completedTranscriptionSegmentCount = try values.decodeIfPresent(
+            Int.self,
+            forKey: .completedTranscriptionSegmentCount
+        ) ?? 0
+        hasPartialTranscript = try values.decodeIfPresent(Bool.self, forKey: .hasPartialTranscript) ?? false
+        partialTranscript = try values.decodeIfPresent(String.self, forKey: .partialTranscript)
         cancelled = try values.decode(Bool.self, forKey: .cancelled)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         schemaVersion = FlowDictateVersion.dictationRecordSchema

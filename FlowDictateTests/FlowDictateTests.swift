@@ -26,6 +26,24 @@ struct FlowDictateTests {
         #expect(DictationState.success.acceptsStart)
     }
 
+    @Test func systemAudioOverlayDoesNotClaimLiveTranscription() {
+        let presentation = OverlayPreviewPresentation.resolve(
+            source: .systemAudio,
+            state: .disabled
+        )
+
+        #expect(presentation.heading == "SYSTEM AUDIO")
+        #expect(!presentation.showsActivityIndicator)
+        #expect(presentation.statusMessage?.contains("created after recording stops") == true)
+
+        let microphone = OverlayPreviewPresentation.resolve(
+            source: .microphone,
+            state: .waiting
+        )
+        #expect(microphone.heading == "LIVE PREVIEW")
+        #expect(microphone.showsActivityIndicator)
+    }
+
     @Test func multipartBodyContainsFieldsFileAndClosingBoundary() throws {
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMultipartSource-\(UUID()).wav")
@@ -160,6 +178,8 @@ struct FlowDictateTests {
         settings.overlaySize = .expanded
         settings.livePreviewCharacterLimit = 320
         settings.overlayPosition = .bottomCenter
+        let statisticsResetDate = Date(timeIntervalSince1970: 1_750_000_000)
+        settings.usageStatisticsResetDate = statisticsResetDate
 
         let restored = AppSettings(defaults: defaults)
 
@@ -181,6 +201,7 @@ struct FlowDictateTests {
         #expect(restored.overlaySize == .expanded)
         #expect(restored.livePreviewCharacterLimit == 320)
         #expect(restored.overlayPosition == .bottomCenter)
+        #expect(restored.usageStatisticsResetDate == statisticsResetDate)
     }
 
     @MainActor
@@ -490,7 +511,41 @@ struct FlowDictateTests {
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.inserter.insertedText == "Transcribed text")
         #expect(harness.coordinator.state == .success)
+        #expect(harness.overlay.presentations.contains(.inserting))
         #expect(harness.overlay.presentations.last == .success(message: "Text inserted"))
+    }
+
+    @MainActor
+    @Test func insertedOverlayDismissesPromptlyAndReturnsToIdle() async throws {
+        let harness = makeCoordinatorHarness()
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .success)
+
+        try await Task.sleep(for: .milliseconds(750))
+
+        #expect(harness.overlay.hideCount == 1)
+        #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func startingNewDictationCancelsInsertedOverlayDismissal() async throws {
+        let harness = makeCoordinatorHarness()
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .success)
+
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.overlay.presentations.last == .recording)
+
+        try await Task.sleep(for: .milliseconds(900))
+
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.overlay.presentations.last == .recording)
+        #expect(harness.overlay.hideCount == 0)
     }
 
     @MainActor
@@ -720,6 +775,32 @@ struct FlowDictateTests {
         #expect(result.retryCount == 1)
         #expect(result.totalDuration == 10)
         #expect(result.estimatedSecondsSaved == 0)
+        #expect(result.averageWordsPerDictation == 4)
+        #expect(result.averageDuration == 10)
+    }
+
+    @Test func usageStatisticsPeriodsAndResetDateExcludeOlderRecords() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var recent = DictationRecord.newRecording(
+            id: UUID(), startedAt: now.addingTimeInterval(-10), endedAt: now,
+            duration: 10, status: .completed, audioRelativePath: "recent.wav",
+            audioFileSize: 1, providerID: "Test", modelID: "test", language: "en",
+            targetBundleIdentifier: nil, targetApplicationName: nil
+        )
+        recent.finalText = "one two"
+        var old = recent
+        old.id = UUID()
+        old.createdAt = now.addingTimeInterval(-20 * 86_400)
+        old.finalText = "old words should be excluded"
+
+        let fourteenDays = UsageStatistics.calculate(
+            records: [recent, old],
+            typingWordsPerMinute: 40,
+            since: UsageStatisticsPeriod.fourteenDays.startDate(relativeTo: now)
+        )
+        #expect(fourteenDays.successfulDictations == 1)
+        #expect(fourteenDays.wordCount == 2)
+        #expect(UsageStatisticsPeriod.total.startDate(relativeTo: now) == nil)
     }
 
     @Test func phaseThreeThreeReleaseComparisonUsesSemanticComponents() {
@@ -976,6 +1057,231 @@ struct FlowDictateTests {
         #expect(credentialStore.readCount == 1)
     }
 
+    @Test func longFormPlannerCoversRecordingInOrderWithBoundedOverlap() async throws {
+        let planner = AudioSegmentPlanner()
+        let duration: Int64 = 40 * 60 * 1_000
+        let segments = try await planner.plan(durationMilliseconds: duration)
+
+        #expect(segments.count == 3)
+        #expect(segments.first?.startMilliseconds == 0)
+        #expect(segments.last?.endMilliseconds == duration)
+        #expect(segments.map(\.index) == [0, 1, 2])
+        #expect(segments[1].overlapBeforeMilliseconds == 1_500)
+        #expect(segments[0].endMilliseconds - segments[1].startMilliseconds == 1_500)
+        #expect(segments[1].endMilliseconds - segments[2].startMilliseconds == 1_500)
+    }
+
+    @Test func longFormPlannerUsesSafeResolvedBoundary() async throws {
+        let planner = AudioSegmentPlanner()
+        let requested: Int64 = 14 * 60 * 1_000
+        let segments = try await planner.plan(
+            durationMilliseconds: 32 * 60 * 1_000,
+            boundaryResolver: { _, _, _ in requested }
+        )
+
+        #expect(segments.count == 3)
+        #expect(segments[0].endMilliseconds == requested)
+        #expect(segments[1].startMilliseconds == requested - 1_500)
+    }
+
+    @Test func partialTranscriptMergerRemovesOnlyConfidentBoundaryDuplicate() throws {
+        let transcripts = [
+            "This is the first section with a reliable shared boundary phrase.",
+            "a reliable shared boundary phrase. This is the second section."
+        ]
+        let segments = transcripts.enumerated().map { index, transcript in
+            TranscriptionSegment(
+                id: UUID(), index: index, startMilliseconds: Int64(index * 10_000),
+                endMilliseconds: Int64((index + 1) * 10_000),
+                overlapBeforeMilliseconds: index == 0 ? 0 : 0,
+                status: .succeeded, preparedRelativePath: nil, preparedByteCount: nil,
+                transcript: transcript, attemptCount: 1, lastAttemptAt: nil,
+                errorCategory: nil, errorMessage: nil
+            )
+        }
+        let result = try PartialTranscriptMerger().merge(segments)
+        #expect(result == "This is the first section with a reliable shared boundary phrase. This is the second section.")
+
+        let ambiguous = PartialTranscriptMerger().mergeBoundary(
+            left: "One ending",
+            right: "ending but unrelated"
+        )
+        #expect(ambiguous == "One ending ending but unrelated")
+    }
+
+    @Test func interruptedManifestBecomesResumableWithoutLosingSuccessfulText() async throws {
+        let now = Date()
+        var segments = try await AudioSegmentPlanner().plan(durationMilliseconds: 20 * 60 * 1_000)
+        segments[0].status = .succeeded
+        segments[0].transcript = "Already uploaded text"
+        segments[1].status = .uploading
+        var manifest = TranscriptionSessionManifest(
+            schemaVersion: 1, id: UUID(), recordID: UUID(),
+            source: TranscriptionSourceFingerprint(
+                audioRelativePath: "long.m4a", byteCount: 10_000,
+                durationMilliseconds: 20 * 60 * 1_000, modificationDate: now
+            ),
+            providerID: "Test", modelID: "test", language: "de",
+            status: .transcribing, segments: segments, mergedTranscript: nil,
+            mergeAlgorithmVersion: 1, createdAt: now, updatedAt: now,
+            lastErrorCategory: nil, lastErrorMessage: nil
+        )
+
+        manifest.normalizeInterruptedWork(now: now.addingTimeInterval(1))
+
+        #expect(manifest.status == .paused)
+        #expect(manifest.completedSegmentCount == 1)
+        #expect(manifest.segments[0].transcript == "Already uploaded text")
+        #expect(manifest.segments[1].status == .interrupted)
+        _ = try manifest.validated()
+    }
+
+    @Test func phase34RecordMigrationDefaultsSegmentState() throws {
+        let record = makeTranscribedRecord(text: "Legacy")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoder.encode(record)) as? [String: Any]
+        )
+        for key in ["transcriptionSessionID", "transcriptionSegmentCount",
+                    "completedTranscriptionSegmentCount", "hasPartialTranscript", "partialTranscript"] {
+            object.removeValue(forKey: key)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let migrated = try decoder.decode(
+            DictationRecord.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(migrated.transcriptionSessionID == nil)
+        #expect(migrated.transcriptionSegmentCount == nil)
+        #expect(migrated.completedTranscriptionSegmentCount == 0)
+        #expect(!migrated.hasPartialTranscript)
+        #expect(migrated.schemaVersion == 5)
+    }
+
+    @Test func sessionStorePersistsAndNormalizesInterruptedWork() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSessionStore-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TranscriptionSessionStore(rootURL: root)
+        let now = Date()
+        let recordID = UUID()
+        var segments = try await AudioSegmentPlanner().plan(durationMilliseconds: 20 * 60 * 1_000)
+        segments[0].status = .preparing
+        let manifest = TranscriptionSessionManifest(
+            schemaVersion: 1, id: UUID(), recordID: recordID,
+            source: TranscriptionSourceFingerprint(
+                audioRelativePath: "long.m4a", byteCount: 20_000,
+                durationMilliseconds: 20 * 60 * 1_000, modificationDate: now
+            ), providerID: "Test", modelID: "test", language: nil,
+            status: .transcribing, segments: segments, mergedTranscript: nil,
+            mergeAlgorithmVersion: 1, createdAt: now, updatedAt: now,
+            lastErrorCategory: nil, lastErrorMessage: nil
+        )
+        try await store.save(manifest)
+
+        #expect(try await store.load(recordID: recordID)?.status == .transcribing)
+        let normalized = try await store.normalizeInterruptedSessions()
+        #expect(normalized.count == 1)
+        #expect(try await store.load(recordID: recordID)?.status == .paused)
+        #expect(try await store.load(recordID: recordID)?.segments[0].status == .interrupted)
+    }
+
+    @MainActor
+    @Test func longFormRunnerExportsTranscribesMergesAndCleansSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateLongFormRunner-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audioURL = root.appendingPathComponent("long.wav")
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        do {
+            let file = try AVAudioFile(forWriting: audioURL, settings: format.settings)
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 80_000))
+            buffer.frameLength = buffer.frameCapacity
+            try file.write(from: buffer)
+        }
+        let bytes = Int64(try audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        let history = DictationHistoryStore(fileURL: root.appendingPathComponent("history.json"))
+        let sessions = TranscriptionSessionStore(rootURL: root.appendingPathComponent("sessions"))
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+        let provider = SequenceTranscriptionProvider(texts: [
+            "Alpha shared boundary phrase here."
+        ])
+        let runner = LongFormTranscriptionRunner(
+            historyStore: history,
+            sessionStore: sessions,
+            configuration: configuration,
+            sleeper: { _ in }
+        )
+        let now = Date()
+        let record = DictationRecord.newRecording(
+            id: UUID(), startedAt: now.addingTimeInterval(-5), endedAt: now, duration: 5,
+            status: .recorded, audioRelativePath: "long.wav", audioFileSize: bytes,
+            providerID: "Test", modelID: "test", language: "en",
+            targetBundleIdentifier: nil, targetApplicationName: nil,
+            sourceMetadata: AudioSourceMetadata(source: .systemAudio, sampleRate: 16_000, channelCount: 1)
+        )
+        try await history.upsert(record)
+        var progress: [LongFormProgress] = []
+
+        let resumableRecord: DictationRecord
+        do {
+            _ = try await runner.runIfNeeded(
+                record: record,
+                audioURL: audioURL,
+                language: "en",
+                maximumAttempts: 1,
+                provider: provider,
+                progress: { progress.append($0) }
+            )
+            Issue.record("Expected the second segment to fail")
+            return
+        } catch let failure as TranscriptionRunFailure {
+            resumableRecord = failure.record
+        }
+        let loadedFailedManifest = try await sessions.load(recordID: record.id)
+        let failedManifest = try #require(loadedFailedManifest)
+        #expect(provider.requestCount == 2)
+        #expect(failedManifest.segments[0].status == .succeeded)
+        #expect(failedManifest.segments[1].status == .failed)
+        #expect(resumableRecord.hasPartialTranscript)
+
+        let resumeProvider = SequenceTranscriptionProvider(texts: [
+            "shared boundary phrase here. Omega"
+        ])
+        let optionalResult = try await runner.runIfNeeded(
+            record: resumableRecord,
+            audioURL: audioURL,
+            language: "en",
+            maximumAttempts: 1,
+            provider: resumeProvider,
+            progress: { progress.append($0) }
+        )
+        let result = try #require(optionalResult)
+
+        #expect(provider.transcribeCount == 1)
+        #expect(resumeProvider.requestCount == 1)
+        #expect(result.status == .transcribed)
+        #expect(result.finalText == "Alpha shared boundary phrase here. Omega")
+        #expect(result.transcriptionSegmentCount == 2)
+        #expect(result.completedTranscriptionSegmentCount == 2)
+        #expect(result.transcriptionSessionID == nil)
+        #expect(progress.contains(.merging(total: 2)))
+        #expect(try await sessions.load(recordID: record.id) == nil)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
     @MainActor
     private func makeCoordinatorHarness(
         credentialStore: any CredentialStoring = MockCredentialStore(),
@@ -1119,8 +1425,7 @@ private final class MockAudioRecorder: AudioRecording {
     }
 }
 
-@MainActor
-private final class MockTranscriptionProvider: TranscriptionProvider {
+private nonisolated final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     private(set) var transcribeCount = 0
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
@@ -1133,8 +1438,7 @@ private final class MockTranscriptionProvider: TranscriptionProvider {
     }
 }
 
-@MainActor
-private final class RetryingMockTranscriptionProvider: TranscriptionProvider {
+private nonisolated final class RetryingMockTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     private(set) var transcribeCount = 0
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
@@ -1147,6 +1451,22 @@ private final class RetryingMockTranscriptionProvider: TranscriptionProvider {
             provider: "Test",
             model: "test-model"
         )
+    }
+}
+
+private nonisolated final class SequenceTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
+    private let texts: [String]
+    private(set) var transcribeCount = 0
+    private(set) var requestCount = 0
+
+    init(texts: [String]) { self.texts = texts }
+
+    func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
+        requestCount += 1
+        guard transcribeCount < texts.count else { throw TranscriptionProviderError.emptyTranscript }
+        let text = texts[transcribeCount]
+        transcribeCount += 1
+        return TranscriptionResult(text: text, provider: "Test", model: "test")
     }
 }
 
@@ -1212,8 +1532,7 @@ private struct MockCredentialStore: CredentialStoring {
     func deleteAPIKey() throws {}
 }
 
-@MainActor
-private final class PassThroughAudioUploadPreparer: AudioUploadPreparing {
+private nonisolated final class PassThroughAudioUploadPreparer: AudioUploadPreparing, @unchecked Sendable {
     func prepare(_ sourceURL: URL) async throws -> PreparedAudioUpload {
         PreparedAudioUpload(
             fileURL: sourceURL,

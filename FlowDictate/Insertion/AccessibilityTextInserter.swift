@@ -20,9 +20,11 @@ enum DirectInsertionError: LocalizedError {
 @MainActor
 final class AccessibilityTextInserter: TextInserting {
     private let maximumCharacterCount: Int
+    private let messagingTimeout: Float
 
-    init(maximumCharacterCount: Int = 100_000) {
+    init(maximumCharacterCount: Int = 100_000, messagingTimeout: Float = 0.5) {
         self.maximumCharacterCount = maximumCharacterCount
+        self.messagingTimeout = messagingTimeout
     }
 
     func insert(_ text: String, into target: FocusTarget) async throws {
@@ -30,6 +32,7 @@ final class AccessibilityTextInserter: TextInserting {
         guard await target.activate() else { throw TextInsertionError.targetUnavailable }
 
         let application = AXUIElementCreateApplication(target.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, messagingTimeout)
         var focusedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             application,
@@ -79,13 +82,14 @@ final class FallbackTextInserter: TextInserting {
     }
 
     func insert(_ text: String, into target: FocusTarget) async throws {
+        let directStarted = ContinuousClock.now
         do {
             try await direct.insert(text, into: target)
         } catch DirectInsertionError.protectedField {
             throw DirectInsertionError.protectedField
         } catch {
             FlowLogger.insertion.notice(
-                "Direct insertion unavailable; using clipboard fallback"
+                "Direct insertion unavailable after \(String(describing: directStarted.duration(to: .now)), privacy: .public); using clipboard fallback"
             )
             try await clipboard.insert(text, into: target)
         }

@@ -6,6 +6,8 @@ enum OverlayStatus: Equatable {
     case recording
     case finalizing
     case processing
+    case inserting
+    case longForm(String)
     case success(message: String)
     case error(String)
 
@@ -14,6 +16,8 @@ enum OverlayStatus: Equatable {
         case .recording: "Recording"
         case .finalizing: "Finalizing…"
         case .processing: "Processing"
+        case .inserting: "Inserting…"
+        case let .longForm(message): message
         case .success: "Inserted"
         case .error: "Dictation failed"
         }
@@ -24,8 +28,50 @@ enum OverlayStatus: Equatable {
         case .recording: "mic.fill"
         case .finalizing: "ellipsis.circle"
         case .processing: "ellipsis"
+        case .inserting: "text.cursor"
+        case .longForm: "waveform.badge.magnifyingglass"
         case .success: "checkmark.circle.fill"
         case .error: "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+nonisolated struct OverlayPreviewPresentation: Equatable, Sendable {
+    let heading: String
+    let statusMessage: String?
+    let showsActivityIndicator: Bool
+
+    static func resolve(
+        source: RecordingAudioSource,
+        state: LivePreviewState
+    ) -> Self {
+        if source == .systemAudio {
+            return Self(
+                heading: "SYSTEM AUDIO",
+                statusMessage: "Live Preview is unavailable for System Audio. The transcript is created after recording stops.",
+                showsActivityIndicator: false
+            )
+        }
+
+        return switch state {
+        case .disabled:
+            Self(
+                heading: "LIVE PREVIEW",
+                statusMessage: "Preview is off",
+                showsActivityIndicator: false
+            )
+        case .waiting, .active:
+            Self(
+                heading: "LIVE PREVIEW",
+                statusMessage: nil,
+                showsActivityIndicator: true
+            )
+        case let .unavailable(message), let .failed(message):
+            Self(
+                heading: "PREVIEW STATUS",
+                statusMessage: message,
+                showsActivityIndicator: false
+            )
         }
     }
 }
@@ -99,9 +145,9 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
                 panel?.orderOut(nil)
             }
             successHideWorkItem = workItem
-            // Defensive fallback: the coordinator normally hides after 0.9 seconds.
+            // Defensive fallback: the coordinator normally hides after 0.6 seconds.
             // Keep a completed overlay from ever remaining on screen indefinitely.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
         }
     }
 
@@ -298,7 +344,11 @@ private struct RecordingOverlayView: View {
                 .font(.caption)
                 .foregroundStyle(Color.white.opacity(0.68))
                 .lineLimit(model.size == .compact ? 1 : 2)
-        } else if model.status == .processing || model.status == .finalizing {
+        } else if model.status == .processing || model.status == .finalizing || model.status == .inserting {
+            ProgressView()
+                .controlSize(.small)
+                .tint(statusColor)
+        } else if case .longForm = model.status {
             ProgressView()
                 .controlSize(.small)
                 .tint(statusColor)
@@ -330,7 +380,7 @@ private struct RecordingOverlayView: View {
     private var statusColor: Color {
         switch model.status {
         case .recording: .red
-        case .processing, .finalizing: .accentColor
+        case .processing, .finalizing, .inserting, .longForm: .accentColor
         case .success: .green
         case .error: .orange
         }
@@ -338,56 +388,68 @@ private struct RecordingOverlayView: View {
 
     @ViewBuilder
     private var previewContent: some View {
+        let presentation = OverlayPreviewPresentation.resolve(
+            source: model.source,
+            state: model.previewState
+        )
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 5, height: 5)
-                Text(previewHeading)
+                if presentation.showsActivityIndicator {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 5, height: 5)
+                }
+                Text(presentation.heading)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .tracking(0.9)
                     .foregroundStyle(Color.white.opacity(0.46))
             }
 
-            switch model.previewState {
-            case .disabled:
-                Text("Preview is off")
-                    .foregroundStyle(Color.white.opacity(0.44))
-            case .waiting:
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini)
-                    Text("Listening…")
-                }
-                .foregroundStyle(Color.white.opacity(0.72))
-            case let .active(text):
-                if model.size == .expanded {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Text(text)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.disabled)
-                                .foregroundStyle(previewTextColor)
-                            Color.clear.frame(height: 1).id("preview-end")
-                        }
-                        .onChange(of: text) {
-                            let lineCount = text.reduce(into: 1) { count, character in
-                                if character == "\n" { count += 1 }
-                            }
-                            defer { previousPreviewLineCount = lineCount }
-                            guard lineCount > previousPreviewLineCount else { return }
-                            proxy.scrollTo("preview-end", anchor: .bottom)
-                        }
-                    }
-                } else {
-                    Text(text)
-                        .lineLimit(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .foregroundStyle(previewTextColor)
-                }
-            case let .unavailable(message), let .failed(message):
-                Text(message)
+            if model.source == .systemAudio {
+                Text(presentation.statusMessage ?? "The transcript is created after recording stops.")
                     .foregroundStyle(Color.white.opacity(0.66))
                     .lineLimit(model.size == .expanded ? 4 : 3)
+            } else {
+                switch model.previewState {
+                case .disabled:
+                    Text(presentation.statusMessage ?? "Preview is off")
+                        .foregroundStyle(Color.white.opacity(0.44))
+                case .waiting:
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.mini)
+                        Text("Listening…")
+                    }
+                    .foregroundStyle(Color.white.opacity(0.72))
+                case let .active(text):
+                    if model.size == .expanded {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                Text(text)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.disabled)
+                                    .foregroundStyle(previewTextColor)
+                                Color.clear.frame(height: 1).id("preview-end")
+                            }
+                            .onChange(of: text) {
+                                let lineCount = text.reduce(into: 1) { count, character in
+                                    if character == "\n" { count += 1 }
+                                }
+                                defer { previousPreviewLineCount = lineCount }
+                                guard lineCount > previousPreviewLineCount else { return }
+                                proxy.scrollTo("preview-end", anchor: .bottom)
+                            }
+                        }
+                    } else {
+                        Text(text)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .foregroundStyle(previewTextColor)
+                    }
+                case let .unavailable(message), let .failed(message):
+                    Text(presentation.statusMessage ?? message)
+                        .foregroundStyle(Color.white.opacity(0.66))
+                        .lineLimit(model.size == .expanded ? 4 : 3)
+                }
             }
         }
         .font(.system(size: model.size == .expanded ? 15 : 13, weight: .regular, design: .rounded))
@@ -403,15 +465,6 @@ private struct RecordingOverlayView: View {
 
     private var previewTextColor: Color {
         Color(red: 0.82, green: 0.84, blue: 0.86)
-    }
-
-    private var previewHeading: String {
-        switch model.previewState {
-        case .unavailable, .failed:
-            "PREVIEW STATUS"
-        case .disabled, .waiting, .active:
-            "LIVE TRANSCRIPT"
-        }
     }
 
 }

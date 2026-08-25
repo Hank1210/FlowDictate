@@ -130,6 +130,22 @@ struct HistoryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.indigo.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                 }
+                if let total = record.transcriptionSegmentCount, total > 0,
+                   record.status != .completed {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Long recording", systemImage: "square.stack.3d.up")
+                            .font(.headline)
+                        ProgressView(
+                            value: Double(record.completedTranscriptionSegmentCount),
+                            total: Double(total)
+                        )
+                        Text("\(record.completedTranscriptionSegmentCount) of \(total) segments completed")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+                }
 
                 transcriptStages(record)
 
@@ -149,6 +165,12 @@ struct HistoryView: View {
                     GridRow { Text("Provider").foregroundStyle(.secondary); Text(record.providerID.isEmpty ? "—" : record.providerID) }
                     GridRow { Text("Model").foregroundStyle(.secondary); Text(record.modelID.isEmpty ? "—" : record.modelID) }
                     GridRow { Text("Attempts").foregroundStyle(.secondary); Text("\(record.attemptCount)") }
+                    if let total = record.transcriptionSegmentCount {
+                        GridRow {
+                            Text("Segments").foregroundStyle(.secondary)
+                            Text("\(record.completedTranscriptionSegmentCount) / \(total)")
+                        }
+                    }
                     GridRow {
                         Text("Writing style").foregroundStyle(.secondary)
                         Text(styleName(for: record))
@@ -176,7 +198,9 @@ struct HistoryView: View {
                     }
                     Button("Export Text…") { coordinator.exportText(from: record) }.disabled(!record.canInsert)
                     Button("Insert at Cursor") { coordinator.reinsert(record) }.disabled(!record.canInsert)
-                    Button("Retry Transcription") { coordinator.retryTranscription(record) }
+                    Button(record.transcriptionSessionID == nil ? "Retry Transcription" : "Continue Transcription") {
+                        coordinator.retryTranscription(record)
+                    }
                         .disabled(!record.canRetry || retryingRecordIDs.contains(record.id))
                 }
                 HStack {
@@ -205,6 +229,9 @@ struct HistoryView: View {
 
     private func transcriptStages(_ record: DictationRecord) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            if record.hasPartialTranscript {
+                transcriptBox("RECOVERED PARTIAL", text: record.partialTranscript)
+            }
             transcriptBox("ORIGINAL", text: record.originalTranscript)
             if let formatted = record.formattedTranscript, formatted != record.originalTranscript {
                 transcriptBox("FORMATTED", text: formatted)

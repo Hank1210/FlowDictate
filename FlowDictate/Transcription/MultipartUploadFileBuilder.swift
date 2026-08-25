@@ -1,6 +1,6 @@
 import Foundation
 
-struct MultipartUploadFile: Sendable {
+nonisolated struct MultipartUploadFile: Sendable {
     let url: URL
     let byteCount: Int64
 
@@ -9,7 +9,7 @@ struct MultipartUploadFile: Sendable {
     }
 }
 
-struct MultipartUploadFileBuilder {
+nonisolated struct MultipartUploadFileBuilder {
     let boundary: String
     let fileManager: FileManager
     let chunkSize: Int

@@ -4,6 +4,31 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Automatic local segmentation of long or oversized recordings, with silence-sensitive boundaries and a short overlap between adjacent segments.
+- Sequential segment transcription with ordered merging, per-segment retry, atomic session manifests and resumable partial results.
+- Segment progress in the recording overlay and History, including a Continue Transcription action after pause, failure or app restart.
+- Preflight checks for source integrity, estimated upload size, actual segment size and available working storage.
+- Productivity statistics with Total, 30-day and 14-day views, additional averages and a non-destructive statistics reset.
+
+### Changed
+
+- History schema upgraded to version 5 with migration-safe long-form summary fields and a one-time `dictations-pre-3.4.json` backup.
+- Audio inspection, boundary detection and segment export run outside the Main Actor; stop, export, transcription and merge durations are logged locally for profiling.
+- Long-form transcription uses one network request at a time and removes temporary segment audio after each successful segment.
+- App version advanced to 3.4.0 (build 8) for the local Community release candidate.
+
+### Fixed
+
+- Successful segments are not uploaded again after retry, pause or relaunch.
+- Original recordings and completed partial transcripts remain local after segment-level failures.
+- M4A recordings without History entries are included in startup orphan recovery.
+- System Audio no longer suggests that a Live Transcript is being created; microphone recognition is labelled accurately as Live Preview.
+- Community update checks now show checking, current-version and error feedback directly in Productivity settings.
+- The success overlay dismisses promptly, cannot hide a newly started recording and no longer remains on Processing while completed History metadata is written.
+- Accessibility insertion uses a bounded messaging timeout so an unresponsive target cannot hold a short dictation in Processing; the overlay identifies this stage as Inserting.
+
 ## [3.3.0] - 2026-08-25
 
 ### Added

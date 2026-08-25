@@ -135,6 +135,7 @@ actor DictationHistoryStore {
         record.formattedTranscript = nil
         record.dictionaryTranscript = nil
         record.finalText = nil
+        record.partialTranscript = nil
         record.targetApplicationName = nil
         record.targetBundleIdentifier = nil
         record.errorCategory = nil
@@ -203,10 +204,14 @@ actor DictationHistoryStore {
         recordsByID = Dictionary(uniqueKeysWithValues: envelope.records.map { ($0.id, $0) })
         loaded = true
         if envelope.schemaVersion < FlowDictateVersion.historySchema {
-            let backupURL = fileURL.deletingLastPathComponent()
-                .appendingPathComponent("dictations-pre-3.2.json")
-            if !fileManager.fileExists(atPath: backupURL.path) {
-                try data.write(to: backupURL, options: .atomic)
+            let backupNames = envelope.schemaVersion < 4
+                ? ["dictations-pre-3.2.json", "dictations-pre-3.4.json"]
+                : ["dictations-pre-3.4.json"]
+            for name in backupNames {
+                let backupURL = fileURL.deletingLastPathComponent().appendingPathComponent(name)
+                if !fileManager.fileExists(atPath: backupURL.path) {
+                    try data.write(to: backupURL, options: .atomic)
+                }
             }
             try persist()
         }

@@ -2,7 +2,7 @@
 import Foundation
 import OSLog
 
-struct PreparedAudioUpload: Sendable {
+nonisolated struct PreparedAudioUpload: Sendable {
     let fileURL: URL
     let filename: String
     let mimeType: String
@@ -14,12 +14,11 @@ struct PreparedAudioUpload: Sendable {
     }
 }
 
-@MainActor
-protocol AudioUploadPreparing: AnyObject {
+nonisolated protocol AudioUploadPreparing: AnyObject, Sendable {
     func prepare(_ sourceURL: URL) async throws -> PreparedAudioUpload
 }
 
-enum AudioUploadPreparationError: LocalizedError {
+nonisolated enum AudioUploadPreparationError: LocalizedError {
     case sourceUnavailable
     case conversionUnavailable
     case conversionFailed(String)
@@ -36,8 +35,7 @@ enum AudioUploadPreparationError: LocalizedError {
     }
 }
 
-@MainActor
-final class AudioUploadPreparer: AudioUploadPreparing {
+nonisolated final class AudioUploadPreparer: AudioUploadPreparing, @unchecked Sendable {
     private let fileManager: FileManager
 
     init(fileManager: FileManager = .default) {
@@ -151,7 +149,7 @@ final class AudioUploadPreparer: AudioUploadPreparing {
 }
 
 private extension Optional {
-    func unwrapped(or error: @autoclosure () -> Error) throws -> Wrapped {
+    nonisolated func unwrapped(or error: @autoclosure () -> Error) throws -> Wrapped {
         guard let value = self else { throw error() }
         return value
     }

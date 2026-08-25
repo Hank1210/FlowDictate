@@ -4,7 +4,7 @@
   <img src="FlowDictate/Assets.xcassets/AppIcon.appiconset/AppIcon_1024.png" alt="FlowDictate app icon" width="180">
 </p>
 
-FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. Version 3.3.0 combines the reliable standalone foundation from Phase 2, Phase 3.1 Live Preview, Phase 3.2 Smart Dictation and Phase 3.3 System Audio, app profiles and productivity features described in `FlowDictate_PRD_Phase_3.md`.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. Version 3.4.0 adds restart-safe segmentation for long recordings while retaining the microphone, Live Preview, Smart Dictation, System Audio, app-profile and productivity foundation from earlier Phase 3 releases.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
@@ -26,6 +26,7 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - persistent searchable history with audio playback and text export
 - crash recovery and orphaned-recording detection
 - manual retry plus bounded automatic retry for temporary provider failures
+- automatic long-recording segmentation with ordered partial transcripts, per-segment progress, retry and restart-safe continuation
 - configurable Restore Last Dictation hotkey
 - separate, configurable retention for successful audio and visible history while failed recordings remain protected
 - optional on-device Apple Speech Live Preview while recording
@@ -43,12 +44,12 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - app-specific profiles selected by bundle identifier for language, transcription model, writing style, spoken formatting and insertion preference
 - direct Accessibility text insertion with a clipboard fallback; protected password fields are never written
 - selectable toggle or press-and-hold shortcut activation
-- optional local usage statistics calculated from History
+- optional local usage statistics calculated from History, with Total, 30-day and 14-day views plus a non-destructive reset
 - a daily, disableable GitHub release check that only opens the release page and never installs automatically
 
 The optional combined microphone-plus-system-audio mixer, continuous dictation, bulk export and profile import/export remain follow-up scope. Cloud audio streaming and fully local final transcription are not part of Phase 3.
 
-System Audio recordings should currently be kept to approximately 15–20 minutes for reliable transcription. The recorder can continue beyond that, but the resulting M4A can exceed the single-request upload limit. Automatic chunking and resumable multi-part transcription are planned for Phase 3.4.
+Long or oversized recordings are prepared as local M4A segments and transcribed sequentially. Successful segments are persisted before the next upload, so a pause, temporary failure or app restart continues at the first unfinished segment.
 
 ## Requirements
 
@@ -96,16 +97,16 @@ For a free build intended for personal use and a trusted circle, run:
 
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
-For version 3.3.0 the generated files are:
+For version 3.4.0 the generated files are:
 
-- `FlowDictate-3.3.0-Community-macOS.zip`
-- `FlowDictate-3.3.0-Community-macOS.zip.sha256`
+- `FlowDictate-3.4.0-Community-macOS.zip`
+- `FlowDictate-3.4.0-Community-macOS.zip.sha256`
 
 `scripts/build-release.sh` remains available for a future Developer ID signed and notarized release. Both workflows are documented in `RELEASE.md`.
 
 Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASE_NOTES_3.3.0.md](RELEASE_NOTES_3.3.0.md) for the current public release notes.
+See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASE_NOTES_3.4.0.md](RELEASE_NOTES_3.4.0.md) for the 3.4 Community release candidate notes.
 
 ## Updating from 2.0
 
@@ -144,7 +145,7 @@ xcodebuild test \
 
 The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
-The automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence and migration (including audio-source defaults), retention and recovery, bounded Preview buffering, spoken formatting, Smart Dictation, app-profile persistence, statistics and release comparison. Microphone and System Audio permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
+The automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, long-form planning/export/merge/session recovery, state rules, start/stop/cancel orchestration, shared retry execution, history persistence and migration (including audio-source defaults), retention and recovery, bounded Preview buffering, spoken formatting, Smart Dictation, app-profile persistence, statistics and release comparison. Microphone and System Audio permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
 
 The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
 

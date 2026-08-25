@@ -58,6 +58,7 @@ final class AppSettings: ObservableObject {
         static let smartDictationFallback = "smartDictationFallback"
         static let showUsageStatistics = "showUsageStatistics"
         static let typingWordsPerMinute = "typingWordsPerMinute"
+        static let usageStatisticsResetDate = "usageStatisticsResetDate"
         static let updateCheckEnabled = "updateCheckEnabled"
         static let lastUpdateCheck = "lastUpdateCheck"
         static let dictationActivationMode = "dictationActivationMode"
@@ -175,6 +176,10 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(typingWordsPerMinute, forKey: Key.typingWordsPerMinute) }
     }
 
+    @Published var usageStatisticsResetDate: Date? {
+        didSet { defaults.set(usageStatisticsResetDate, forKey: Key.usageStatisticsResetDate) }
+    }
+
     @Published var updateCheckEnabled: Bool {
         didSet { defaults.set(updateCheckEnabled, forKey: Key.updateCheckEnabled) }
     }
@@ -257,6 +262,7 @@ final class AppSettings: ObservableObject {
         ) ?? .ask
         showUsageStatistics = defaults.object(forKey: Key.showUsageStatistics) as? Bool ?? true
         typingWordsPerMinute = defaults.object(forKey: Key.typingWordsPerMinute) as? Double ?? 40
+        usageStatisticsResetDate = defaults.object(forKey: Key.usageStatisticsResetDate) as? Date
         updateCheckEnabled = defaults.object(forKey: Key.updateCheckEnabled) as? Bool ?? true
         lastUpdateCheck = defaults.object(forKey: Key.lastUpdateCheck) as? Date
         dictationActivationMode = DictationActivationMode(

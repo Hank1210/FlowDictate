@@ -7,6 +7,7 @@ FlowDictate does not include analytics, advertising, telemetry or a developer-op
 - The OpenAI API key is stored in the user's macOS Keychain.
 - Recordings are stored in the folder selected during setup. The recommended default is `Documents/Recordings`.
 - Dictation history and recovery metadata remain in the app's local Application Support container.
+- Resumable long-form session manifests and temporary audio segments remain in Application Support. A temporary segment is deleted after successful transcription; the manifest is deleted after the complete transcript is safely stored.
 - Personal dictionary entries and custom writing styles are stored locally in the Application Support container.
 - App profiles are stored locally by application bundle identifier. FlowDictate does not store window titles or document contents for profile selection.
 - Usage statistics are calculated locally from History and are not telemetry.
@@ -19,9 +20,9 @@ The five-second System Audio test writes a temporary local audio file only to va
 
 ## Data sent to OpenAI
 
-When the user finishes a dictation, its audio is sent directly from FlowDictate to the OpenAI transcription API. OpenAI processes that request according to the terms and privacy policy applying to the user's own OpenAI account. FlowDictate never bundles or receives a shared API key.
+When the user finishes a dictation, its audio is sent directly from FlowDictate to the OpenAI transcription API. Long or oversized recordings are split locally and sent as sequential audio segments; FlowDictate never sends more than one segment concurrently. OpenAI processes those requests according to the terms and privacy policy applying to the user's own OpenAI account. FlowDictate never bundles or receives a shared API key.
 
-Cancelled recordings are not sent for transcription. Users can review and delete locally retained recordings using Finder and FlowDictate's storage settings.
+Cancelled recordings are not sent for transcription. Pausing an already-started long-form transcription prevents subsequent segments from being uploaded; any request already accepted by OpenAI may still finish. Users can review and delete locally retained recordings using Finder and FlowDictate's storage settings.
 
 ## Optional AI writing styles
 

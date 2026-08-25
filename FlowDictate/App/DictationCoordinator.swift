@@ -33,6 +33,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var smartDictationTestOutput: String?
     @Published private(set) var availableRelease: GitHubReleaseInfo?
     @Published private(set) var isCheckingForUpdates = false
+    @Published private(set) var updateCheckMessage: String?
     @Published private(set) var latestOutputNotice: String?
     @Published private(set) var latestOutputURL: URL?
 
@@ -85,6 +86,8 @@ final class DictationCoordinator: ObservableObject {
     private var sessionConfiguration: EffectiveDictationConfiguration?
     private var holdHotKeyIsDown = false
     private var holdReleaseTask: Task<Void, Never>?
+    private var activeDictationTask: Task<Void, Never>?
+    private var retryTranscriptionTasks: [UUID: Task<Void, Never>] = [:]
 
     private var recorder: AudioRecording {
         if let sessionRecorder { return sessionRecorder }
@@ -277,7 +280,10 @@ final class DictationCoordinator: ObservableObject {
             audioLevel = 0
             overlay.show(status: .finalizing)
         }
-        Task { await toggleDictation() }
+        activeDictationTask = Task { [weak self] in
+            await self?.toggleDictation()
+            self?.activeDictationTask = nil
+        }
     }
 
     func requestCancel() {
@@ -287,6 +293,11 @@ final class DictationCoordinator: ObservableObject {
         }
         if isSystemAudioTestRunning {
             systemAudioTestTask?.cancel()
+            return
+        }
+        if state == .transcribing {
+            activeDictationTask?.cancel()
+            for task in retryTranscriptionTasks.values { task.cancel() }
             return
         }
         guard recorder.isRecording else { return }
@@ -574,10 +585,13 @@ final class DictationCoordinator: ObservableObject {
                         try FileManager.default.removeItem(at: url)
                     }
                     try await historyStore.delete(id: record.id)
+                    await transcriptionRunner.deleteLongFormSession(recordID: record.id)
                 } else if record.audioFileSize > 0 {
                     try await historyStore.archive(id: record.id)
+                    await transcriptionRunner.deleteLongFormSession(recordID: record.id)
                 } else {
                     try await historyStore.delete(id: record.id)
+                    await transcriptionRunner.deleteLongFormSession(recordID: record.id)
                 }
             } catch {
                 FlowLogger.app.error("History deletion failed: \(error.localizedDescription, privacy: .public)")
@@ -589,8 +603,15 @@ final class DictationCoordinator: ObservableObject {
     func retryTranscription(_ record: DictationRecord) {
         guard record.canRetry, !retryingRecordIDs.contains(record.id) else { return }
         retryingRecordIDs.insert(record.id)
-        Task {
-            defer { retryingRecordIDs.remove(record.id) }
+        retryTranscriptionTasks[record.id] = Task {
+            defer {
+                retryingRecordIDs.remove(record.id)
+                retryTranscriptionTasks[record.id] = nil
+                if retryTranscriptionTasks.isEmpty, state == .transcribing {
+                    state = .idle
+                    overlay.hide()
+                }
+            }
             var updated = record
             do {
                 let url = try audioURL(for: record)
@@ -599,7 +620,11 @@ final class DictationCoordinator: ObservableObject {
                     audioURL: url,
                     language: updated.language,
                     maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                    provider: try activeProvider(model: updated.modelID)
+                    provider: try activeProvider(model: updated.modelID),
+                    progress: { [weak self] progress in
+                        self?.state = .transcribing
+                        self?.overlay.show(status: .longForm(progress.statusText))
+                    }
                 )
                 let style = selectedWritingStyle
                 updated = try await smartDictationPipeline.run(
@@ -916,9 +941,20 @@ final class DictationCoordinator: ObservableObject {
     }
 
     var usageStatistics: UsageStatistics {
-        UsageStatistics.calculate(
+        usageStatistics(period: .total)
+    }
+
+    func usageStatistics(
+        period: UsageStatisticsPeriod,
+        now: Date = Date()
+    ) -> UsageStatistics {
+        let since = [period.startDate(relativeTo: now), settings.usageStatisticsResetDate]
+            .compactMap { $0 }
+            .max()
+        return UsageStatistics.calculate(
             records: historyRecords,
-            typingWordsPerMinute: settings.typingWordsPerMinute
+            typingWordsPerMinute: settings.typingWordsPerMinute,
+            since: since
         )
     }
 
@@ -926,6 +962,7 @@ final class DictationCoordinator: ObservableObject {
         guard !isCheckingForUpdates else { return }
         isCheckingForUpdates = true
         defer { isCheckingForUpdates = false }
+        if manual { updateCheckMessage = nil }
         settings.lastUpdateCheck = Date()
         do {
             let release = try await GitHubReleaseChecker().latestStableRelease()
@@ -933,12 +970,22 @@ final class DictationCoordinator: ObservableObject {
                 as? String ?? "0"
             if let release, GitHubReleaseChecker.isNewer(release.version, than: current) {
                 availableRelease = release
-                if manual { setupMessage = "FlowDictate \(release.version) is available." }
+                if manual {
+                    let message = "FlowDictate \(release.version) is available."
+                    updateCheckMessage = message
+                    setupMessage = message
+                }
             } else if manual {
-                setupMessage = "FlowDictate is up to date."
+                availableRelease = nil
+                let message = "FlowDictate is up to date."
+                updateCheckMessage = message
+                setupMessage = message
             }
         } catch {
-            if manual { setupMessage = error.localizedDescription }
+            if manual {
+                updateCheckMessage = error.localizedDescription
+                setupMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1133,6 +1180,7 @@ final class DictationCoordinator: ObservableObject {
     private func recoverAndRefreshHistory() async {
         do {
             let recovered = try await historyStore.recoverInterrupted()
+            await transcriptionRunner.recoverInterruptedLongFormSessions()
             for record in recovered
             where record.processingStatus == .notStarted
                 && record.enhancementErrorCategory == .interrupted
@@ -1183,7 +1231,7 @@ final class DictationCoordinator: ObservableObject {
         let known = try await historyStore.knownAudioRelativePaths()
         let directory = try audioStore.recordingsDirectory()
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])
-        for file in files where ["wav", "recording"].contains(file.pathExtension.lowercased()) {
+        for file in files where ["wav", "m4a", "recording"].contains(file.pathExtension.lowercased()) {
             let relative = try audioStore.relativePath(for: file)
             guard !known.contains(relative) else { continue }
             let values = try file.resourceValues(forKeys: [.fileSizeKey])
@@ -1341,7 +1389,13 @@ final class DictationCoordinator: ObservableObject {
         audioLevel = 0
         overlay.show(status: .finalizing)
         let recording: AudioRecordingResult
-        do { recording = try await recorder.stop() }
+        let stopStarted = ContinuousClock.now
+        do {
+            recording = try await recorder.stop()
+            FlowLogger.audio.info(
+                "Recording stop/finalization completed in \(String(describing: stopStarted.duration(to: .now)), privacy: .public)"
+            )
+        }
         catch { sessionRecorder = nil; fail(error, retainedAudioURL: nil); return }
         recorder.previewBufferHandler = nil
         sessionRecorder = nil
@@ -1364,7 +1418,10 @@ final class DictationCoordinator: ObservableObject {
                 audioURL: recording.url,
                 language: record.language,
                 maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                provider: try activeProvider(model: record.modelID)
+                provider: try activeProvider(model: record.modelID),
+                progress: { [weak self] progress in
+                    self?.overlay.show(status: .longForm(progress.statusText))
+                }
             )
             state = .enhancing
             overlay.show(status: .processing)
@@ -1379,7 +1436,9 @@ final class DictationCoordinator: ObservableObject {
                 fallback: settings.smartDictationFallback,
                 enhancer: style.usesAI ? try activeEnhancer() : nil
             )
-            state = .inserting; record.status = .inserting; record.updatedAt = Date()
+            state = .inserting
+            overlay.show(status: .inserting)
+            record.status = .inserting; record.updatedAt = Date()
             try await historyStore.upsert(record)
             let outputText = record.finalText ?? record.originalTranscript ?? ""
             var successMessage = "Text inserted"
@@ -1393,13 +1452,25 @@ final class DictationCoordinator: ObservableObject {
                     : "Text inserted · clipboard unavailable"
             }
             try await makeInserter().insert(outputText, into: target)
-            record.status = .completed; record.errorCategory = nil; record.errorMessage = nil; record.updatedAt = Date()
-            try await historyStore.upsert(record)
+
+            // The target application has accepted the text. Reflect that immediately;
+            // rewriting the JSON History must not leave a completed insertion looking
+            // as if it were still processing.
             focusTarget = nil
             state = .success
             overlay.show(status: .success(message: successMessage))
             sessionConfiguration = nil
-            scheduleOverlayDismiss(after: .milliseconds(900), transitionToIdle: true)
+            scheduleOverlayDismiss(after: .milliseconds(600), transitionToIdle: true)
+
+            record.status = .completed; record.errorCategory = nil; record.errorMessage = nil; record.updatedAt = Date()
+            do {
+                try await historyStore.upsert(record)
+            } catch {
+                setupMessage = "Text was inserted, but the completed History status could not be saved."
+                FlowLogger.app.error(
+                    "Post-insertion History update failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         } catch let failure as TranscriptionRunFailure {
             record = failure.record
             copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
@@ -1431,13 +1502,22 @@ final class DictationCoordinator: ObservableObject {
         var updated = record
         do {
             state = .inserting
+            overlay.show(status: .inserting)
             updated.status = .inserting; updated.updatedAt = Date(); try await historyStore.upsert(updated)
             try await makeInserter().insert(text, into: target)
-            updated.status = .completed; updated.errorCategory = nil; updated.errorMessage = nil; updated.updatedAt = Date()
-            try await historyStore.upsert(updated)
             state = .success
             overlay.show(status: .success(message: "Text inserted"))
-            scheduleOverlayDismiss(after: .milliseconds(900), transitionToIdle: true)
+            scheduleOverlayDismiss(after: .milliseconds(600), transitionToIdle: true)
+
+            updated.status = .completed; updated.errorCategory = nil; updated.errorMessage = nil; updated.updatedAt = Date()
+            do {
+                try await historyStore.upsert(updated)
+            } catch {
+                setupMessage = "Text was inserted, but the completed History status could not be saved."
+                FlowLogger.app.error(
+                    "Post-insertion History update failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         } catch {
             updated.status = .insertionFailed; updated.errorCategory = .insertion
             updated.errorMessage = error.localizedDescription; updated.updatedAt = Date()
