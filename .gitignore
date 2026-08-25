@@ -10,5 +10,8 @@ xcuserdata/
 .env.*
 !.env.example
 
+# Local implementation work plans
+ARBEITSPLAN_*.md
+
 # macOS
 .DS_Store
