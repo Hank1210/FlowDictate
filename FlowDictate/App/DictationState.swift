@@ -3,6 +3,7 @@ import Foundation
 enum DictationState: Equatable {
     case idle
     case recording
+    case finalizing
     case transcribing
     case enhancing
     case inserting
@@ -15,6 +16,8 @@ enum DictationState: Equatable {
             "Ready"
         case .recording:
             "Recording"
+        case .finalizing:
+            "Finalizing recording"
         case .transcribing:
             "Transcribing"
         case .enhancing:
@@ -34,7 +37,7 @@ enum DictationState: Equatable {
             "waveform"
         case .recording:
             "record.circle.fill"
-        case .transcribing, .enhancing, .inserting:
+        case .finalizing, .transcribing, .enhancing, .inserting:
             "ellipsis.circle"
         case .success:
             "checkmark.circle"
@@ -47,7 +50,7 @@ enum DictationState: Equatable {
         switch self {
         case .idle, .success, .failed:
             true
-        case .recording, .transcribing, .enhancing, .inserting:
+        case .recording, .finalizing, .transcribing, .enhancing, .inserting:
             false
         }
     }

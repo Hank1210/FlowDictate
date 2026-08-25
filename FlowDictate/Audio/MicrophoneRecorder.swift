@@ -9,6 +9,7 @@ struct AudioRecordingResult: Sendable {
     let url: URL
     let startedAt: Date
     let duration: TimeInterval
+    let sourceMetadata: AudioSourceMetadata
 }
 
 enum AudioRecorderError: LocalizedError {
@@ -31,11 +32,19 @@ enum AudioRecorderError: LocalizedError {
 enum AudioLevelMeter {
     nonisolated static func normalizedRMS(_ samples: UnsafeBufferPointer<Float>) -> Float {
         guard !samples.isEmpty else { return 0 }
-        var sum: Float = 0
+        var sum: Double = 0
         for sample in samples {
-            sum += sample * sample
+            sum += Double(sample * sample)
         }
-        let rms = sqrt(sum / Float(samples.count))
+        return normalizedRMS(sumOfSquares: sum, sampleCount: samples.count)
+    }
+
+    nonisolated static func normalizedRMS(
+        sumOfSquares: Double,
+        sampleCount: Int
+    ) -> Float {
+        guard sampleCount > 0 else { return 0 }
+        let rms = Float(sqrt(sumOfSquares / Double(sampleCount)))
         guard rms > 0.000_001 else { return 0 }
 
         // Speech occupies only a small part of the linear amplitude range. Map a
@@ -68,8 +77,8 @@ protocol AudioRecording: AnyObject {
     var levelHandler: (@MainActor (Float) -> Void)? { get set }
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)? { get set }
     func selectInputDevice(_ deviceID: AudioDeviceID?)
-    func start() throws
-    func stop() throws -> AudioRecordingResult
+    func start() async throws
+    func stop() async throws -> AudioRecordingResult
 }
 
 @MainActor
@@ -99,7 +108,7 @@ final class MicrophoneRecorder: AudioRecording {
         selectedDeviceID = deviceID
     }
 
-    func start() throws {
+    func start() async throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
 
         let id = UUID()
@@ -175,7 +184,7 @@ final class MicrophoneRecorder: AudioRecording {
         FlowLogger.audio.info("Recording started: \(url.lastPathComponent, privacy: .public)")
     }
 
-    func stop() throws -> AudioRecordingResult {
+    func stop() async throws -> AudioRecordingResult {
         guard
             let engine,
             let id = recordingID,
@@ -184,6 +193,8 @@ final class MicrophoneRecorder: AudioRecording {
         else {
             throw AudioRecorderError.notRecording
         }
+
+        let recordedFormat = audioFile?.processingFormat
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -198,7 +209,12 @@ final class MicrophoneRecorder: AudioRecording {
             id: id,
             url: url,
             startedAt: startedAt,
-            duration: Date().timeIntervalSince(startedAt)
+            duration: Date().timeIntervalSince(startedAt),
+            sourceMetadata: AudioSourceMetadata(
+                source: .microphone,
+                sampleRate: recordedFormat?.sampleRate ?? 0,
+                channelCount: Int(recordedFormat?.channelCount ?? 0)
+            )
         )
         FlowLogger.audio.info(
             "Recording stopped after \(result.duration, format: .fixed(precision: 2)) seconds"

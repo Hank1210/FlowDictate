@@ -17,6 +17,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var microphonePermissionGranted = false
     @Published private(set) var accessibilityPermissionGranted = false
     @Published private(set) var speechPermissionState: SpeechPermissionState = .notDetermined
+    @Published private(set) var systemAudioPermissionGranted = false
     @Published private(set) var recordingLocationConfigured = false
     @Published private(set) var recordingLocationPath: String?
     @Published private(set) var historyRecords: [DictationRecord] = []
@@ -24,10 +25,16 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var retryingEnhancementRecordIDs: Set<UUID> = []
     @Published private(set) var dictionaryEntries: [DictionaryEntry] = []
     @Published private(set) var writingStyles: [WritingStyleProfile] = BuiltInWritingStyles.all
+    @Published private(set) var appProfiles: [AppDictationProfile] = []
     @Published private(set) var setupMessage: String?
     @Published private(set) var isPreviewTestRunning = false
+    @Published private(set) var isSystemAudioTestRunning = false
     @Published private(set) var isSmartDictationTestRunning = false
     @Published private(set) var smartDictationTestOutput: String?
+    @Published private(set) var availableRelease: GitHubReleaseInfo?
+    @Published private(set) var isCheckingForUpdates = false
+    @Published private(set) var latestOutputNotice: String?
+    @Published private(set) var latestOutputURL: URL?
 
     let settings: AppSettings
     let launchAtLogin: LaunchAtLoginManager
@@ -40,7 +47,8 @@ final class DictationCoordinator: ObservableObject {
     private let cancelHotKeyRegistrar: HotKeyRegistering
     private let restoreHotKeyRegistrar: HotKeyRegistering
     private let permissionManager: PermissionManaging
-    private let recorder: AudioRecording
+    private let microphoneRecorder: AudioRecording
+    private let systemAudioRecorder: AudioRecording
     private let injectedProvider: (any TranscriptionProvider)?
     private let injectedInserter: TextInserting?
     private let credentialStore: CredentialStoring
@@ -53,6 +61,7 @@ final class DictationCoordinator: ObservableObject {
     private let transcriptionRunner: TranscriptionRunner
     private let dictionaryStore: DictionaryStore
     private let writingStyleStore: WritingStyleStore
+    private let appProfileStore: AppProfileStore
     private let smartDictationPipeline: SmartDictationPipeline
     private let injectedEnhancer: (any TranscriptEnhancing)?
     private let livePreviewCoordinator: LivePreviewCoordinator
@@ -65,12 +74,24 @@ final class DictationCoordinator: ObservableObject {
     private var lastHotKeyDate = Date.distantPast
     private var overlayDismissTask: Task<Void, Never>?
     private var onboardingWindowController: NSWindowController?
-    private var historyWindowController: NSWindowController?
+    private var historyWindowController: HistoryWindowController?
     private var audioPlayer: AVAudioPlayer?
     private var previewTestTask: Task<Void, Never>?
+    private var systemAudioTestTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
     private var didLoadAPIKeyFromKeychain = false
+    private var sessionRecorder: AudioRecording?
+    private var sessionConfiguration: EffectiveDictationConfiguration?
+    private var holdHotKeyIsDown = false
+    private var holdReleaseTask: Task<Void, Never>?
+
+    private var recorder: AudioRecording {
+        if let sessionRecorder { return sessionRecorder }
+        return settings.recordingAudioSource == .systemAudio
+            ? systemAudioRecorder
+            : microphoneRecorder
+    }
 
     convenience init() {
         let environment = ProcessInfo.processInfo.environment
@@ -108,6 +129,7 @@ final class DictationCoordinator: ObservableObject {
         restoreHotKeyRegistrar: HotKeyRegistering,
         permissionManager: PermissionManaging,
         recorder: AudioRecording,
+        systemAudioRecorder: AudioRecording? = nil,
         provider: (any TranscriptionProvider)?,
         inserter: TextInserting?,
         credentialStore: CredentialStoring,
@@ -122,6 +144,7 @@ final class DictationCoordinator: ObservableObject {
         livePreviewProvider: (any LivePreviewProviding)? = nil,
         dictionaryStore: DictionaryStore? = nil,
         writingStyleStore: WritingStyleStore? = nil,
+        appProfileStore: AppProfileStore? = nil,
         transcriptEnhancer: (any TranscriptEnhancing)? = nil,
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
@@ -132,7 +155,9 @@ final class DictationCoordinator: ObservableObject {
         self.cancelHotKeyRegistrar = cancelHotKeyRegistrar
         self.restoreHotKeyRegistrar = restoreHotKeyRegistrar
         self.permissionManager = permissionManager
-        self.recorder = recorder
+        microphoneRecorder = recorder
+        self.systemAudioRecorder = systemAudioRecorder
+            ?? SystemAudioRecorder(store: audioStore ?? AudioStore(locationStore: recordingLocationStore))
         injectedProvider = provider
         injectedInserter = inserter
         self.credentialStore = credentialStore
@@ -147,6 +172,7 @@ final class DictationCoordinator: ObservableObject {
         transcriptionRunner = TranscriptionRunner(historyStore: historyStore)
         self.dictionaryStore = dictionaryStore ?? DictionaryStore()
         self.writingStyleStore = writingStyleStore ?? WritingStyleStore()
+        self.appProfileStore = appProfileStore ?? AppProfileStore()
         smartDictationPipeline = SmartDictationPipeline(historyStore: historyStore)
         injectedEnhancer = transcriptEnhancer
         livePreviewCoordinator = LivePreviewCoordinator(
@@ -160,10 +186,12 @@ final class DictationCoordinator: ObservableObject {
                 )
             }
 
-        recorder.levelHandler = { [weak self] level in
-            let activeLevel = self?.recorder.isRecording == true ? level : 0
-            self?.audioLevel = activeLevel
-            self?.overlay.updateLevel(activeLevel)
+        for candidate in [microphoneRecorder, self.systemAudioRecorder] {
+            candidate.levelHandler = { [weak self, weak candidate] level in
+                let activeLevel = candidate?.isRecording == true ? level : 0
+                self?.audioLevel = activeLevel
+                self?.overlay.updateLevel(activeLevel)
+            }
         }
         livePreviewCoordinator.stateDidChange = { [weak self] state in
             self?.overlay.updatePreview(state)
@@ -196,7 +224,12 @@ final class DictationCoordinator: ObservableObject {
         refreshPermissionStatus()
         Task { [weak self] in
             await self?.refreshSmartDictationData()
+            await self?.refreshAppProfiles()
             await self?.recoverAndRefreshHistory()
+            if self?.settings.updateCheckEnabled == true,
+               self?.settings.lastUpdateCheck?.timeIntervalSinceNow ?? -.infinity < -86_400 {
+                await self?.checkForUpdates(manual: false)
+            }
             guard automaticallyPresentOnboarding, let self, self.needsOnboarding else { return }
             try? await Task.sleep(for: .milliseconds(400))
             self.showOnboarding()
@@ -207,14 +240,21 @@ final class DictationCoordinator: ObservableObject {
     deinit {
         overlayDismissTask?.cancel()
         previewTestTask?.cancel()
+        systemAudioTestTask?.cancel()
     }
 
-    var primaryActionTitle: String { recorder.isRecording ? "Stop Dictation" : "Start Dictation" }
+    var primaryActionTitle: String {
+        switch state {
+        case .recording: "Stop Dictation"
+        case .finalizing: "Finalizing…"
+        default: "Start Dictation"
+        }
+    }
     var isRecording: Bool { recorder.isRecording }
-    var canCancel: Bool { recorder.isRecording }
+    var canCancel: Bool { state == .recording && recorder.isRecording }
     var isProcessing: Bool {
         switch state {
-        case .transcribing, .enhancing, .inserting: true
+        case .finalizing, .transcribing, .enhancing, .inserting: true
         default: false
         }
     }
@@ -230,6 +270,13 @@ final class DictationCoordinator: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastHotKeyDate) >= 0.25 else { return }
         lastHotKeyDate = now
+        if recorder.isRecording {
+            // Acknowledge the shortcut immediately. System Audio may need a moment
+            // to close a long M4A, but the user should never have to press twice.
+            state = .finalizing
+            audioLevel = 0
+            overlay.show(status: .finalizing)
+        }
         Task { await toggleDictation() }
     }
 
@@ -238,9 +285,17 @@ final class DictationCoordinator: ObservableObject {
             previewTestTask?.cancel()
             return
         }
+        if isSystemAudioTestRunning {
+            systemAudioTestTask?.cancel()
+            return
+        }
         guard recorder.isRecording else { return }
+        Task { await cancelRecording() }
+    }
+
+    private func cancelRecording() async {
         do {
-            let recording = try recorder.stop()
+            let recording = try await recorder.stop()
             recorder.previewBufferHandler = nil
             livePreviewCoordinator.cancel()
             let target = focusTarget
@@ -248,13 +303,19 @@ final class DictationCoordinator: ObservableObject {
             state = .idle
             audioLevel = 0
             overlay.hide()
+            sessionRecorder = nil
+            sessionConfiguration = nil
             Task {
                 var record = makeRecord(from: recording, target: target, status: .cancelled)
                 record.cancelled = true
                 await persistBestEffort(record, context: "cancelled recording")
                 await refreshHistory()
             }
-        } catch { fail(error, retainedAudioURL: nil) }
+        } catch {
+            sessionRecorder = nil
+            sessionConfiguration = nil
+            fail(error, retainedAudioURL: nil)
+        }
     }
 
     func selectDictationHotKey(id: String) {
@@ -312,6 +373,7 @@ final class DictationCoordinator: ObservableObject {
         // Opening a Settings scene can reorder auxiliary AppKit panels. Reassert the
         // existing overlay without restarting the recorder or Speech recognition.
         overlay.show(status: .recording, level: audioLevel, reposition: false)
+        overlay.updateSource(settings.recordingAudioSource)
         overlay.updatePreview(livePreviewCoordinator.state)
     }
 
@@ -367,6 +429,7 @@ final class DictationCoordinator: ObservableObject {
         microphonePermissionGranted = permissionManager.hasMicrophoneAccess
         accessibilityPermissionGranted = permissionManager.hasEventPostingAccess
         speechPermissionState = permissionManager.speechRecognitionStatus
+        systemAudioPermissionGranted = SystemAudioPermissionService().isAuthorized
     }
 
     func chooseRecordingDirectory(recommended: Bool) {
@@ -408,8 +471,13 @@ final class DictationCoordinator: ObservableObject {
     func showHistory() {
         if let window = historyWindowController?.window { window.makeKeyAndOrderFront(nil) }
         else {
-            historyWindowController = HistoryWindowController(coordinator: self)
-            historyWindowController?.showWindow(nil)
+            let controller = HistoryWindowController(coordinator: self)
+            controller.onClose = { [weak self, weak controller] in
+                guard let self, self.historyWindowController === controller else { return }
+                self.historyWindowController = nil
+            }
+            historyWindowController = controller
+            controller.showWindow(nil)
         }
         Task { await refreshHistory() }
         NSApp.activate(ignoringOtherApps: true)
@@ -417,6 +485,10 @@ final class DictationCoordinator: ObservableObject {
 
     func revealRetainedAudio() {
         if case let .failed(_, url?) = state { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+    func revealLatestOutput() {
+        guard let latestOutputURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([latestOutputURL])
     }
     func revealRecordingsFolder() {
         do { NSWorkspace.shared.open(try recordingLocationStore.resolvedDirectory()) }
@@ -527,7 +599,7 @@ final class DictationCoordinator: ObservableObject {
                     audioURL: url,
                     language: updated.language,
                     maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                    provider: try activeProvider()
+                    provider: try activeProvider(model: updated.modelID)
                 )
                 let style = selectedWritingStyle
                 updated = try await smartDictationPipeline.run(
@@ -573,6 +645,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func restoreLastDictation() {
+        guard !recorder.isRecording, !isHandlingToggle, state.acceptsStart else {
+            setupMessage = "Finish the current dictation before restoring an earlier one."
+            return
+        }
         Task {
             do {
                 guard let record = try await historyStore.lastInsertable() else {
@@ -662,7 +738,8 @@ final class DictationCoordinator: ObservableObject {
                 recorder.selectInputDevice(
                     try audioDeviceService.deviceID(forUID: settings.inputDeviceUID)
                 )
-                try startRecorderWithPreview()
+                sessionRecorder = microphoneRecorder
+                try await startRecorderWithPreview()
                 guard recorder.previewBufferHandler != nil else {
                     throw LivePreviewProviderError.recognizerUnavailable
                 }
@@ -680,7 +757,7 @@ final class DictationCoordinator: ObservableObject {
 
             if recorder.isRecording {
                 do {
-                    testAudioURL = try recorder.stop().url
+                    testAudioURL = try await recorder.stop().url
                 } catch {
                     FlowLogger.audio.error(
                         "Preview test recorder cleanup failed: \(error.localizedDescription, privacy: .public)"
@@ -703,6 +780,63 @@ final class DictationCoordinator: ObservableObject {
             }
             isPreviewTestRunning = false
             previewTestTask = nil
+            sessionRecorder = nil
+        }
+    }
+
+    func selectRecordingAudioSource(_ source: RecordingAudioSource) {
+        guard !recorder.isRecording, !isProcessing, source != .mixed else { return }
+        settings.recordingAudioSource = source
+        refreshPermissionStatus()
+    }
+
+    func openSystemAudioSettings() {
+        SystemAudioPermissionService().openSystemSettings()
+    }
+
+    func refreshPermissionStatuses() {
+        refreshPermissionStatus()
+    }
+
+    func testSystemAudio() {
+        guard !isSystemAudioTestRunning, !recorder.isRecording, state.acceptsStart else { return }
+        isSystemAudioTestRunning = true
+        systemAudioTestTask = Task { [weak self] in
+            guard let self else { return }
+            var temporaryURL: URL?
+            do {
+                sessionRecorder = systemAudioRecorder
+                try await systemAudioRecorder.start()
+                overlay.updateSource(.systemAudio)
+                overlay.show(status: .recording, reposition: true)
+                setupMessage = "System Audio test is running for 5 seconds…"
+                try await Task.sleep(for: .seconds(5))
+                temporaryURL = try await systemAudioRecorder.stop().url
+                if let temporaryURL { try validateSystemAudioTestFile(temporaryURL) }
+                setupMessage = "System Audio test completed successfully."
+            } catch is CancellationError {
+                if systemAudioRecorder.isRecording {
+                    temporaryURL = try? await systemAudioRecorder.stop().url
+                }
+                setupMessage = "System Audio test cancelled."
+            } catch {
+                if systemAudioRecorder.isRecording { _ = try? await systemAudioRecorder.stop() }
+                setupMessage = error.localizedDescription
+            }
+            if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
+            sessionRecorder = nil
+            audioLevel = 0
+            overlay.hide()
+            isSystemAudioTestRunning = false
+            systemAudioTestTask = nil
+            refreshPermissionStatus()
+        }
+    }
+
+    private func validateSystemAudioTestFile(_ url: URL) throws {
+        let file = try AVAudioFile(forReading: url)
+        guard file.length > 0, file.fileFormat.sampleRate > 0 else {
+            throw SystemAudioRecorderError.noAudioReceived
         }
     }
 
@@ -719,7 +853,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func toggleDictation() async {
-        guard !isHandlingToggle, !isPreviewTestRunning else { return }
+        guard !isHandlingToggle, !isPreviewTestRunning, !isSystemAudioTestRunning else { return }
         isHandlingToggle = true
         defer { isHandlingToggle = false }
         if recorder.isRecording { await stopAndTranscribe() }
@@ -742,6 +876,75 @@ final class DictationCoordinator: ObservableObject {
             FlowLogger.app.error("Smart Dictation data load failed: \(error.localizedDescription, privacy: .public)")
             setupMessage = error.localizedDescription
         }
+    }
+
+    func refreshAppProfiles() async {
+        do { appProfiles = try await appProfileStore.all() }
+        catch { setupMessage = error.localizedDescription }
+    }
+
+    func saveAppProfile(_ profile: AppDictationProfile) {
+        Task {
+            do {
+                try await appProfileStore.upsert(profile)
+                await refreshAppProfiles()
+                setupMessage = "App profile saved."
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func deleteAppProfile(_ profile: AppDictationProfile) {
+        Task {
+            do {
+                try await appProfileStore.delete(id: profile.id)
+                await refreshAppProfiles()
+            } catch { setupMessage = error.localizedDescription }
+        }
+    }
+
+    var recentProfileCandidates: [(bundleIdentifier: String, displayName: String)] {
+        var seen = Set<String>()
+        return historyRecords.compactMap { record in
+            guard let bundle = record.targetBundleIdentifier,
+                  let name = record.targetApplicationName,
+                  !bundle.isEmpty,
+                  !seen.contains(bundle),
+                  !appProfiles.contains(where: { $0.bundleIdentifier == bundle }) else { return nil }
+            seen.insert(bundle)
+            return (bundle, name)
+        }
+    }
+
+    var usageStatistics: UsageStatistics {
+        UsageStatistics.calculate(
+            records: historyRecords,
+            typingWordsPerMinute: settings.typingWordsPerMinute
+        )
+    }
+
+    func checkForUpdates(manual: Bool = true) async {
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        defer { isCheckingForUpdates = false }
+        settings.lastUpdateCheck = Date()
+        do {
+            let release = try await GitHubReleaseChecker().latestStableRelease()
+            let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                as? String ?? "0"
+            if let release, GitHubReleaseChecker.isNewer(release.version, than: current) {
+                availableRelease = release
+                if manual { setupMessage = "FlowDictate \(release.version) is available." }
+            } else if manual {
+                setupMessage = "FlowDictate is up to date."
+            }
+        } catch {
+            if manual { setupMessage = error.localizedDescription }
+        }
+    }
+
+    func openAvailableRelease() {
+        guard let availableRelease else { return }
+        NSWorkspace.shared.open(availableRelease.pageURL)
     }
 
     func saveDictionaryEntry(_ entry: DictionaryEntry) {
@@ -1040,7 +1243,42 @@ final class DictationCoordinator: ObservableObject {
         }
     }
     private func registerDictationHotKey(_ value: HotKeyConfiguration) throws {
-        try dictationHotKeyRegistrar.register(value) { [weak self] in self?.requestToggle() }
+        try dictationHotKeyRegistrar.register(
+            value,
+            pressed: { [weak self] in self?.dictationHotKeyPressed() },
+            released: { [weak self] in self?.dictationHotKeyReleased() }
+        )
+    }
+
+    private func dictationHotKeyPressed() {
+        guard settings.dictationActivationMode == .pressAndHold else {
+            requestToggle(); return
+        }
+        guard !holdHotKeyIsDown else { return }
+        holdReleaseTask?.cancel()
+        holdHotKeyIsDown = true
+        guard !recorder.isRecording else { return }
+        Task { [weak self] in await self?.toggleDictation() }
+    }
+
+    private func dictationHotKeyReleased() {
+        guard settings.dictationActivationMode == .pressAndHold, holdHotKeyIsDown else { return }
+        holdHotKeyIsDown = false
+        holdReleaseTask?.cancel()
+        holdReleaseTask = Task { [weak self] in
+            guard let self else { return }
+            // Starting ScreenCaptureKit can take a moment. Remember an early key-up
+            // and stop as soon as the recorder has actually entered recording state.
+            for _ in 0..<80 {
+                guard !Task.isCancelled, !self.holdHotKeyIsDown else { return }
+                if self.recorder.isRecording {
+                    await self.toggleDictation()
+                    return
+                }
+                if !self.isHandlingToggle { return }
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+        }
     }
     private func registerCancelHotKey(_ value: HotKeyConfiguration) throws {
         try cancelHotKeyRegistrar.register(value) { [weak self] in self?.requestCancel() }
@@ -1050,6 +1288,8 @@ final class DictationCoordinator: ObservableObject {
     }
 
     private func startRecording() async {
+        latestOutputNotice = nil
+        latestOutputURL = nil
         refreshConfigurationStatus()
         guard apiKeyConfigured else { showOnboarding(); fail(TranscriptionProviderError.missingAPIKey, retainedAudioURL: nil); return }
         guard recordingLocationConfigured else { showOnboarding(); fail(RecordingLocationError.notConfigured, retainedAudioURL: nil); return }
@@ -1058,40 +1298,55 @@ final class DictationCoordinator: ObservableObject {
                  message: "Place the cursor in another application before starting dictation."); return
         }
         do {
-            try await permissionManager.ensureMicrophoneAccess()
+            if settings.recordingAudioSource == .microphone {
+                try await permissionManager.ensureMicrophoneAccess()
+            }
             try permissionManager.ensureEventPostingAccess()
+            sessionConfiguration = effectiveConfiguration(for: target)
             refreshPermissionStatus()
             if settings.livePreviewEnabled, speechPermissionState == .notDetermined {
                 speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
             }
-            recorder.selectInputDevice(try audioDeviceService.deviceID(forUID: settings.inputDeviceUID))
-            try startRecorderWithPreview()
+            sessionRecorder = settings.recordingAudioSource == .systemAudio
+                ? systemAudioRecorder
+                : microphoneRecorder
+            if settings.recordingAudioSource == .microphone {
+                recorder.selectInputDevice(try audioDeviceService.deviceID(forUID: settings.inputDeviceUID))
+            }
+            try await startRecorderWithPreview()
             overlayDismissTask?.cancel()
             focusTarget = target
             lastExternalFocusTarget = target
             state = .recording
+            overlay.updateSource(settings.recordingAudioSource)
             overlay.show(status: .recording, reposition: true)
         } catch AudioDeviceServiceError.selectedDeviceUnavailable {
             settings.inputDeviceUID = nil
             recorder.selectInputDevice(nil)
             do {
-                try startRecorderWithPreview()
+                sessionRecorder = microphoneRecorder
+                try await startRecorderWithPreview()
                 focusTarget = target
                 lastExternalFocusTarget = target
                 state = .recording
+                overlay.updateSource(.microphone)
                 overlay.show(status: .recording, reposition: true)
             }
-            catch { fail(error, retainedAudioURL: nil) }
-        } catch { refreshPermissionStatus(); fail(error, retainedAudioURL: nil) }
+            catch { sessionRecorder = nil; fail(error, retainedAudioURL: nil) }
+        } catch { sessionRecorder = nil; refreshPermissionStatus(); fail(error, retainedAudioURL: nil) }
     }
 
     private func stopAndTranscribe() async {
-        let recording: AudioRecordingResult
-        do { recording = try recorder.stop() }
-        catch { fail(error, retainedAudioURL: nil); return }
-        recorder.previewBufferHandler = nil
-        livePreviewCoordinator.finish()
+        state = .finalizing
+        audioLevel = 0
         overlay.show(status: .finalizing)
+        let recording: AudioRecordingResult
+        do { recording = try await recorder.stop() }
+        catch { sessionRecorder = nil; fail(error, retainedAudioURL: nil); return }
+        recorder.previewBufferHandler = nil
+        sessionRecorder = nil
+        livePreviewCoordinator.finish()
+        latestOutputURL = recording.url
         guard let target = focusTarget else { fail(TextInsertionError.targetUnavailable, retainedAudioURL: recording.url); return }
 
         var record = makeRecord(from: recording, target: target, status: .recorded)
@@ -1107,16 +1362,17 @@ final class DictationCoordinator: ObservableObject {
             record = try await transcriptionRunner.run(
                 record: record,
                 audioURL: recording.url,
-                language: settings.transcriptionLanguage.apiValue,
+                language: record.language,
                 maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                provider: try activeProvider()
+                provider: try activeProvider(model: record.modelID)
             )
             state = .enhancing
             overlay.show(status: .processing)
-            let style = selectedWritingStyle
+            let style = writingStyles.first { $0.id == record.writingStyleID && $0.isEnabled }
+                ?? BuiltInWritingStyles.all[0]
             record = try await smartDictationPipeline.run(
                 record: record,
-                spokenFormattingEnabled: settings.spokenFormattingEnabled,
+                spokenFormattingEnabled: record.spokenFormattingEnabled,
                 dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
                 style: style,
                 enhancementModel: settings.enhancementModel,
@@ -1125,19 +1381,36 @@ final class DictationCoordinator: ObservableObject {
             )
             state = .inserting; record.status = .inserting; record.updatedAt = Date()
             try await historyStore.upsert(record)
-            try await makeInserter().insert(record.finalText ?? record.originalTranscript ?? "", into: target)
+            let outputText = record.finalText ?? record.originalTranscript ?? ""
+            var successMessage = "Text inserted"
+            if record.audioSource == .systemAudio {
+                let copied = copyToClipboard(outputText)
+                latestOutputNotice = copied
+                    ? "System Audio transcript copied to the clipboard."
+                    : "System Audio transcript is available in History."
+                successMessage = copied
+                    ? "Text inserted · copied to clipboard"
+                    : "Text inserted · clipboard unavailable"
+            }
+            try await makeInserter().insert(outputText, into: target)
             record.status = .completed; record.errorCategory = nil; record.errorMessage = nil; record.updatedAt = Date()
             try await historyStore.upsert(record)
-            focusTarget = nil; state = .success; overlay.show(status: .success)
+            focusTarget = nil
+            state = .success
+            overlay.show(status: .success(message: successMessage))
+            sessionConfiguration = nil
             scheduleOverlayDismiss(after: .milliseconds(900), transitionToIdle: true)
         } catch let failure as TranscriptionRunFailure {
             record = failure.record
+            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
             fail(failure.underlyingError, retainedAudioURL: recording.url)
         } catch let failure as TranscriptionPersistenceFailure {
             record = failure.record
+            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
             fail(failure, retainedAudioURL: recording.url)
         } catch let failure as SmartDictationRunFailure {
             record = failure.record
+            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
             fail(
                 failure.underlyingError,
                 retainedAudioURL: recording.url,
@@ -1148,6 +1421,7 @@ final class DictationCoordinator: ObservableObject {
             record.errorCategory = DictationFailureClassifier.category(for: error)
             record.errorMessage = error.localizedDescription; record.updatedAt = Date()
             await persistBestEffort(record, context: "dictation failure")
+            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
             fail(error, retainedAudioURL: recording.url)
         }
         await refreshHistory()
@@ -1156,10 +1430,14 @@ final class DictationCoordinator: ObservableObject {
     private func insertStoredText(_ text: String, record: DictationRecord, target: FocusTarget) async {
         var updated = record
         do {
+            state = .inserting
             updated.status = .inserting; updated.updatedAt = Date(); try await historyStore.upsert(updated)
             try await makeInserter().insert(text, into: target)
             updated.status = .completed; updated.errorCategory = nil; updated.errorMessage = nil; updated.updatedAt = Date()
-            try await historyStore.upsert(updated); state = .success
+            try await historyStore.upsert(updated)
+            state = .success
+            overlay.show(status: .success(message: "Text inserted"))
+            scheduleOverlayDismiss(after: .milliseconds(900), transitionToIdle: true)
         } catch {
             updated.status = .insertionFailed; updated.errorCategory = .insertion
             updated.errorMessage = error.localizedDescription; updated.updatedAt = Date()
@@ -1182,10 +1460,16 @@ final class DictationCoordinator: ObservableObject {
             audioRelativePath: (try? audioStore.relativePath(for: recording.url)) ?? recording.url.path,
             audioFileSize: size,
             providerID: "OpenAI",
-            modelID: settings.transcriptionModel,
-            language: settings.transcriptionLanguage.apiValue,
+            modelID: sessionConfiguration?.transcriptionModel ?? settings.transcriptionModel,
+            language: (sessionConfiguration?.language ?? settings.transcriptionLanguage).apiValue,
             targetBundleIdentifier: target?.bundleIdentifier,
-            targetApplicationName: target?.localizedName
+            targetApplicationName: target?.localizedName,
+            sourceMetadata: recording.sourceMetadata
+        )
+        .withSmartConfiguration(
+            writingStyleID: sessionConfiguration?.writingStyleID ?? settings.writingStyleID,
+            spokenFormattingEnabled: sessionConfiguration?.spokenFormattingEnabled
+                ?? settings.spokenFormattingEnabled
         )
     }
 
@@ -1205,10 +1489,13 @@ final class DictationCoordinator: ObservableObject {
             : try audioStore.url(forRelativePath: record.audioRelativePath)
     }
     private func makeInserter() -> TextInserting {
-        injectedInserter ?? PasteboardTextInserter(
+        if let injectedInserter { return injectedInserter }
+        let clipboard = PasteboardTextInserter(
             pasteboard: .general,
             restoreDelay: .milliseconds(Int(settings.clipboardRestoreDelay * 1_000))
         )
+        if sessionConfiguration?.insertionPreference == .clipboard { return clipboard }
+        return FallbackTextInserter(direct: AccessibilityTextInserter(), clipboard: clipboard)
     }
 
     private func prepareLivePreview() {
@@ -1216,6 +1503,11 @@ final class DictationCoordinator: ObservableObject {
         livePreviewCoordinator.cancel()
         didLogLivePreviewText = false
         overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
+        if settings.recordingAudioSource == .systemAudio {
+            overlay.updatePreview(.unavailable(RecordingAudioSource.systemAudioPreviewGuidance))
+            FlowLogger.audio.info("Live Preview skipped for System Audio")
+            return
+        }
         FlowLogger.audio.info(
             "Preparing Live Preview: enabled=\(self.settings.livePreviewEnabled, privacy: .public), speechPermission=\(self.speechPermissionState.rawValue, privacy: .public)"
         )
@@ -1253,9 +1545,9 @@ final class DictationCoordinator: ObservableObject {
         }
     }
 
-    private func startRecorderWithPreview() throws {
+    private func startRecorderWithPreview() async throws {
         do {
-            try recorder.start()
+            try await recorder.start()
             // Attach Speech only after the audio engine is stable. Starting the
             // recognizer first can race Core Audio device initialization.
             prepareLivePreview()
@@ -1282,14 +1574,15 @@ final class DictationCoordinator: ObservableObject {
         }
         return nil
     }
-    private func activeProvider() throws -> any TranscriptionProvider {
+    private func activeProvider(model preferredModel: String? = nil) throws -> any TranscriptionProvider {
         if let injectedProvider { return injectedProvider }
         let environmentKey = environment["OPENAI_API_KEY"]
         let keychainKey = environmentKey?.isEmpty == false ? nil : try keychainAPIKey()
         guard let key = [environmentKey, keychainKey].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
             throw TranscriptionProviderError.missingAPIKey
         }
-        let configured = settings.transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configured = (preferredModel ?? settings.transcriptionModel)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let model = environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]?.isEmpty == false
             ? environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]! : (configured.isEmpty ? "gpt-4o-mini-transcribe" : configured)
         return OpenAITranscriptionProvider(apiKey: key, model: model)
@@ -1298,6 +1591,22 @@ final class DictationCoordinator: ObservableObject {
     private var selectedWritingStyle: WritingStyleProfile {
         writingStyles.first { $0.id == settings.writingStyleID && $0.isEnabled }
             ?? BuiltInWritingStyles.all[0]
+    }
+
+    private func effectiveConfiguration(for target: FocusTarget) -> EffectiveDictationConfiguration {
+        let profile = appProfiles.first {
+            $0.isEnabled && $0.bundleIdentifier == target.bundleIdentifier
+        }
+        return EffectiveDictationConfiguration(
+            language: profile?.language ?? settings.transcriptionLanguage,
+            transcriptionModel: profile?.transcriptionModel?.trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty ?? settings.transcriptionModel,
+            writingStyleID: profile?.writingStyleID ?? settings.writingStyleID,
+            spokenFormattingEnabled: profile?.spokenFormattingEnabled
+                ?? settings.spokenFormattingEnabled,
+            insertionPreference: profile?.insertionPreference ?? .automatic,
+            profileID: profile?.id
+        )
     }
 
     private func activeEnhancer() throws -> any TranscriptEnhancing {
@@ -1348,14 +1657,43 @@ final class DictationCoordinator: ObservableObject {
         return value
     }
 
+    @discardableResult
+    private func copyToClipboard(_ text: String) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func copySystemAudioTranscriptForRecovery(
+        _ record: DictationRecord,
+        recordingURL: URL
+    ) {
+        guard record.audioSource == .systemAudio,
+              let text = record.finalText
+                ?? record.dictionaryTranscript
+                ?? record.formattedTranscript
+                ?? record.originalTranscript else { return }
+        let copied = copyToClipboard(text)
+        latestOutputURL = recordingURL
+        latestOutputNotice = copied
+            ? "System Audio transcript copied to the clipboard."
+            : "System Audio transcript is available in History."
+    }
+
     private func fail(_ error: Error, retainedAudioURL: URL?, message: String? = nil) {
-        failMessage(message ?? error.localizedDescription, retainedAudioURL: retainedAudioURL)
+        var resolvedMessage = message ?? error.localizedDescription
+        if let retainedAudioURL, !resolvedMessage.contains(retainedAudioURL.path) {
+            resolvedMessage += " Recording saved at \(retainedAudioURL.path)."
+        }
+        failMessage(resolvedMessage, retainedAudioURL: retainedAudioURL)
     }
     private func failMessage(_ message: String, retainedAudioURL: URL? = nil) {
         recorder.previewBufferHandler = nil
         livePreviewCoordinator.cancel()
         state = .failed(message: message, retainedAudioURL: retainedAudioURL)
         focusTarget = nil; audioLevel = 0
+        sessionRecorder = nil
+        sessionConfiguration = nil
         overlay.show(status: .error(message))
         scheduleOverlayDismiss(after: .seconds(3), transitionToIdle: false)
         FlowLogger.app.error("Dictation failed: \(message, privacy: .public)")
@@ -1369,4 +1707,8 @@ final class DictationCoordinator: ObservableObject {
             if transitionToIdle, state == .success { state = .idle }
         }
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

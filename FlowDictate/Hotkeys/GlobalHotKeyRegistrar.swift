@@ -22,6 +22,16 @@ protocol HotKeyRegistering: AnyObject {
     func unregister()
 }
 
+extension HotKeyRegistering {
+    func register(
+        _ configuration: HotKeyConfiguration,
+        pressed: @escaping @MainActor () -> Void,
+        released: @escaping @MainActor () -> Void
+    ) throws {
+        try register(configuration, handler: pressed)
+    }
+}
+
 @MainActor
 final class DisabledHotKeyRegistrar: HotKeyRegistering {
     func register(
@@ -39,6 +49,7 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRef: EventHotKeyRef?
     private var handler: (@MainActor () -> Void)?
+    private var releaseHandler: (@MainActor () -> Void)?
     private let registrationID: UInt32
 
     init(registrationID: UInt32 = 1) {
@@ -58,19 +69,28 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
         _ configuration: HotKeyConfiguration,
         handler: @escaping @MainActor () -> Void
     ) throws {
+        try register(configuration, pressed: handler, released: {})
+    }
+
+    func register(
+        _ configuration: HotKeyConfiguration,
+        pressed: @escaping @MainActor () -> Void,
+        released: @escaping @MainActor () -> Void
+    ) throws {
         unregister()
-        self.handler = handler
+        self.handler = pressed
+        releaseHandler = released
 
         if eventHandlerRef == nil {
-            var eventType = EventTypeSpec(
-                eventClass: OSType(kEventClassKeyboard),
-                eventKind: UInt32(kEventHotKeyPressed)
-            )
+            var eventTypes = [
+                EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+                EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+            ]
             let status = InstallEventHandler(
                 GetApplicationEventTarget(),
                 Self.eventCallback,
-                1,
-                &eventType,
+                eventTypes.count,
+                &eventTypes,
                 Unmanaged.passUnretained(self).toOpaque(),
                 &eventHandlerRef
             )
@@ -102,8 +122,8 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
         }
     }
 
-    private func invokeHandler() {
-        handler?()
+    private func invokeHandler(released: Bool) {
+        if released { releaseHandler?() } else { handler?() }
     }
 
     private nonisolated static let eventCallback: EventHandlerUPP = { _, event, userData in
@@ -129,7 +149,7 @@ final class GlobalHotKeyRegistrar: HotKeyRegistering {
         }
 
         MainActor.assumeIsolated {
-            registrar.invokeHandler()
+            registrar.invokeHandler(released: GetEventKind(event) == UInt32(kEventHotKeyReleased))
         }
         return noErr
     }

@@ -2,7 +2,9 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class HistoryWindowController: NSWindowController {
+final class HistoryWindowController: NSWindowController, NSWindowDelegate {
+    var onClose: (() -> Void)?
+
     init(coordinator: DictationCoordinator) {
         let window = NSWindow(contentViewController: NSHostingController(rootView: HistoryView(coordinator: coordinator)))
         window.title = "FlowDictate History"
@@ -11,17 +13,32 @@ final class HistoryWindowController: NSWindowController {
         window.center()
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
     }
+
+    func windowWillClose(_ notification: Notification) { onClose?() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 }
 
 struct HistoryView: View {
-    @ObservedObject var coordinator: DictationCoordinator
+    let coordinator: DictationCoordinator
     @State private var selection: UUID?
     @State private var searchText = ""
     @State private var filter: HistoryFilter = .all
+    @State private var historyRecords: [DictationRecord]
+    @State private var retryingRecordIDs: Set<UUID>
+    @State private var retryingEnhancementRecordIDs: Set<UUID>
+    @State private var writingStyles: [WritingStyleProfile]
+
+    init(coordinator: DictationCoordinator) {
+        self.coordinator = coordinator
+        _historyRecords = State(initialValue: coordinator.historyRecords)
+        _retryingRecordIDs = State(initialValue: coordinator.retryingRecordIDs)
+        _retryingEnhancementRecordIDs = State(initialValue: coordinator.retryingEnhancementRecordIDs)
+        _writingStyles = State(initialValue: coordinator.writingStyles)
+    }
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -32,7 +49,7 @@ struct HistoryView: View {
     }
 
     private var records: [DictationRecord] {
-        coordinator.historyRecords.filter { record in
+        historyRecords.filter { record in
             let matchesText = searchText.isEmpty
                 || record.previewText.localizedCaseInsensitiveContains(searchText)
                 || record.targetApplicationName?.localizedCaseInsensitiveContains(searchText) == true
@@ -50,7 +67,7 @@ struct HistoryView: View {
     }
 
     private var selectedRecord: DictationRecord? {
-        coordinator.historyRecords.first { $0.id == selection }
+        historyRecords.first { $0.id == selection }
     }
 
     var body: some View {
@@ -83,6 +100,10 @@ struct HistoryView: View {
             else { ContentUnavailableView("Select a Dictation", systemImage: "waveform") }
         }
         .task { await coordinator.refreshHistory() }
+        .onReceive(coordinator.$historyRecords) { historyRecords = $0 }
+        .onReceive(coordinator.$retryingRecordIDs) { retryingRecordIDs = $0 }
+        .onReceive(coordinator.$retryingEnhancementRecordIDs) { retryingEnhancementRecordIDs = $0 }
+        .onReceive(coordinator.$writingStyles) { writingStyles = $0 }
     }
 
     private func detail(_ record: DictationRecord) -> some View {
@@ -115,6 +136,16 @@ struct HistoryView: View {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                     GridRow { Text("Recorded").foregroundStyle(.secondary); Text(record.createdAt.formatted()) }
                     GridRow { Text("Duration").foregroundStyle(.secondary); Text("\(record.duration, format: .number.precision(.fractionLength(1))) seconds") }
+                    GridRow {
+                        Text("Audio source").foregroundStyle(.secondary)
+                        Label(record.audioSource.shortTitle, systemImage: record.audioSource.symbolName)
+                    }
+                    if record.audioSampleRate > 0 {
+                        GridRow {
+                            Text("Audio format").foregroundStyle(.secondary)
+                            Text("\(Int(record.audioSampleRate)) Hz · \(record.audioChannelCount) ch")
+                        }
+                    }
                     GridRow { Text("Provider").foregroundStyle(.secondary); Text(record.providerID.isEmpty ? "—" : record.providerID) }
                     GridRow { Text("Model").foregroundStyle(.secondary); Text(record.modelID.isEmpty ? "—" : record.modelID) }
                     GridRow { Text("Attempts").foregroundStyle(.secondary); Text("\(record.attemptCount)") }
@@ -146,17 +177,17 @@ struct HistoryView: View {
                     Button("Export Text…") { coordinator.exportText(from: record) }.disabled(!record.canInsert)
                     Button("Insert at Cursor") { coordinator.reinsert(record) }.disabled(!record.canInsert)
                     Button("Retry Transcription") { coordinator.retryTranscription(record) }
-                        .disabled(!record.canRetry || coordinator.retryingRecordIDs.contains(record.id))
+                        .disabled(!record.canRetry || retryingRecordIDs.contains(record.id))
                 }
                 HStack {
                     if record.processingStatus == .enhancementFailed {
                         Button("Use Local Text") { coordinator.insertLocallyProcessedText(record) }
                         Button("Use Original") { coordinator.insertOriginalText(record) }
                         Button("Retry Enhancement") { coordinator.retryEnhancement(record) }
-                            .disabled(!record.canRetryEnhancement || coordinator.retryingEnhancementRecordIDs.contains(record.id))
+                            .disabled(!record.canRetryEnhancement || retryingEnhancementRecordIDs.contains(record.id))
                     }
                     Menu("Process with Style") {
-                        ForEach(coordinator.writingStyles.filter(\.isEnabled)) { style in
+                        ForEach(writingStyles.filter(\.isEnabled)) { style in
                             Button(style.name) { coordinator.reprocess(record, writingStyleID: style.id) }
                         }
                     }
@@ -205,7 +236,7 @@ struct HistoryView: View {
     }
 
     private func styleName(for record: DictationRecord) -> String {
-        coordinator.writingStyles.first { $0.id == record.writingStyleID }?.name
+        writingStyles.first { $0.id == record.writingStyleID }?.name
             ?? (record.writingStyleID == BuiltInWritingStyles.originalID ? "Original" : "Unavailable style")
     }
 

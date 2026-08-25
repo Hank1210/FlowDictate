@@ -8,6 +8,14 @@ FlowDictate does not include analytics, advertising, telemetry or a developer-op
 - Recordings are stored in the folder selected during setup. The recommended default is `Documents/Recordings`.
 - Dictation history and recovery metadata remain in the app's local Application Support container.
 - Personal dictionary entries and custom writing styles are stored locally in the Application Support container.
+- App profiles are stored locally by application bundle identifier. FlowDictate does not store window titles or document contents for profile selection.
+- Usage statistics are calculated locally from History and are not telemetry.
+
+## Optional System Audio capture
+
+System Audio capture is off by default and requires explicit selection plus macOS **Screen & System Audio Recording** permission. FlowDictate registers only an audio output with ScreenCaptureKit: it does not register a video output and does not save screenshots, windows or display frames.
+
+The five-second System Audio test writes a temporary local audio file only to validate the source. It does not contact OpenAI, does not add a History record and deletes the test file after completion or failure. Normal System Audio dictations follow the same local storage, transcription and retention rules as microphone recordings.
 
 ## Data sent to OpenAI
 
@@ -28,6 +36,14 @@ If enhancement fails, all transcript stages remain local so the user can retry, 
 When Live Preview is enabled, FlowDictate can send in-memory audio buffers to Apple's Speech framework with on-device recognition required. There is no fallback to Apple's cloud recognition. The provisional Preview text exists only in memory: it is not saved in History, diagnostics or logs, is not inserted into another app and is not used as the final transcript.
 
 Live Preview is optional. Existing installations keep it disabled until the user enables it. If it is disabled, FlowDictate neither starts Speech recognition nor requests Speech Recognition permission. If permission or an on-device recognizer is unavailable, normal recording and final OpenAI transcription continue without Preview.
+
+Live Preview currently applies to microphone recordings. System Audio recording remains fully usable without a provisional Preview.
+
+## App integration and updates
+
+Direct insertion uses macOS Accessibility only on the focused editable control. FlowDictate refuses protected password fields and otherwise falls back to its clipboard-safe insertion path when direct insertion is unsupported.
+
+When Community update checks are enabled, FlowDictate requests the latest stable release metadata from GitHub at most once per day. It sends no recordings, transcripts, History, settings, API key or app-profile data. FlowDictate never downloads or installs an update automatically.
 
 ## Independent project
 

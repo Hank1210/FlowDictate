@@ -2,6 +2,19 @@ import Foundation
 
 enum DictationFailureClassifier {
     static func category(for error: Error) -> DictationErrorCategory {
+        if let error = error as? SystemAudioRecorderError {
+            return switch error {
+            case .permissionDenied: .systemAudioPermission
+            case .unavailable, .noAudioReceived: .systemAudioUnavailable
+            case .interrupted, .writerFailed: .systemAudioInterrupted
+            }
+        }
+        if let error = error as? DirectInsertionError {
+            return switch error {
+            case .unsupported, .protectedField: .directInsertionUnsupported
+            case .writeFailed: .directInsertionUnknown
+            }
+        }
         if let error = error as? URLError {
             switch error.code {
             case .timedOut: return .timeout

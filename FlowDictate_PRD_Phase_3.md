@@ -1,13 +1,13 @@
 # Product Requirements Document: FlowDictate Phase 3
 
-**Version:** 3.0 Draft 1
-**Datum:** 21. August 2026
+**Version:** 3.0 Draft 2
+**Datum:** 22. August 2026
 **Produkt:** FlowDictate
 **Phase:** Phase 3 – Live & Smart Dictation
-**Teilphasen:** 3.1 Live Preview, 3.2 Smart Dictation, 3.3 App Integration & Delivery
+**Teilphasen:** 3.1 Live Preview, 3.2 Smart Dictation, 3.3 App Integration, Audio Capture & Delivery
 **Zielplattform:** macOS 14 oder neuer
-**Technologie:** Swift, SwiftUI, AppKit, AVFoundation, Speech, Accessibility APIs
-**Status:** Phasen 3.1 und 3.2 umgesetzt und auf dem Referenz-Mac manuell abgenommen; Phase 3.3 geplant.
+**Technologie:** Swift, SwiftUI, AppKit, AVFoundation, ScreenCaptureKit, Speech, Accessibility APIs
+**Status:** Phasen 3.1 und 3.2 umgesetzt und auf dem Referenz-Mac manuell abgenommen; Pflichtumfang von Phase 3.3 implementiert, manuelle Systemaudio- und App-Kompatibilitätsabnahme ausstehend.
 
 ---
 
@@ -21,7 +21,7 @@ Phase 3 wird in drei unabhängig lieferbare Abschnitte aufgeteilt:
 
 1. **Phase 3.1 – Live Preview & Overlay**
 2. **Phase 3.2 – Smart Dictation**
-3. **Phase 3.3 – App Integration & Delivery**
+3. **Phase 3.3 – App Integration, Audio Capture & Delivery**
 
 Jede Teilphase muss einzeln testbar und veröffentlichungsfähig sein. Keine Teilphase darf die in Phase 2 erreichte Aufnahme-, Recovery- oder History-Zuverlässigkeit verschlechtern.
 
@@ -98,7 +98,7 @@ Phase 3 ist abgeschlossen, wenn:
 ### 4.3 Nicht Bestandteil von Phase 3
 
 - vollständig lokale Whisper-, Parakeet- oder andere große Modellpakete,
-- Meeting-Aufzeichnung und Sprechertrennung,
+- automatische Meeting-Aufzeichnung, Sprechertrennung und Gesprächsanalyse,
 - autonomer Command Mode für Systemaktionen,
 - allgemeiner Agent oder Workflow-Automation,
 - Cloud-Synchronisierung,
@@ -140,6 +140,7 @@ Jede neue Funktion besitzt einen funktionierenden Fallback:
 - Enhancement fehlgeschlagen → Rohtranskript verwenden oder Benutzer entscheiden lassen,
 - direkte Einfügung nicht möglich → Clipboard/Paste,
 - Profil ungültig → globale Standardkonfiguration,
+- Systemaudio nicht verfügbar → Aufnahme nicht starten, Ursache anzeigen und Mikrofonmodus weiterhin anbieten; kein stiller Quellenwechsel,
 - Update-Prüfung nicht erreichbar → App arbeitet unverändert weiter.
 
 ---
@@ -149,20 +150,24 @@ Jede neue Funktion besitzt einen funktionierenden Fallback:
 ### 6.1 Zielpipeline
 
 ```text
-Mikrofon
-   ├──→ sichere WAV-Aufnahme ───────────────→ finale Transkription
-   │                                               ↓
-   └──→ lokaler Preview-Stream → Overlay      originalTranscript
-                                                   ↓
-                                         gesprochene Formatierung
-                                                   ↓
-                                          persönliches Wörterbuch
-                                                   ↓
-                                        optionale AI-Nachbearbeitung
-                                                   ↓
-                                               finalText
-                                                   ↓
-                                   direkte Einfügung oder Clipboard
+Gewählte Audioquelle
+   ├── Mikrofon
+   ├── Systemaudio
+   └── Mikrofon + Systemaudio (Soll-Umfang 3.3)
+                ↓
+       sichere lokale Audiodatei ───────────→ finale Transkription
+                │                                    ↓
+                └──→ lokaler Preview-Stream     originalTranscript
+                             ↓                         ↓
+                          Overlay              gesprochene Formatierung
+                                                       ↓
+                                              persönliches Wörterbuch
+                                                       ↓
+                                            optionale AI-Nachbearbeitung
+                                                       ↓
+                                                   finalText
+                                                       ↓
+                                       direkte Einfügung oder Clipboard
 ```
 
 ### 6.2 Komponenten
@@ -172,6 +177,9 @@ Neue oder erweiterte Verantwortlichkeiten:
 | Komponente | Verantwortung |
 |---|---|
 | `MicrophoneRecorder` | Audiodatei schreiben, Pegel liefern und kopierte Preview-Buffer publizieren |
+| `SystemAudioRecorder` | digitalen macOS-Ausgabemix über ScreenCaptureKit ohne Videopersistenz erfassen |
+| `AudioSourceCoordinator` | Aufnahmequelle auswählen, Berechtigungen prüfen und ein einheitliches Recording-Ergebnis liefern |
+| `AudioMixer` | Mikrofon und Systemaudio im optionalen Mischmodus resamplen, synchronisieren und begrenzen |
 | `LivePreviewProvider` | Audiobuffer in vorläufige Textereignisse umwandeln |
 | `AppleSpeechLivePreviewProvider` | lokale Apple-Speech-Implementierung für Phase 3.1 |
 | `LivePreviewCoordinator` | Session-Lebenszyklus, Backpressure, Fehler und UI-Updates |
@@ -586,15 +594,16 @@ Die manuelle Abschlussprüfung auf dem Referenz-Mac wurde am 21. August 2026 erf
 
 ---
 
-# Teilphase 3.3 – App Integration & Delivery
+# Teilphase 3.3 – App Integration, Audio Capture & Delivery
 
 ## 19. Ziel von Phase 3.3
 
-FlowDictate passt sich an die aktive Ziel-App an, fügt Text möglichst ohne Clipboard-Eingriff ein und bietet produktive Bedienmodi sowie lokale Nutzungs- und Updateinformationen.
+FlowDictate passt sich an die aktive Ziel-App an, kann wahlweise Mikrofon- oder digitales Systemaudio erfassen, fügt Text möglichst ohne Clipboard-Eingriff ein und bietet produktive Bedienmodi sowie lokale Nutzungs- und Updateinformationen.
 
 ### 19.1 Muss-Funktionen
 
 - App-spezifische Profile,
+- Audio Source Capture mit den Modi **Mikrofon** und **Systemaudio**,
 - direkte Accessibility-Einfügung mit Clipboard-Fallback,
 - gedrückt-halten-Modus,
 - lokale Nutzungsstatistik,
@@ -604,9 +613,90 @@ FlowDictate passt sich an die aktive Ziel-App an, fügt Text möglichst ohne Cli
 ### 19.2 Soll-Funktionen
 
 - fortlaufende Diktierkette,
+- kombinierte Aufnahme **Mikrofon + Systemaudio**,
 - Bulk-Export von History und Audio,
 - Profilimport/-export,
 - manuelle Kompatibilitätsausnahme für problematische Apps.
+
+### 19.3 Audio Source Capture
+
+#### 19.3.1 Ziel und Begriffe
+
+Systemaudio bezeichnet den digitalen Ton, den macOS an die aktuell gewählte Ausgabe übergibt. Die Erfassung erfolgt vor Lautsprecher oder Kopfhörer und ist keine erneute Aufnahme über das Mikrofon. FlowDictate speichert bei reiner Systemaudioaufnahme kein Bildschirmbild und keine Videodatei.
+
+#### 19.3.2 Pflichtmodi
+
+Unter **Settings → Audio → Recording source** stehen mindestens zur Verfügung:
+
+1. **Microphone** – bestehendes Verhalten und sicherer Standardwert,
+2. **System Audio** – digitaler macOS-Ausgabemix ohne Mikrofonsignal.
+
+Die gewählte Quelle wird lokal gespeichert und beim Start der Aufnahme im Overlay eindeutig angezeigt. Ein Quellenwechsel während einer laufenden Aufnahme ist nicht erlaubt.
+
+#### 19.3.3 Optionaler Mischmodus
+
+**Microphone + System Audio** ist Soll-Umfang. Er darf erst veröffentlicht werden, wenn:
+
+- beide Quellen über monotone Zeitstempel synchronisiert werden,
+- abweichende Sample-Raten außerhalb der Echtzeit-Callbacks konvertiert werden,
+- Pegelbegrenzung Clipping verhindert,
+- Ausfall einer Quelle die bereits gespeicherte Aufnahme nicht beschädigt,
+- die eigene Audioausgabe von FlowDictate ausgeschlossen wird,
+- lange Aufnahmen keinen unbegrenzten Speicherverbrauch verursachen.
+
+Ist der Mischmodus für 3.3 nicht releasefähig, bleiben Mikrofon und Systemaudio als getrennte Pflichtmodi vollständig nutzbar.
+
+#### 19.3.4 macOS-Integration
+
+- Implementierung über Apples `ScreenCaptureKit` für den Systemaudio-Stream.
+- `SCStream` liefert ausschließlich Audio an FlowDictate; Video-Outputs werden weder registriert noch gespeichert.
+- `SCStreamConfiguration.capturesAudio` ist aktiviert.
+- FlowDictates eigene Prozessausgabe wird nach Möglichkeit über `excludesCurrentProcessAudio` ausgeschlossen.
+- Sample-Rate und Kanalzahl werden auf ein von der bestehenden Dateipipeline unterstütztes Format normalisiert.
+- Die bestehende Transkriptions-, History-, Retry-, Recovery- und Retention-Pipeline wird wiederverwendet.
+- Geschützte oder von macOS nicht bereitgestellte Inhalte werden nicht umgangen.
+
+#### 19.3.5 Berechtigungen und Onboarding
+
+- Mikrofonmodus benötigt weiterhin Mikrofon- und für die Einfügung Accessibility-Berechtigung.
+- Systemaudio benötigt die macOS-Freigabe für Bildschirm- und Systemaudioaufnahme sowie für die spätere Einfügung Accessibility.
+- FlowDictate fordert die zusätzliche Freigabe erst an, wenn der Benutzer **System Audio** oder den Mischmodus auswählt beziehungsweise testet.
+- Ein eigener **Test System Audio for 5 Seconds…**-Ablauf prüft Quelle, Pegel und Dateierzeugung, sendet nichts an OpenAI, erzeugt keinen History-Eintrag und löscht die Testdatei.
+- Bei verweigerter oder entzogener Freigabe bleibt der Mikrofonmodus unverändert nutzbar.
+- FlowDictate wechselt niemals still von Systemaudio auf Mikrofon oder umgekehrt.
+
+#### 19.3.6 Oberfläche und Status
+
+- Overlay und Menü zeigen **Microphone**, **System Audio** oder **Mixed** als aktive Quelle.
+- Ein eindeutiger Aufnahmeindikator bleibt während der gesamten Erfassung sichtbar.
+- Für Systemaudio wird ein eigener Pegel dargestellt; im Mischmodus sind beide Quellen unterscheidbar.
+- History zeigt die verwendete Quelle, ohne Namen abgespielter Apps, Fenster oder Medien zu speichern.
+- Vor der ersten Systemaudioaufnahme erklärt FlowDictate, dass auch Töne anderer Apps erfasst werden können und erforderliche Einwilligungen beim Benutzer liegen.
+
+#### 19.3.7 Datenmodell
+
+```swift
+enum RecordingAudioSource: String, Codable, Sendable {
+    case microphone
+    case systemAudio
+    case mixed
+}
+
+struct AudioSourceMetadata: Codable, Sendable, Equatable {
+    var source: RecordingAudioSource
+    var sampleRate: Double
+    var channelCount: Int
+}
+```
+
+`DictationRecord` erhält `audioSource` mit dem migrationssicheren Default `.microphone`. Es werden keine Namen der Anwendungen persistiert, deren Ton im Systemaudio enthalten war.
+
+#### 19.3.8 Live Preview
+
+- Im Mikrofonmodus bleibt das Verhalten aus 3.1 unverändert.
+- Im Systemaudiomodus darf der normalisierte Audiostream für die lokale Preview verwendet werden.
+- Im Mischmodus verwendet die Preview zunächst nur eine klar definierte Quelle; der Benutzer sieht, welche. Die finale Transkription verarbeitet die gespeicherte Mischdatei.
+- Ein Preview-Fehler gefährdet auch bei Systemaudio niemals Aufnahme oder finale Transkription.
 
 ## 20. App-spezifische Profile
 
@@ -794,15 +884,20 @@ Soll-Umfang:
 
 Phase 3.3 ist abgeschlossen, wenn:
 
-1. mindestens zwei Ziel-Apps unterschiedliche Profile zuverlässig anwenden,
-2. Bundle-ID statt Fenstertitel für Profile verwendet wird,
-3. direkte Einfügung und Clipboard-Fallback in der Testmatrix dokumentiert sind,
-4. Passwortfelder nicht beschrieben werden,
-5. Press-and-Hold keine doppelten Sessions erzeugt,
-6. Statistik vollständig lokal und ausblendbar ist,
-7. Release-Prüfung stabile Versionen korrekt erkennt,
-8. Update-Fehler die App nicht beeinträchtigen,
-9. alle Phase-2-Restore-, Retry- und Recovery-Funktionen weiter funktionieren.
+1. Mikrofon und Systemaudio getrennt auswählbar sind und jeweils eine transkribierbare lokale Audiodatei erzeugen,
+2. ohne Systemaudiofreigabe keine versteckte oder leere Aufnahme beginnt und Mikrofon weiterhin nutzbar bleibt,
+3. eine Systemaudioaufnahme keinerlei Video- oder Bildschirminhalt persistiert,
+4. Quelle, Pegel und Aufnahmestatus in Overlay und History eindeutig erkennbar sind,
+5. der fünfsekündige Systemaudio-Test nichts an OpenAI sendet und keine dauerhaften Testdaten hinterlässt,
+6. mindestens zwei Ziel-Apps unterschiedliche Profile zuverlässig anwenden,
+7. Bundle-ID statt Fenstertitel für Profile verwendet wird,
+8. direkte Einfügung und Clipboard-Fallback in der Testmatrix dokumentiert sind,
+9. Passwortfelder nicht beschrieben werden,
+10. Press-and-Hold keine doppelten Sessions erzeugt,
+11. Statistik vollständig lokal und ausblendbar ist,
+12. Release-Prüfung stabile Versionen korrekt erkennt,
+13. Update-Fehler die App nicht beeinträchtigen,
+14. alle Phase-2-Restore-, Retry- und Recovery-Funktionen für jede freigegebene Audioquelle weiter funktionieren.
 
 ---
 
@@ -828,6 +923,8 @@ Einzuführen beziehungsweise zu erhöhen:
 - Standard-Schreibstil ist **Original**.
 - Gesprochene Formatierung und AI Enhancement starten deaktiviert, bis der Benutzer sie auswählt.
 - Es wird kein automatisches App-Profil aus Fenstertiteln erzeugt.
+- Vorhandene Datensätze erhalten für `audioSource` den sicheren Default `.microphone`.
+- Die globale Aufnahmequelle startet bei bestehenden und neuen Installationen als `.microphone`; Systemaudio wird niemals durch Migration aktiviert.
 - Migrationen sind wiederholbar und in Tests abgedeckt.
 
 ---
@@ -841,6 +938,10 @@ Neue Kategorien ergänzen Phase 2:
 | `previewPermission` | Speech Recognition verweigert | Preview deaktivieren, Aufnahme fortsetzen |
 | `previewUnavailable` | Locale/lokale Erkennung fehlt | Preview deaktivieren, Hinweis anzeigen |
 | `previewRuntime` | Recognition-Task bricht ab | Preview ausblenden, Aufnahme fortsetzen |
+| `systemAudioPermission` | Bildschirm-/Systemaudiofreigabe fehlt | Aufnahme nicht starten, Freigabe erklären, Mikrofonmodus anbieten |
+| `systemAudioUnavailable` | ScreenCaptureKit liefert keine Audioquelle | Aufnahme nicht starten, Quelle neu laden oder Mikrofon wählen |
+| `systemAudioInterrupted` | Stream oder Ausgabe endet während Aufnahme | vorhandene Datei sicher abschließen und Recovery anbieten |
+| `audioMixing` | Resampling, Synchronisierung oder Pegelgrenze schlägt fehl | Mischaufnahme sicher beenden; vorhandene Daten nicht überschreiben |
 | `formatting` | ungültige lokale Regel | Regel überspringen, Original erhalten |
 | `dictionaryConflict` | konkurrierende Ersetzungen | Konflikt markieren, sichere Regel anwenden |
 | `enhancementAuthentication` | API-Key ungültig | Rohtext anbieten, Key reparieren |
@@ -865,6 +966,8 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - Transformationstypen ohne Textinhalt,
 - Schreibstil-ID und App-Profil-ID,
 - verwendete Einfügungsstrategie,
+- ausgewählte Audioquellen-Kategorie, Format und Dauer ohne App- oder Mediennamen,
+- Start, Ende und technische Fehler des Systemaudio-Streams ohne Audiobuffer,
 - lokale Statistikberechnung ohne Inhalte,
 - Update-Prüfung mit Version und Ergebnis.
 
@@ -878,6 +981,7 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - Fenstertitel,
 - Clipboard-Inhalte,
 - Audiobuffer,
+- Namen oder Metadaten der Apps, Fenster, Meetings oder Medien im Systemaudio,
 - API-Keys oder Authorization Header.
 
 ### 29.3 Datenschutzerklärung
@@ -888,7 +992,9 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - finale Audioübertragung an OpenAI,
 - optionale Übertragung des Transkripttexts zur AI-Nachbearbeitung,
 - lokale App-Profile und Statistik,
-- optionale GitHub-Release-Prüfung.
+- optionale GitHub-Release-Prüfung,
+- Systemaudioaufnahme, zusätzliche macOS-Freigabe und mögliche Erfassung von Tönen anderer Apps,
+- Verantwortung des Benutzers für notwendige Einwilligungen bei Gesprächen und geschützten Inhalten.
 
 ---
 
@@ -910,6 +1016,10 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - Insert-Strategieauswahl,
 - Statistikberechnung,
 - semantischer Versionsvergleich,
+- Audioquellenauswahl und migrationssicherer Mikrofon-Default,
+- Formatnormalisierung und Zeitstempelbehandlung,
+- Systemaudio-Berechtigungs- und Fehlerzustände,
+- Mischpegel und Synchronisierung, sofern der Mischmodus veröffentlicht wird,
 - Datenmodellmigrationen.
 
 ### 30.2 Integration Tests
@@ -921,6 +1031,10 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - Enhancement-Fehler mit Rohtext-Einfügung,
 - Profilwechsel zwischen zwei Ziel-Apps,
 - direkte Einfügung mit Clipboard-Fallback,
+- Systemaudio-Stream zu lokaler Datei und bestehender Transkriptionspipeline,
+- Systemaudio-Test ohne Netzwerk-, History- oder Dateirückstand,
+- Stream-Unterbrechung mit sicher abgeschlossenem Recovery-Datensatz,
+- Mischaufnahme mit simuliert abweichenden Sample-Raten, sofern freigegeben,
 - Recovery aus neuen Statuszuständen.
 
 ### 30.3 Manuelle Tests
@@ -929,6 +1043,12 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - kurze und mindestens fünfminütige Aufnahme,
 - schnelle Start-/Stop-Folge,
 - Mikrofonwechsel und Gerätetrennung,
+- Systemaudio mit Lautsprechern, kabelgebundenen Kopfhörern und Bluetooth-Ausgabe,
+- Systemaudiofreigabe erlaubt, verweigert, entzogen und nach App-Update erneut erteilt,
+- Wechsel des macOS-Ausgabegeräts vor und während der Aufnahme,
+- mindestens 30 Minuten Systemaudioaufnahme ohne ungebremsten Speicheranstieg,
+- geschützte beziehungsweise von macOS nicht erfassbare Inhalte mit verständlichem Fehlerverhalten,
+- Mischmodus mit lokaler und entfernter Stimme, falls veröffentlicht,
 - Speech-Berechtigung erlaubt/verweigert/zurückgesetzt,
 - mehrere Bildschirme und MacBook-Notch,
 - Reduced Motion, Light/Dark Mode und unterschiedliche Skalierungen,
@@ -943,6 +1063,8 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 ### 31.1 Zuverlässigkeit
 
 - Keine neue Funktion darf ungespeichertes Audio verursachen.
+- Systemaudio wird ab Aufnahmestart fortlaufend in eine lokale Datei geschrieben und niemals nur flüchtig an OpenAI gestreamt.
+- Ein verweigerter Quellenzugriff erzeugt keine scheinbar erfolgreiche Stummaufnahme.
 - Jeder Netzwerkprozess ist abbrechbar und zeitlich begrenzt.
 - Statuswechsel bleiben persistent, sobald Aufnahmeende erreicht ist.
 - Kein automatischer Prozess darf Text doppelt einfügen.
@@ -951,6 +1073,8 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 
 - Preview-UI höchstens zehn Updates pro Sekunde.
 - Kein synchrones Speech- oder Netzwerk-Processing auf Audio- oder Main-Thread.
+- ScreenCaptureKit-Callbacks führen keine UI-, Netzwerk- oder schwere Formatkonvertierung aus.
+- Mischmodus verwendet begrenzte Queues und monotone Zeitstempel; Drift wird gemessen und begrenzt.
 - Idle-Ressourcenverbrauch bleibt annähernd auf Phase-2-Niveau.
 - Deaktivierte Funktionen erzeugen keine Hintergrundarbeit.
 
@@ -968,6 +1092,8 @@ Preview-Fehler werden nie als Diktatfehler in der History gespeichert, sofern fi
 - Benutzertexte werden nicht in UserDefaults gespeichert.
 - Profil- und Wörterbuchimporte werden größenbegrenzt und validiert.
 - Update-Links akzeptieren nur das fest konfigurierte HTTPS-GitHub-Repository.
+- Systemaudioaufnahme beginnt nur nach expliziter Benutzeraktion und sichtbarer Statusanzeige.
+- Geschützte Audioquellen werden nicht umgangen und es wird kein versteckter Capture-Modus angeboten.
 
 ---
 
@@ -1000,9 +1126,11 @@ Abhängigkeiten:
 
 - Schreibstile aus 3.2 für App-Profile,
 - bestehende FocusTarget- und TextInserter-Abstraktionen,
-- öffentliche GitHub-Releases.
+- öffentliche GitHub-Releases,
+- ScreenCaptureKit-Systemaudio und die zugehörige macOS-Datenschutzfreigabe,
+- ein einheitliches Audioquellen- und Dateiformat für die bestehende Transkriptionspipeline.
 
-Direkte Einfügung, Statistik und Update-Hinweis können intern parallel entwickelt werden, werden aber gemeinsam abgenommen.
+Audio Source Capture bildet ein eigenes Arbeitspaket mit separatem Berechtigungs-, Langzeit- und Recovery-Gate. Direkte Einfügung, Statistik und Update-Hinweis können dazu intern parallel entwickelt werden, werden aber gemeinsam abgenommen.
 
 ---
 
@@ -1014,6 +1142,8 @@ Direkte Einfügung, Statistik und Update-Hinweis können intern parallel entwick
 - Preview startet nur bei vorhandener lokaler Unterstützung.
 - AI Enhancement bleibt bei Erstinstallation deaktiviert.
 - Direkte Einfügung startet mit Clipboard-Fallback und App-Kompatibilitätsliste.
+- Audio Source Capture startet hinter einem Feature-Schalter; Mikrofon bleibt Standard und Systemaudio erfordert explizite Auswahl.
+- Der Mischmodus wird nur aktiviert, wenn Synchronisierung, Pegelgrenze und Langzeittest bestanden sind.
 - Release-Prüfung zeigt nur stabile GitHub-Releases.
 
 Empfohlene Versionierung:
@@ -1041,6 +1171,9 @@ Relevante öffentliche Referenzen:
 - [FluidVoice ASRService](https://github.com/altic-dev/FluidVoice/blob/main/Sources/Fluid/Services/ASRService.swift)
 - [FluidVoice BottomOverlayView](https://github.com/altic-dev/FluidVoice/blob/main/Sources/Fluid/Views/BottomOverlayView.swift)
 - [Apple Speech Audio Buffer Recognition](https://developer.apple.com/documentation/speech/sfspeechaudiobufferrecognitionrequest)
+- [Apple ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)
+- [SCStreamConfiguration capturesAudio](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/capturesaudio)
+- [SCStreamConfiguration excludesCurrentProcessAudio](https://developer.apple.com/documentation/screencapturekit/scstreamconfiguration/excludescurrentprocessaudio)
 - [OpenAI Realtime Transcription Events](https://platform.openai.com/docs/api-reference/realtime-server-events/input_audio_buffer/committed)
 
 FluidVoice steht aktuell unter GPLv3. FlowDictate bleibt MIT-lizenziert. Deshalb werden ausschließlich öffentlich beschriebene Produktideen und allgemeine Architekturmuster berücksichtigt. Es wird kein FluidVoice-Quellcode kopiert, angepasst oder in FlowDictate übernommen. Sämtliche Implementierung erfolgt eigenständig.

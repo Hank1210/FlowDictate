@@ -26,14 +26,20 @@ struct AudioStore: Sendable {
         self.locationStore = locationStore
     }
 
-    func makeRecordingURL(id: UUID = UUID(), date: Date = Date()) throws -> URL {
+    func makeRecordingURL(
+        id: UUID = UUID(),
+        date: Date = Date(),
+        fileExtension: String = "wav"
+    ) throws -> URL {
         let directory = try recordingsDirectory()
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         let timestamp = formatter.string(from: date)
             .replacingOccurrences(of: ":", with: "-")
-        return directory.appendingPathComponent("\(timestamp)-\(id.uuidString).wav")
+        return directory.appendingPathComponent(
+            "\(timestamp)-\(id.uuidString).\(fileExtension)"
+        )
     }
 
     func recordingsDirectory() throws -> URL {

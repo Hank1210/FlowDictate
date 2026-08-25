@@ -19,6 +19,7 @@ struct FlowDictateTests {
         #expect(DictationState.idle.acceptsStart)
         #expect(DictationState.failed(message: "test", retainedAudioURL: nil).acceptsStart)
         #expect(!DictationState.recording.acceptsStart)
+        #expect(!DictationState.finalizing.acceptsStart)
         #expect(!DictationState.transcribing.acceptsStart)
         #expect(!DictationState.enhancing.acceptsStart)
         #expect(!DictationState.inserting.acceptsStart)
@@ -145,6 +146,8 @@ struct FlowDictateTests {
         settings.cancelHotKey = .controlShiftSpace
         settings.restoreHotKey = .controlShiftZ
         settings.inputDeviceUID = "test-microphone"
+        settings.recordingAudioSource = .systemAudio
+        settings.dictationActivationMode = .pressAndHold
         settings.transcriptionModel = "test-model"
         settings.transcriptionLanguage = .german
         settings.clipboardRestoreDelay = 1.2
@@ -164,6 +167,8 @@ struct FlowDictateTests {
         #expect(restored.cancelHotKey == .controlShiftSpace)
         #expect(restored.restoreHotKey == .controlShiftZ)
         #expect(restored.inputDeviceUID == "test-microphone")
+        #expect(restored.recordingAudioSource == .systemAudio)
+        #expect(restored.dictationActivationMode == .pressAndHold)
         #expect(restored.transcriptionModel == "test-model")
         #expect(restored.transcriptionLanguage == .german)
         #expect(restored.clipboardRestoreDelay == 1.2)
@@ -222,6 +227,16 @@ struct FlowDictateTests {
             language: "en"
         )
         #expect(result.text == "Visit https://example.com/period and continue,\ndone.")
+    }
+
+    @Test func spokenFormattingRemovesAutomaticCommasAndFormatsNumberedItems() {
+        let processor = SpokenFormattingProcessor()
+        let result = processor.process(
+            "Ja, guten Morgen, neue Zeile, dies ist eine Testzeile, neue Zeile, Doppelpunkt, Punkt 1, bla bla, Punkt 2, Miau.",
+            language: "de"
+        )
+        #expect(result.text == "Ja, guten Morgen\ndies ist eine Testzeile\n:\n1. bla bla\n2. Miau.")
+        #expect(result.replacementCount == 5)
     }
 
     @Test func personalDictionaryUsesWholeWordsLongestFirstAndDoesNotCascade() {
@@ -430,9 +445,14 @@ struct FlowDictateTests {
         let silenceLevel = silence.withUnsafeBufferPointer(AudioLevelMeter.normalizedRMS)
         let quietLevel = quiet.withUnsafeBufferPointer(AudioLevelMeter.normalizedRMS)
         let loudLevel = loud.withUnsafeBufferPointer(AudioLevelMeter.normalizedRMS)
+        let aggregatedQuietLevel = AudioLevelMeter.normalizedRMS(
+            sumOfSquares: 0.005,
+            sampleCount: 2
+        )
 
         #expect(silenceLevel == 0)
         #expect(quietLevel > 0.6 && quietLevel < 1)
+        #expect(abs(aggregatedQuietLevel - quietLevel) < 0.000_1)
         #expect(loudLevel == 1)
     }
 
@@ -444,6 +464,10 @@ struct FlowDictateTests {
         #expect(harness.coordinator.state == .recording)
 
         harness.coordinator.requestCancel()
+
+        for _ in 0..<40 where harness.recorder.stopCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
 
         #expect(harness.coordinator.state == .idle)
         #expect(harness.recorder.startCount == 1)
@@ -465,6 +489,46 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.inserter.insertedText == "Transcribed text")
+        #expect(harness.coordinator.state == .success)
+        #expect(harness.overlay.presentations.last == .success(message: "Text inserted"))
+    }
+
+    @MainActor
+    @Test func systemAudioCompletionConfirmsAndRetainsClipboardText() async throws {
+        let pasteboard = NSPasteboard.general
+        let originalClipboard = PasteboardSnapshot.capture(from: pasteboard)
+        defer { originalClipboard.restore(to: pasteboard) }
+        let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        #expect(pasteboard.string(forType: .string) == "Transcribed text")
+        #expect(
+            harness.coordinator.latestOutputNotice
+                == "System Audio transcript copied to the clipboard."
+        )
+        #expect(
+            harness.overlay.presentations.last
+                == .success(message: "Text inserted · copied to clipboard")
+        )
+    }
+
+    @MainActor
+    @Test func stopShortcutIsAcknowledgedBeforeSlowRecorderFinalization() async throws {
+        let harness = makeCoordinatorHarness()
+        await harness.coordinator.toggleDictation()
+        harness.recorder.stopDelay = .milliseconds(250)
+
+        harness.coordinator.requestToggle()
+
+        #expect(harness.coordinator.state == .finalizing)
+        #expect(harness.overlay.presentations.last == .finalizing)
+
+        for _ in 0..<60 where harness.coordinator.state != .success {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        #expect(harness.recorder.stopCount == 1)
         #expect(harness.coordinator.state == .success)
     }
 
@@ -500,6 +564,19 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func restoreDoesNotInterruptAnActiveRecording() async throws {
+        let harness = makeCoordinatorHarness()
+        await harness.coordinator.toggleDictation()
+
+        harness.coordinator.restoreLastDictation()
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.recorder.isRecording)
+        #expect(harness.inserter.insertCount == 0)
+    }
+
+    @MainActor
     @Test func previewFailureDoesNotInterruptRecordingOrFinalTranscription() async throws {
         let previewProvider = MockLivePreviewProvider()
         let harness = makeCoordinatorHarness(
@@ -532,6 +609,9 @@ struct FlowDictateTests {
         #expect(harness.recorder.previewBufferHandler == nil)
 
         harness.coordinator.requestCancel()
+        for _ in 0..<40 where harness.recorder.stopCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     @MainActor
@@ -605,12 +685,68 @@ struct FlowDictateTests {
             JSONSerialization.jsonObject(with: recordData) as? [String: Any]
         )
         recordJSON.removeValue(forKey: "archivedAt")
+        recordJSON.removeValue(forKey: "audioSource")
+        recordJSON.removeValue(forKey: "audioSampleRate")
+        recordJSON.removeValue(forKey: "audioChannelCount")
         let envelope = ["schemaVersion": 1, "records": [recordJSON]] as [String: Any]
         try JSONSerialization.data(withJSONObject: envelope).write(to: fileURL)
 
         let store = DictationHistoryStore(fileURL: fileURL)
         #expect(try await store.all().count == 1)
         #expect(try await store.all().first?.archivedAt == nil)
+        #expect(try await store.all().first?.audioSource == .microphone)
+        #expect(try await store.all().first?.audioSampleRate == 0)
+    }
+
+    @Test func phaseThreeThreeUsageStatisticsRemainLocalAndDeterministic() {
+        let now = Date()
+        var completed = DictationRecord.newRecording(
+            id: UUID(), startedAt: now.addingTimeInterval(-10), endedAt: now,
+            duration: 10, status: .completed, audioRelativePath: "one.wav",
+            audioFileSize: 1, providerID: "Test", modelID: "test", language: "de",
+            targetBundleIdentifier: nil, targetApplicationName: nil
+        )
+        completed.finalText = "one two three four"
+        completed.attemptCount = 2
+        var failed = completed
+        failed.id = UUID()
+        failed.status = .transcriptionFailed
+
+        let result = UsageStatistics.calculate(
+            records: [completed, failed], typingWordsPerMinute: 60
+        )
+        #expect(result.successfulDictations == 1)
+        #expect(result.wordCount == 4)
+        #expect(result.retryCount == 1)
+        #expect(result.totalDuration == 10)
+        #expect(result.estimatedSecondsSaved == 0)
+    }
+
+    @Test func phaseThreeThreeReleaseComparisonUsesSemanticComponents() {
+        #expect(GitHubReleaseChecker.isNewer("3.3.0", than: "3.2.9"))
+        #expect(GitHubReleaseChecker.isNewer("3.2.10", than: "3.2.9"))
+        #expect(!GitHubReleaseChecker.isNewer("3.2.0", than: "3.2.0"))
+        #expect(!GitHubReleaseChecker.isNewer("3.1.9", than: "3.2.0"))
+    }
+
+    @Test func appProfilesRoundTripByBundleIdentifier() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateProfiles-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppProfileStore(fileURL: directory.appendingPathComponent("profiles.json"))
+        var profile = AppDictationProfile.new(
+            bundleIdentifier: "com.example.editor", displayName: "Editor"
+        )
+        profile.language = .german
+        profile.transcriptionModel = "custom-model"
+        profile.insertionPreference = .clipboard
+        try await store.upsert(profile)
+
+        let restored = try #require(await store.all().first)
+        #expect(restored.bundleIdentifier == "com.example.editor")
+        #expect(restored.language == .german)
+        #expect(restored.transcriptionModel == "custom-model")
+        #expect(restored.insertionPreference == .clipboard)
     }
 
     @Test func historyRetentionArchivesAudioAndRemovesTextOnlyRecords() async throws {
@@ -844,13 +980,19 @@ struct FlowDictateTests {
     private func makeCoordinatorHarness(
         credentialStore: any CredentialStoring = MockCredentialStore(),
         livePreviewProvider: (any LivePreviewProviding)? = nil,
-        livePreviewEnabled: Bool = false
+        livePreviewEnabled: Bool = false,
+        recordingSource: RecordingAudioSource = .microphone
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
 
         let recorder = MockAudioRecorder()
+        recorder.sourceMetadata = AudioSourceMetadata(
+            source: recordingSource,
+            sampleRate: 48_000,
+            channelCount: 1
+        )
         let provider = MockTranscriptionProvider()
         let inserter = MockTextInserter()
         let overlay = MockRecordingOverlay()
@@ -866,6 +1008,7 @@ struct FlowDictateTests {
         let focusTargetBox = FocusTargetBox(target)
         let settings = AppSettings(defaults: defaults)
         settings.livePreviewEnabled = livePreviewEnabled
+        settings.recordingAudioSource = recordingSource
 
         let coordinator = DictationCoordinator(
             settings: settings,
@@ -874,6 +1017,7 @@ struct FlowDictateTests {
             restoreHotKeyRegistrar: MockHotKeyRegistrar(),
             permissionManager: MockPermissionManager(),
             recorder: recorder,
+            systemAudioRecorder: recorder,
             provider: provider,
             inserter: inserter,
             credentialStore: credentialStore,
@@ -951,22 +1095,26 @@ private final class MockAudioRecorder: AudioRecording {
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    var stopDelay: Duration?
+    var sourceMetadata = AudioSourceMetadata.microphoneDefault
 
     func selectInputDevice(_ deviceID: AudioDeviceID?) {}
 
-    func start() throws {
+    func start() async throws {
         startCount += 1
         isRecording = true
     }
 
-    func stop() throws -> AudioRecordingResult {
+    func stop() async throws -> AudioRecordingResult {
         stopCount += 1
         isRecording = false
+        if let stopDelay { try await Task.sleep(for: stopDelay) }
         return AudioRecordingResult(
             id: UUID(),
             url: FileManager.default.temporaryDirectory.appendingPathComponent("test.wav"),
             startedAt: Date(),
-            duration: 1
+            duration: 1,
+            sourceMetadata: sourceMetadata
         )
     }
 }

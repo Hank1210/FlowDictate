@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum TranscriptionLanguage: String, Codable, CaseIterable, Identifiable, Sendable {
     case automatic
     case german = "de"
     case english = "en"
@@ -21,6 +21,14 @@ enum TranscriptionLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+nonisolated enum DictationActivationMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case toggle
+    case pressAndHold
+
+    var id: String { rawValue }
+    var title: String { self == .toggle ? "Press to start / stop" : "Press and hold" }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     private enum Key {
@@ -30,6 +38,7 @@ final class AppSettings: ObservableObject {
         static let cancelHotKeyData = "cancelHotKeyData"
         static let restoreHotKeyData = "restoreHotKeyData"
         static let inputDeviceUID = "inputDeviceUID"
+        static let recordingAudioSource = "recordingAudioSource"
         static let transcriptionModel = "transcriptionModel"
         static let transcriptionLanguage = "transcriptionLanguage"
         static let clipboardRestoreDelay = "clipboardRestoreDelay"
@@ -47,6 +56,11 @@ final class AppSettings: ObservableObject {
         static let writingStyleID = "writingStyleID"
         static let enhancementModel = "enhancementModel"
         static let smartDictationFallback = "smartDictationFallback"
+        static let showUsageStatistics = "showUsageStatistics"
+        static let typingWordsPerMinute = "typingWordsPerMinute"
+        static let updateCheckEnabled = "updateCheckEnabled"
+        static let lastUpdateCheck = "lastUpdateCheck"
+        static let dictationActivationMode = "dictationActivationMode"
     }
 
     private let defaults: UserDefaults
@@ -73,6 +87,10 @@ final class AppSettings: ObservableObject {
 
     @Published var inputDeviceUID: String? {
         didSet { defaults.set(inputDeviceUID, forKey: Key.inputDeviceUID) }
+    }
+
+    @Published var recordingAudioSource: RecordingAudioSource {
+        didSet { defaults.set(recordingAudioSource.rawValue, forKey: Key.recordingAudioSource) }
     }
 
     @Published var transcriptionModel: String {
@@ -149,6 +167,26 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(smartDictationFallback.rawValue, forKey: Key.smartDictationFallback) }
     }
 
+    @Published var showUsageStatistics: Bool {
+        didSet { defaults.set(showUsageStatistics, forKey: Key.showUsageStatistics) }
+    }
+
+    @Published var typingWordsPerMinute: Double {
+        didSet { defaults.set(typingWordsPerMinute, forKey: Key.typingWordsPerMinute) }
+    }
+
+    @Published var updateCheckEnabled: Bool {
+        didSet { defaults.set(updateCheckEnabled, forKey: Key.updateCheckEnabled) }
+    }
+
+    @Published var dictationActivationMode: DictationActivationMode {
+        didSet { defaults.set(dictationActivationMode.rawValue, forKey: Key.dictationActivationMode) }
+    }
+
+    var lastUpdateCheck: Date? {
+        didSet { defaults.set(lastUpdateCheck, forKey: Key.lastUpdateCheck) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -166,6 +204,9 @@ final class AppSettings: ObservableObject {
             ?? .optionShiftZ
 
         inputDeviceUID = defaults.string(forKey: Key.inputDeviceUID)
+        recordingAudioSource = RecordingAudioSource(
+            rawValue: defaults.string(forKey: Key.recordingAudioSource) ?? ""
+        ) ?? .microphone
         transcriptionModel = defaults.string(forKey: Key.transcriptionModel)
             ?? "gpt-4o-mini-transcribe"
 
@@ -214,6 +255,13 @@ final class AppSettings: ObservableObject {
         smartDictationFallback = SmartDictationFallback(
             rawValue: defaults.string(forKey: Key.smartDictationFallback) ?? ""
         ) ?? .ask
+        showUsageStatistics = defaults.object(forKey: Key.showUsageStatistics) as? Bool ?? true
+        typingWordsPerMinute = defaults.object(forKey: Key.typingWordsPerMinute) as? Double ?? 40
+        updateCheckEnabled = defaults.object(forKey: Key.updateCheckEnabled) as? Bool ?? true
+        lastUpdateCheck = defaults.object(forKey: Key.lastUpdateCheck) as? Date
+        dictationActivationMode = DictationActivationMode(
+            rawValue: defaults.string(forKey: Key.dictationActivationMode) ?? ""
+        ) ?? .toggle
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

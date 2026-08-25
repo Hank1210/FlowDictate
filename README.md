@@ -1,6 +1,6 @@
 # FlowDictate
 
-FlowDictate 3.2.0 is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. This release includes the reliable standalone foundation from Phase 2, Phase 3.1 Live Preview and Phase 3.2 Smart Dictation described in `FlowDictate_PRD_Phase_3.md`.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current development version includes the reliable standalone foundation from Phase 2, Phase 3.1 Live Preview, Phase 3.2 Smart Dictation and the Phase 3.3 implementation described in `FlowDictate_PRD_Phase_3.md`. The latest published Community release remains 3.2.0 until Phase 3.3 has completed manual validation.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
@@ -34,8 +34,17 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - enhancement retry, reprocessing and safe local/original fallbacks without retranscribing audio
 - versioned dictionary and writing-style JSON import/export
 - a dedicated macOS app icon for Finder, Accessibility settings and installed builds
+- selectable microphone or digital System Audio recording, with separate permission guidance and a local five-second source test
+- recording-source metadata in the overlay and History; microphone remains the migration-safe default
+- app-specific profiles selected by bundle identifier for language, transcription model, writing style, spoken formatting and insertion preference
+- direct Accessibility text insertion with a clipboard fallback; protected password fields are never written
+- selectable toggle or press-and-hold shortcut activation
+- optional local usage statistics calculated from History
+- a daily, disableable GitHub release check that only opens the release page and never installs automatically
 
-App-specific profiles, direct Accessibility insertion, push-to-talk, statistics and release notifications remain reserved for Phase 3.3. Cloud audio streaming and fully local final transcription are not part of Phase 3.
+The optional combined microphone-plus-system-audio mixer, continuous dictation, bulk export and profile import/export remain follow-up scope. Cloud audio streaming and fully local final transcription are not part of Phase 3.
+
+System Audio recordings should currently be kept to approximately 15–20 minutes for reliable transcription. The recorder can continue beyond that, but the resulting M4A can exceed the single-request upload limit. Automatic chunking and resumable multi-part transcription are planned for Phase 3.4.
 
 ## Requirements
 
@@ -49,7 +58,7 @@ App-specific profiles, direct Accessibility insertion, push-to-talk, statistics 
 2. Follow the first-run setup assistant.
 3. Confirm `Documents/Recordings` or choose another recordings folder.
 4. Enter and verify the owner's OpenAI API key; it is stored in macOS Keychain.
-5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for Live Preview.
+5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for microphone Live Preview. Screen & System Audio Recording permission is requested only if System Audio is selected or tested.
 6. Place the cursor in another application and press Option + Space.
 7. Speak, then press Option + Space again to transcribe and insert the text.
 
@@ -60,11 +69,13 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 ## Settings
 
 - **General:** launch at login and permission status
-- **Dictation:** shortcuts plus Live Preview, overlay size, position, text limit and Preview test
-- **Audio:** input device and live level
+- **Dictation:** shortcuts, toggle/press-and-hold activation, Live Preview, overlay size, position, text limit and Preview test
+- **Audio:** microphone/System Audio source, permissions, five-second source test, input device and live level
 - **Transcription:** Keychain credential, OpenAI model and automatic/German/English recognition
 - **Smart Dictation:** spoken formatting, personal dictionary, writing styles, optional enhancement model and fallback behavior
 - **Storage:** recordings folder, retention and Phase 1 migration
+- **App Profiles:** per-app language, model, style, formatting and insertion overrides
+- **Productivity:** local usage statistics and Community update notices
 - **Advanced:** clipboard restoration delay and automatic retries
 
 If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload in the folder selected during setup. History metadata remains local in the app's Application Support container.
@@ -81,10 +92,10 @@ For a free build intended for personal use and a trusted circle, run:
 
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
-For version 3.2.0 the generated files are:
+For the current 3.3.0 development version the generated files are:
 
-- `FlowDictate-3.2.0-Community-macOS.zip`
-- `FlowDictate-3.2.0-Community-macOS.zip.sha256`
+- `FlowDictate-3.3.0-Community-macOS.zip`
+- `FlowDictate-3.3.0-Community-macOS.zip.sha256`
 
 `scripts/build-release.sh` remains available for a future Developer ID signed and notarized release. Both workflows are documented in `RELEASE.md`.
 
@@ -98,7 +109,7 @@ Quit FlowDictate, replace the existing app in `Applications`, and open the new a
 
 ## Privacy
 
-FlowDictate contains no analytics, advertising or developer-operated backend. Recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. If an AI writing style is selected, the locally processed transcript and style instruction are sent in a separate request. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
+FlowDictate contains no analytics, advertising or developer-operated backend. Microphone and System Audio recordings are stored in the folder selected by the user and are sent directly to OpenAI only when a dictation is submitted for transcription. The five-second System Audio test is deleted locally and never uploaded. If an AI writing style is selected, the locally processed transcript and style instruction are sent in a separate request. The user's own API key is kept in macOS Keychain. See [PRIVACY.md](PRIVACY.md) for details.
 
 Live Preview uses Apple's on-device speech recognizer only. Its provisional text stays in memory and is never stored, logged, inserted into another app or used as the final transcript.
 
@@ -129,7 +140,7 @@ xcodebuild test \
 
 The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
-The 39 automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence, migration, retention and recovery, bounded Preview buffering, Preview lifecycle and failure isolation, spoken formatting, dictionary matching, Smart Dictation stages and fallbacks, JSON stores, retry classification, audio level normalization, login-item status mapping and clipboard snapshots. Microphone permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
+The automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, state rules, start/stop/cancel orchestration, shared retry execution, history persistence and migration (including audio-source defaults), retention and recovery, bounded Preview buffering, spoken formatting, Smart Dictation, app-profile persistence, statistics and release comparison. Microphone and System Audio permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
 
 The `FlowDictateUITests` target contains an optional menu bar launch test. It is skipped by the shared scheme because macOS requires separate UI-automation approval for the XCTest runner. After granting that permission, run it explicitly with `-only-testing:FlowDictateUITests`.
 
@@ -158,3 +169,11 @@ Test short, long, German, English and mixed-language dictation in Notes, Safari,
 - every writing style, custom style creation and dictionary/style import/export
 - failed enhancement retains every text stage and supports Retry, Local and Original recovery
 - numbers, URLs and dictionary terms remain intact after AI enhancement
+- System Audio permission denial leaves microphone dictation usable
+- the five-second System Audio test creates no History entry, makes no OpenAI request and removes its temporary file
+- System Audio captures another app's playback without storing video and produces a transcribable M4A
+- two app profiles apply different settings by bundle identifier and remain frozen for each recording
+- direct insertion works where supported, falls back safely, and never writes into password fields
+- toggle and press-and-hold both produce exactly one recording per gesture
+- local statistics match History and disappear when disabled
+- release checks ignore equal, older, draft and prerelease versions and never install anything

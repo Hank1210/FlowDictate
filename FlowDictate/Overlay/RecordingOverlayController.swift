@@ -6,7 +6,7 @@ enum OverlayStatus: Equatable {
     case recording
     case finalizing
     case processing
-    case success
+    case success(message: String)
     case error(String)
 
     var title: String {
@@ -35,6 +35,7 @@ protocol RecordingOverlayPresenting: AnyObject {
     func show(status: OverlayStatus, level: Float, reposition: Bool)
     func updateLevel(_ level: Float)
     func updatePreview(_ state: LivePreviewState)
+    func updateSource(_ source: RecordingAudioSource)
     func configure(size: OverlaySize, position: OverlayPosition)
     func hide()
 }
@@ -43,6 +44,8 @@ extension RecordingOverlayPresenting {
     func show(status: OverlayStatus, level: Float = 0, reposition: Bool = false) {
         show(status: status, level: level, reposition: reposition)
     }
+
+    func updateSource(_ source: RecordingAudioSource) {}
 }
 
 @MainActor
@@ -51,16 +54,36 @@ private final class RecordingOverlayModel: ObservableObject {
     @Published var level: Float = 0
     @Published var previewState: LivePreviewState = .disabled
     @Published var size: OverlaySize = .standard
+    @Published var source: RecordingAudioSource = .microphone
+
+    var usesSingleRowLayout: Bool {
+        size == .compact || status != .recording
+    }
+
+    var contentSize: CGSize {
+        let configuredSize: CGSize = switch size {
+        case .compact: CGSize(width: 320, height: 60)
+        case .standard: CGSize(width: 390, height: 136)
+        case .expanded: CGSize(width: 500, height: 236)
+        }
+        guard status != .recording else { return configuredSize }
+        if case .error = status {
+            return CGSize(width: min(configuredSize.width, 390), height: 76)
+        }
+        return CGSize(width: min(configuredSize.width, 390), height: 60)
+    }
 }
 
 @MainActor
 final class RecordingOverlayController: RecordingOverlayPresenting {
     private let model = RecordingOverlayModel()
     private var panel: NonActivatingPanel?
+    private var successHideWorkItem: DispatchWorkItem?
     private var overlayPosition: OverlayPosition = .bottomTrailing
     private var currentScreen: NSScreen?
 
     func show(status: OverlayStatus, level: Float = 0, reposition: Bool = false) {
+        successHideWorkItem?.cancel()
         model.status = status
         model.level = level
         let panel = panel ?? makePanel()
@@ -71,6 +94,15 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
             position(panel, on: screen)
         }
         panel.orderFrontRegardless()
+        if case .success = status {
+            let workItem = DispatchWorkItem { [weak panel] in
+                panel?.orderOut(nil)
+            }
+            successHideWorkItem = workItem
+            // Defensive fallback: the coordinator normally hides after 0.9 seconds.
+            // Keep a completed overlay from ever remaining on screen indefinitely.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+        }
     }
 
     func updateLevel(_ level: Float) {
@@ -79,6 +111,10 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
 
     func updatePreview(_ state: LivePreviewState) {
         model.previewState = state
+    }
+
+    func updateSource(_ source: RecordingAudioSource) {
+        model.source = source
     }
 
     func configure(size: OverlaySize, position: OverlayPosition) {
@@ -90,6 +126,8 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
     }
 
     func hide() {
+        successHideWorkItem?.cancel()
+        successHideWorkItem = nil
         panel?.orderOut(nil)
         model.level = 0
         model.previewState = .disabled
@@ -145,12 +183,7 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
     }
 
     private func resize(_ panel: NSPanel) {
-        let size: NSSize = switch model.size {
-        case .compact: NSSize(width: 360, height: 76)
-        case .standard: NSSize(width: 430, height: 164)
-        case .expanded: NSSize(width: 540, height: 280)
-        }
-        panel.setContentSize(size)
+        panel.setContentSize(model.contentSize)
     }
 }
 
@@ -166,57 +199,62 @@ private struct RecordingOverlayView: View {
 
     var body: some View {
         Group {
-            if model.size == .compact {
+            if model.usesSingleRowLayout {
                 compactContent
             } else {
                 regularContent
             }
         }
-        .frame(width: dimensions.width, height: dimensions.height)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(width: model.contentSize.width, height: model.contentSize.height)
+        .background(
+            Color.black.opacity(0.94),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(.primary.opacity(0.1), lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.13), lineWidth: 0.75)
         }
-        .shadow(color: .black.opacity(0.18), radius: 22, y: 10)
+        .shadow(color: .black.opacity(0.34), radius: 18, y: 8)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("recording-overlay")
     }
 
     private var compactContent: some View {
-        HStack(spacing: 13) {
-            statusIndicator(diameter: 38)
-            VStack(alignment: .leading, spacing: 5) {
-                statusHeader
-                if model.status == .recording {
-                    AudioBars(level: model.level, barCount: 18, height: 19)
-                } else {
-                    secondaryStatusContent
-                }
-            }
-        }
-        .padding(.horizontal, 16)
+        headerRow(indicatorDiameter: 30, meterWidth: 82, meterBars: 11)
+            .padding(.horizontal, 13)
     }
 
     private var regularContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 13) {
-                statusIndicator(diameter: 42)
-                VStack(alignment: .leading, spacing: 5) {
-                    statusHeader
-                    if model.status == .recording {
-                        AudioBars(level: model.level, barCount: 24, height: 20)
-                    } else {
-                        secondaryStatusContent
-                    }
-                }
-            }
+        VStack(alignment: .leading, spacing: 9) {
+            headerRow(
+                indicatorDiameter: 32,
+                meterWidth: model.size == .expanded ? 132 : 96,
+                meterBars: model.size == .expanded ? 16 : 12
+            )
 
             if model.status == .recording {
                 previewContent
             }
         }
-        .padding(16)
+        .padding(13)
+    }
+
+    private func headerRow(
+        indicatorDiameter: CGFloat,
+        meterWidth: CGFloat,
+        meterBars: Int
+    ) -> some View {
+        HStack(spacing: 9) {
+            statusIndicator(diameter: indicatorDiameter)
+            statusHeader
+            Spacer(minLength: 4)
+            if model.status == .recording {
+                AudioBars(level: model.level, barCount: meterBars, height: 17)
+                    .frame(width: meterWidth)
+            } else {
+                secondaryStatusContent
+            }
+        }
     }
 
     private var statusHeader: some View {
@@ -224,7 +262,8 @@ private struct RecordingOverlayView: View {
             Text(model.status.title.uppercased())
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .tracking(1.15)
-            if model.status == .recording, model.previewState != .disabled {
+                .foregroundStyle(Color.white.opacity(0.94))
+            if showsLiveBadge, model.size != .compact {
                 Text("LIVE")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .tracking(0.8)
@@ -233,7 +272,22 @@ private struct RecordingOverlayView: View {
                     .padding(.vertical, 3)
                     .background(statusColor.opacity(0.12), in: Capsule())
             }
-            Spacer(minLength: 0)
+            if model.status == .recording, model.size != .compact {
+                Label(model.source.shortTitle, systemImage: model.source.symbolName)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.54))
+                    .labelStyle(.titleAndIcon)
+            }
+        }
+    }
+
+    private var showsLiveBadge: Bool {
+        guard model.status == .recording else { return false }
+        return switch model.previewState {
+        case .waiting, .active:
+            true
+        case .disabled, .unavailable, .failed:
+            false
         }
     }
 
@@ -242,16 +296,16 @@ private struct RecordingOverlayView: View {
         if case let .error(message) = model.status {
             Text(message)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.68))
                 .lineLimit(model.size == .compact ? 1 : 2)
         } else if model.status == .processing || model.status == .finalizing {
             ProgressView()
                 .controlSize(.small)
                 .tint(statusColor)
-        } else {
-            Text("Text inserted")
+        } else if case let .success(message) = model.status {
+            Text(message)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.68))
         }
     }
 
@@ -289,22 +343,22 @@ private struct RecordingOverlayView: View {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 5, height: 5)
-                Text("LIVE TRANSCRIPT")
+                Text(previewHeading)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .tracking(0.9)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.46))
             }
 
             switch model.previewState {
             case .disabled:
                 Text("Preview is off")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color.white.opacity(0.44))
             case .waiting:
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.mini)
                     Text("Listening…")
                 }
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.72))
             case let .active(text):
                 if model.size == .expanded {
                     ScrollViewReader { proxy in
@@ -312,6 +366,7 @@ private struct RecordingOverlayView: View {
                             Text(text)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.disabled)
+                                .foregroundStyle(previewTextColor)
                             Color.clear.frame(height: 1).id("preview-end")
                         }
                         .onChange(of: text) {
@@ -327,31 +382,38 @@ private struct RecordingOverlayView: View {
                     Text(text)
                         .lineLimit(3)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(previewTextColor)
                 }
             case let .unavailable(message), let .failed(message):
                 Text(message)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .foregroundStyle(Color.white.opacity(0.66))
+                    .lineLimit(model.size == .expanded ? 4 : 3)
             }
         }
         .font(.system(size: model.size == .expanded ? 15 : 13, weight: .regular, design: .rounded))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(.primary.opacity(0.055), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
         }
     }
 
-    private var dimensions: (width: CGFloat, height: CGFloat) {
-        switch model.size {
-        case .compact: (360, 76)
-        case .standard: (430, 164)
-        case .expanded: (540, 280)
+    private var previewTextColor: Color {
+        Color(red: 0.82, green: 0.84, blue: 0.86)
+    }
+
+    private var previewHeading: String {
+        switch model.previewState {
+        case .unavailable, .failed:
+            "PREVIEW STATUS"
+        case .disabled, .waiting, .active:
+            "LIVE TRANSCRIPT"
         }
     }
+
 }
 
 private struct AudioBars: View {
@@ -383,7 +445,7 @@ private struct AudioBars: View {
     private func barColor(for index: Int) -> Color {
         let threshold = Float(index + 1) / Float(barCount)
         return threshold <= max(level, 0.04)
-            ? Color(red: 1, green: 0.22, blue: 0.3)
-            : Color.secondary.opacity(0.16)
+            ? Color(red: 0.22, green: 1, blue: 0.48)
+            : Color(red: 0.22, green: 1, blue: 0.48).opacity(0.14)
     }
 }

@@ -1,0 +1,93 @@
+import AppKit
+import ApplicationServices
+import Foundation
+import OSLog
+
+enum DirectInsertionError: LocalizedError {
+    case unsupported
+    case protectedField
+    case writeFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupported: "The focused control does not support direct text insertion."
+        case .protectedField: "FlowDictate will not insert text into a protected field."
+        case .writeFailed: "Direct text insertion failed."
+        }
+    }
+}
+
+@MainActor
+final class AccessibilityTextInserter: TextInserting {
+    private let maximumCharacterCount: Int
+
+    init(maximumCharacterCount: Int = 100_000) {
+        self.maximumCharacterCount = maximumCharacterCount
+    }
+
+    func insert(_ text: String, into target: FocusTarget) async throws {
+        guard text.count <= maximumCharacterCount else { throw DirectInsertionError.unsupported }
+        guard await target.activate() else { throw TextInsertionError.targetUnavailable }
+
+        let application = AXUIElementCreateApplication(target.processIdentifier)
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+        let focusedValue else { throw DirectInsertionError.unsupported }
+
+        let element = unsafeBitCast(focusedValue, to: AXUIElement.self)
+        var subroleValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(
+            element,
+            kAXSubroleAttribute as CFString,
+            &subroleValue
+        )
+        let subrole = subroleValue as? String
+        if subrole == kAXSecureTextFieldSubrole as String {
+            throw DirectInsertionError.protectedField
+        }
+
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            &settable
+        ) == .success,
+        settable.boolValue else { throw DirectInsertionError.unsupported }
+
+        guard AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            text as CFString
+        ) == .success else { throw DirectInsertionError.writeFailed }
+
+        FlowLogger.insertion.info("Transcript inserted through Accessibility")
+    }
+}
+
+@MainActor
+final class FallbackTextInserter: TextInserting {
+    private let direct: TextInserting
+    private let clipboard: TextInserting
+
+    init(direct: TextInserting, clipboard: TextInserting) {
+        self.direct = direct
+        self.clipboard = clipboard
+    }
+
+    func insert(_ text: String, into target: FocusTarget) async throws {
+        do {
+            try await direct.insert(text, into: target)
+        } catch DirectInsertionError.protectedField {
+            throw DirectInsertionError.protectedField
+        } catch {
+            FlowLogger.insertion.notice(
+                "Direct insertion unavailable; using clipboard fallback"
+            )
+            try await clipboard.insert(text, into: target)
+        }
+    }
+}

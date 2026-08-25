@@ -10,7 +10,11 @@ struct FlowDictateMenu: View {
         Button(coordinator.primaryActionTitle) {
             coordinator.requestToggle()
         }
-        .disabled(coordinator.isProcessing || coordinator.isPreviewTestRunning)
+        .disabled(
+            coordinator.isProcessing
+                || coordinator.isPreviewTestRunning
+                || coordinator.isSystemAudioTestRunning
+        )
 
         Button("Cancel Dictation") {
             coordinator.requestCancel()
@@ -23,6 +27,16 @@ struct FlowDictateMenu: View {
 
         Button("History…") {
             coordinator.showHistory()
+        }
+
+        if let notice = coordinator.latestOutputNotice {
+            Text(notice)
+            if let outputURL = coordinator.latestOutputURL {
+                Text("Saved at: \(outputURL.path)")
+                Button("Show Saved Recording in Finder") {
+                    coordinator.revealLatestOutput()
+                }
+            }
         }
 
         if let failedRecord = coordinator.latestEnhancementFailure {
@@ -49,6 +63,20 @@ struct FlowDictateMenu: View {
 
         Divider()
 
+        Menu("Recording Source") {
+            ForEach(RecordingAudioSource.allCases.filter { $0 != .mixed }) { source in
+                Button {
+                    coordinator.selectRecordingAudioSource(source)
+                } label: {
+                    selectionLabel(
+                        source.title,
+                        selected: coordinator.settings.recordingAudioSource == source
+                    )
+                }
+            }
+        }
+        .disabled(coordinator.isRecording || coordinator.isProcessing)
+
         Menu("Microphone") {
             Button {
                 coordinator.selectInputDevice(uid: nil)
@@ -74,7 +102,7 @@ struct FlowDictateMenu: View {
         }
 
         if case .failed(_, let retainedAudioURL?) = coordinator.state {
-            Button("Show Retained Recording") {
+            Button("Show Saved Recording in Finder") {
                 coordinator.revealRetainedAudio()
             }
             .help(retainedAudioURL.path)
@@ -131,12 +159,16 @@ struct FlowDictateSettingsView: View {
                 .tabItem { Label("Transcription", systemImage: "text.bubble") }
             SmartDictationSettingsView(coordinator: coordinator)
                 .tabItem { Label("Smart Dictation", systemImage: "sparkles") }
+            AppProfilesSettingsView(coordinator: coordinator)
+                .tabItem { Label("App Profiles", systemImage: "square.stack.3d.up") }
+            ProductivitySettingsView(coordinator: coordinator)
+                .tabItem { Label("Productivity", systemImage: "chart.bar") }
             storageSettings
                 .tabItem { Label("Storage", systemImage: "externaldrive") }
             advancedSettings
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }
         }
-        .frame(width: 680, height: 520)
+        .frame(width: 720, height: 560)
         .onAppear {
             if coordinator.isRecording {
                 coordinator.restoreRecordingOverlayAfterSettingsActivation()
@@ -209,6 +241,11 @@ struct FlowDictateSettingsView: View {
     private var dictationSettings: some View {
         settingsForm {
             Section("Keyboard Shortcuts") {
+                Picker("Activation mode", selection: $settings.dictationActivationMode) {
+                    ForEach(DictationActivationMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
                 ShortcutRecorderView(
                     title: "Start / Stop",
                     configuration: settings.dictationHotKey,
@@ -292,6 +329,49 @@ struct FlowDictateSettingsView: View {
 
     private var audioSettings: some View {
         settingsForm {
+            Section("Recording Source") {
+                Picker(
+                    "Source",
+                    selection: Binding(
+                        get: { settings.recordingAudioSource },
+                        set: { coordinator.selectRecordingAudioSource($0) }
+                    )
+                ) {
+                    Text(RecordingAudioSource.microphone.title).tag(RecordingAudioSource.microphone)
+                    Text(RecordingAudioSource.systemAudio.title).tag(RecordingAudioSource.systemAudio)
+                }
+                .disabled(coordinator.isRecording || coordinator.isProcessing)
+
+                Text(settings.recordingAudioSource.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if settings.recordingAudioSource == .systemAudio {
+                    HStack {
+                        Label(
+                            coordinator.systemAudioPermissionGranted ? "Allowed" : "Permission required",
+                            systemImage: coordinator.systemAudioPermissionGranted
+                                ? "checkmark.circle.fill" : "exclamationmark.circle"
+                        )
+                        .foregroundStyle(coordinator.systemAudioPermissionGranted ? .green : .orange)
+                        Spacer()
+                        Button("Check Again") { coordinator.refreshPermissionStatuses() }
+                        Button("Open System Settings") { coordinator.openSystemAudioSettings() }
+                    }
+                    Button("Test System Audio for 5 Seconds…") {
+                        coordinator.testSystemAudio()
+                    }
+                    .disabled(
+                        coordinator.isSystemAudioTestRunning
+                            || coordinator.isRecording
+                            || coordinator.isProcessing
+                    )
+                    Text("The test stays on this Mac, creates no History entry and sends nothing to OpenAI.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Input") {
                 Picker(
                     "Microphone",
@@ -306,7 +386,7 @@ struct FlowDictateSettingsView: View {
                             .tag(Optional(device.uid))
                     }
                 }
-                .disabled(coordinator.isRecording)
+                .disabled(coordinator.isRecording || settings.recordingAudioSource != .microphone)
 
                 HStack {
                     Text("Input level")
@@ -319,7 +399,7 @@ struct FlowDictateSettingsView: View {
                 Button("Refresh Devices") {
                     coordinator.refreshInputDevices()
                 }
-                .disabled(coordinator.isRecording)
+                .disabled(coordinator.isRecording || settings.recordingAudioSource != .microphone)
 
                 if coordinator.isRecording {
                     Text("Microphone controls are paused while a recording is running.")

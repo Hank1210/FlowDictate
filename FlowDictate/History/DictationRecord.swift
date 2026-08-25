@@ -44,6 +44,19 @@ enum DictationRecordStatus: String, Codable, CaseIterable, Sendable {
     }
 }
 
+extension DictationRecord {
+    func withSmartConfiguration(
+        writingStyleID: UUID,
+        spokenFormattingEnabled: Bool
+    ) -> Self {
+        var copy = self
+        copy.writingStyleID = writingStyleID
+        copy.spokenFormattingEnabled = spokenFormattingEnabled
+        return copy
+    }
+}
+
+
 enum DictationErrorCategory: String, Codable, Sendable {
     case configuration
     case credentialMissing
@@ -53,12 +66,17 @@ enum DictationErrorCategory: String, Codable, Sendable {
     case storageFull
     case audioDevice
     case audioCorrupt
+    case systemAudioPermission
+    case systemAudioUnavailable
+    case systemAudioInterrupted
     case network
     case timeout
     case rateLimit
     case providerTemporary
     case providerPermanent
     case insertion
+    case directInsertionUnsupported
+    case directInsertionUnknown
     case clipboardConflict
     case interrupted
     case unknown
@@ -73,6 +91,9 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var status: DictationRecordStatus
     var audioRelativePath: String
     var audioFileSize: Int64
+    var audioSource: RecordingAudioSource = .microphone
+    var audioSampleRate: Double = 0
+    var audioChannelCount: Int = 0
     var originalTranscript: String?
     var formattedTranscript: String? = nil
     var dictionaryTranscript: String? = nil
@@ -148,7 +169,8 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
         modelID: String,
         language: String?,
         targetBundleIdentifier: String?,
-        targetApplicationName: String?
+        targetApplicationName: String?,
+        sourceMetadata: AudioSourceMetadata = .microphoneDefault
     ) -> Self {
         Self(
             id: id,
@@ -159,6 +181,9 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
             status: status,
             audioRelativePath: audioRelativePath,
             audioFileSize: audioFileSize,
+            audioSource: sourceMetadata.source,
+            audioSampleRate: sourceMetadata.sampleRate,
+            audioChannelCount: sourceMetadata.channelCount,
             originalTranscript: nil,
             finalText: nil,
             providerID: providerID,
@@ -223,7 +248,8 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
 extension DictationRecord {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, recordingStartedAt, recordingEndedAt, duration, status
-        case audioRelativePath, audioFileSize, originalTranscript, formattedTranscript
+        case audioRelativePath, audioFileSize, audioSource, audioSampleRate, audioChannelCount
+        case originalTranscript, formattedTranscript
         case dictionaryTranscript, finalText, writingStyleID, processingStatus
         case enhancementProviderID, enhancementModelID, enhancementAttemptCount
         case enhancementErrorCategory, enhancementErrorMessage, dictionaryReplacementCount
@@ -242,6 +268,10 @@ extension DictationRecord {
         status = try values.decode(DictationRecordStatus.self, forKey: .status)
         audioRelativePath = try values.decode(String.self, forKey: .audioRelativePath)
         audioFileSize = try values.decode(Int64.self, forKey: .audioFileSize)
+        audioSource = try values.decodeIfPresent(RecordingAudioSource.self, forKey: .audioSource)
+            ?? .microphone
+        audioSampleRate = try values.decodeIfPresent(Double.self, forKey: .audioSampleRate) ?? 0
+        audioChannelCount = try values.decodeIfPresent(Int.self, forKey: .audioChannelCount) ?? 0
         originalTranscript = try values.decodeIfPresent(String.self, forKey: .originalTranscript)
         formattedTranscript = try values.decodeIfPresent(String.self, forKey: .formattedTranscript)
         dictionaryTranscript = try values.decodeIfPresent(String.self, forKey: .dictionaryTranscript)
