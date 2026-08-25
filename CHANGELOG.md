@@ -4,6 +4,8 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-25
+
 ### Added
 
 - Separate microphone and ScreenCaptureKit System Audio recording sources with source metadata in the overlay and History.
@@ -18,7 +20,7 @@ All notable user-facing changes to FlowDictate are documented here.
 - History schema upgraded to version 4 with microphone defaults for older records.
 - Recorder lifecycle is asynchronous and source-independent; microphone remains the default for all migrations.
 - System Audio asset writing runs off the main actor and limits level updates to ten per second.
-- Development app version advanced to 3.3.0 (build 7); the public release remains pending manual validation.
+- App version advanced to 3.3.0 (build 7).
 - System Audio recording now displays the recommended 15–20 minute transcription limit together with the unavailable-Preview notice.
 - The recording overlay now uses a compact black monitor-style layout with a narrow neon-green level meter and light-gray Preview text.
 
@@ -81,6 +83,7 @@ All notable user-facing changes to FlowDictate are documented here.
 - Persistent History, recovery, retry, Restore Last Dictation and retention controls.
 - Free ad hoc signed Community ZIP workflow with German and English installation guides.
 
-[Unreleased]: https://github.com/Hank1210/FlowDictate/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/Hank1210/FlowDictate/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/Hank1210/FlowDictate/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/Hank1210/FlowDictate/compare/v2.0.0...v3.2.0
 [2.0.0]: https://github.com/Hank1210/FlowDictate/releases/tag/v2.0.0

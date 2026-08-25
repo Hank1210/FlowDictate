@@ -1,6 +1,10 @@
 # FlowDictate
 
-FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. The current development version includes the reliable standalone foundation from Phase 2, Phase 3.1 Live Preview, Phase 3.2 Smart Dictation and the Phase 3.3 implementation described in `FlowDictate_PRD_Phase_3.md`. The latest published Community release remains 3.2.0 until Phase 3.3 has completed manual validation.
+<p align="center">
+  <img src="FlowDictate/Assets.xcassets/AppIcon.appiconset/AppIcon_1024.png" alt="FlowDictate app icon" width="180">
+</p>
+
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. Version 3.3.0 combines the reliable standalone foundation from Phase 2, Phase 3.1 Live Preview, Phase 3.2 Smart Dictation and Phase 3.3 System Audio, app profiles and productivity features described in `FlowDictate_PRD_Phase_3.md`.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
@@ -92,7 +96,7 @@ For a free build intended for personal use and a trusted circle, run:
 
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
-For the current 3.3.0 development version the generated files are:
+For version 3.3.0 the generated files are:
 
 - `FlowDictate-3.3.0-Community-macOS.zip`
 - `FlowDictate-3.3.0-Community-macOS.zip.sha256`
@@ -101,7 +105,7 @@ For the current 3.3.0 development version the generated files are:
 
 Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASE_NOTES_3.2.0.md](RELEASE_NOTES_3.2.0.md) for the current public release notes.
+See [CHANGELOG.md](CHANGELOG.md) for version history and [RELEASE_NOTES_3.3.0.md](RELEASE_NOTES_3.3.0.md) for the current public release notes.
 
 ## Updating from 2.0
 
