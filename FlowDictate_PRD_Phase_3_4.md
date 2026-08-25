@@ -1,11 +1,11 @@
 # Product Requirements Document: FlowDictate Phase 3.4
 
 **Phase:** 3.4 – Long-Form Transcription & Responsiveness
-**Status:** Implementierung lokal in Prüfung; Community-ZIP- und manuelle Abnahme noch offen
+**Status:** Abgeschlossen und als FlowDictate 3.4.0 veröffentlicht
 **Stand:** 25. August 2026
 **Ausgangsversion:** FlowDictate 3.3.0, Build 7, Tag `v3.3.0`, Commit `174a88b`
-**Zielversion:** erst nach lokaler Abnahme festlegen
-**Grundlagen:** `FlowDictate_PRD_Phase_3.md`, `ARBEITSPLAN_PHASE_3_3.md`, aktueller Code auf `main`
+**Zielversion:** FlowDictate 3.4.0, Build 8
+**Grundlagen:** `FlowDictate_PRD_Phase_3.md` und der aktuelle Code auf `main`
 
 ## 1. Zweck
 
@@ -13,7 +13,7 @@ Phase 3.4 macht lange Mikrofon- und Systemaudioaufnahmen zuverlässig transkribi
 
 Gleichzeitig wird die Reaktionsfähigkeit langer Systemaudioaufnahmen gemessen und verbessert. Stop-Tastenkürzel, Overlay, Pegelanzeige und App-Navigation dürfen weder durch Capture-Finalisierung noch durch Segmentvorbereitung, Audioexport, Multipart-Erzeugung oder Netzwerkverarbeitung blockiert werden.
 
-Dieses Dokument definiert Produktumfang, Architekturverträge, Datenmodell, Segmentierung, Zusammenführung, Recovery, Migration, Performanceziele und Abnahmekriterien. Der umsetzbare Lieferablauf steht in `ARBEITSPLAN_PHASE_3_4.md`.
+Dieses Dokument definiert Produktumfang, Architekturverträge, Datenmodell, Segmentierung, Zusammenführung, Recovery, Migration, Performanceziele und Abnahmekriterien der veröffentlichten Implementierung.
 
 ## 2. Ausgangslage
 
