@@ -45,6 +45,7 @@ final class TranscriptionRunner {
         language: String?,
         maximumAttempts: Int,
         provider: any TranscriptionProvider,
+        deferSuccessfulPersistence: Bool = false,
         progress: @escaping @MainActor (LongFormProgress) -> Void = { _ in }
     ) async throws -> DictationRecord {
         if let result = try await longFormRunner.runIfNeeded(
@@ -65,7 +66,7 @@ final class TranscriptionRunner {
             updated.attemptCount += 1
             updated.lastAttemptAt = Date()
             updated.updatedAt = Date()
-            try await persist(updated)
+            try await store(updated, persistToDisk: !deferSuccessfulPersistence)
 
             let result: TranscriptionResult
             do {
@@ -103,7 +104,7 @@ final class TranscriptionRunner {
             updated.errorCode = nil
             updated.errorMessage = nil
             updated.updatedAt = Date()
-            try await persist(updated)
+            try await store(updated, persistToDisk: !deferSuccessfulPersistence)
             return updated
         }
 
@@ -124,5 +125,14 @@ final class TranscriptionRunner {
         } catch {
             throw TranscriptionPersistenceFailure(underlyingError: error, record: record)
         }
+    }
+
+    private func store(_ record: DictationRecord, persistToDisk: Bool) async throws {
+        guard !persistToDisk else {
+            try await persist(record)
+            return
+        }
+        do { try await historyStore.stage(record) }
+        catch { throw TranscriptionPersistenceFailure(underlyingError: error, record: record) }
     }
 }

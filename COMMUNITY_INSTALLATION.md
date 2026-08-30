@@ -27,14 +27,14 @@ Gib FlowDictate nur frei, wenn du die ZIP-Datei direkt von einer Person erhalten
 ## Ersteinrichtung
 
 1. Wähle den Aufnahmeordner. Empfohlen wird `Dokumente/Recordings`.
-2. Trage deinen eigenen OpenAI API-Key ein. Er wird ausschließlich im macOS-Schlüsselbund gespeichert.
+2. Wähle die Transkription: Auf einem Apple-Silicon-Mac kannst du das lokale Parakeet-Modell herunterladen und ohne API-Key arbeiten. Alternativ trägst du deinen eigenen OpenAI API-Key ein; er wird ausschließlich im macOS-Schlüsselbund gespeichert. Auf Intel-Macs bleibt OpenAI der verfügbare finale Transkriptionsweg.
 3. Erlaube Mikrofonzugriff und Bedienungshilfen.
 4. Erlaube Spracherkennung nur, wenn du die optionale lokale Live Preview verwenden möchtest.
 5. Wenn du Systemaudio aufnehmen möchtest, erlaube FlowDictate unter `Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme` den Zugriff. Je nach macOS-Version kann die Berechtigung auch als `Bildschirmaufnahme` oder `Nur Systemaudio` bezeichnet sein.
 6. Beende und öffne FlowDictate erneut, wenn macOS nach einer neuen Berechtigung dazu auffordert.
 7. Lege die gewünschten Tastenkürzel fest.
 
-Die ZIP-Datei enthält keinen API-Key und keine Zugangsdaten des Erstellers.
+Die ZIP-Datei enthält weder einen API-Key noch ein Sprachmodell oder Zugangsdaten des Erstellers. Der optionale Modelldownload wird in den Transkriptions-Einstellungen mit Quelle, Größe und Lizenz angezeigt.
 
 ## Aktualisierung
 
@@ -54,7 +54,7 @@ Verwende zum Testen immer genau die Community-ZIP, die später veröffentlicht w
 
 Wenn du von einer Version vor 3.2.0 aktualisierst, werden vorhandene History-Daten automatisch erweitert. Vor der ersten Speicherung im neuen Format legt FlowDictate einmalig eine Sicherung namens `dictations-pre-3.2.json` im lokalen History-Ordner an. Aufnahmen und der gewählte Aufnahmeordner werden nicht verschoben.
 
-Live Preview ist optional und nutzt ausschließlich Apples lokale Spracherkennung. Gesprochene Formatierung und das persönliche Wörterbuch arbeiten lokal. Nur ein bewusst ausgewählter AI-Schreibstil sendet den bereits transkribierten Text in einer zusätzlichen Anfrage an OpenAI.
+Live Preview ist optional und nutzt ausschließlich Apples lokale Spracherkennung. Lokale finale Transkription, gesprochene Korrekturen, Formatierung und das persönliche Wörterbuch arbeiten auf dem Mac. Im Modus `Fully offline` blockiert FlowDictate Transkriptions-, Enhancement- und Update-Netzwerkzugriffe. Nur ein bewusst gewählter Cloudpfad sendet Audio oder Text an OpenAI; ein lokaler Fehler löst niemals automatisch einen Cloud-Upload aus.
 
 ### Schlüsselbund nach einem Update
 

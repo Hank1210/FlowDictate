@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import OSLog
 import SwiftUI
 
 enum OverlayStatus: Equatable {
@@ -125,11 +126,15 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
     private let model = RecordingOverlayModel()
     private var panel: NonActivatingPanel?
     private var successHideWorkItem: DispatchWorkItem?
+    private var presentationGeneration: UInt64 = 0
     private var overlayPosition: OverlayPosition = .bottomTrailing
     private var currentScreen: NSScreen?
 
     func show(status: OverlayStatus, level: Float = 0, reposition: Bool = false) {
+        presentationGeneration &+= 1
+        let generation = presentationGeneration
         successHideWorkItem?.cancel()
+        successHideWorkItem = nil
         model.status = status
         model.level = level
         let panel = panel ?? makePanel()
@@ -141,13 +146,18 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         }
         panel.orderFrontRegardless()
         if case .success = status {
-            let workItem = DispatchWorkItem { [weak panel] in
-                panel?.orderOut(nil)
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self,
+                      self.presentationGeneration == generation,
+                      case .success = self.model.status else { return }
+                self.hide()
+                FlowLogger.app.notice("Inserted overlay auto-hidden")
             }
             successHideWorkItem = workItem
-            // Defensive fallback: the coordinator normally hides after 0.6 seconds.
-            // Keep a completed overlay from ever remaining on screen indefinitely.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: workItem)
+            // This controller-owned timeout is independent of queue persistence and
+            // remains the final safeguard if the coordinator's dismissal is delayed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+            FlowLogger.app.notice("Inserted overlay shown; auto-hide scheduled")
         }
     }
 
@@ -172,6 +182,7 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
     }
 
     func hide() {
+        presentationGeneration &+= 1
         successHideWorkItem?.cancel()
         successHideWorkItem = nil
         panel?.orderOut(nil)

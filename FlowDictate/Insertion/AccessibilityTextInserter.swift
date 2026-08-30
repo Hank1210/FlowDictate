@@ -31,7 +31,23 @@ final class AccessibilityTextInserter: TextInserting {
         guard text.count <= maximumCharacterCount else { throw DirectInsertionError.unsupported }
         guard await target.activate() else { throw TextInsertionError.targetUnavailable }
 
-        let application = AXUIElementCreateApplication(target.processIdentifier)
+        let processIdentifier = target.processIdentifier
+        let messagingTimeout = messagingTimeout
+        try await Task.detached(priority: .userInitiated) {
+            try Self.insertSynchronously(
+                text,
+                processIdentifier: processIdentifier,
+                messagingTimeout: messagingTimeout
+            )
+        }.value
+    }
+
+    private nonisolated static func insertSynchronously(
+        _ text: String,
+        processIdentifier: pid_t,
+        messagingTimeout: Float
+    ) throws {
+        let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, messagingTimeout)
         var focusedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -42,6 +58,7 @@ final class AccessibilityTextInserter: TextInserting {
         let focusedValue else { throw DirectInsertionError.unsupported }
 
         let element = unsafeBitCast(focusedValue, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
         var subroleValue: CFTypeRef?
         AXUIElementCopyAttributeValue(
             element,
@@ -73,6 +90,14 @@ final class AccessibilityTextInserter: TextInserting {
 
 @MainActor
 final class FallbackTextInserter: TextInserting {
+    /// Word's Accessibility tree can accept the focus lookup while blocking
+    /// selected-text inspection for several seconds. Word already needs the
+    /// clipboard path in that state, so avoid putting its known-slow AX probe
+    /// on the interactive insertion path.
+    private static let clipboardPreferredBundleIdentifiers: Set<String> = [
+        "com.microsoft.Word"
+    ]
+
     private let direct: TextInserting
     private let clipboard: TextInserting
 
@@ -82,6 +107,15 @@ final class FallbackTextInserter: TextInserting {
     }
 
     func insert(_ text: String, into target: FocusTarget) async throws {
+        if let bundleIdentifier = target.bundleIdentifier,
+           Self.clipboardPreferredBundleIdentifiers.contains(bundleIdentifier) {
+            FlowLogger.insertion.info(
+                "Skipping known-slow Accessibility insertion for \(bundleIdentifier, privacy: .public); using clipboard"
+            )
+            try await clipboard.insert(text, into: target)
+            return
+        }
+
         let directStarted = ContinuousClock.now
         do {
             try await direct.insert(text, into: target)

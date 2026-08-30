@@ -7,6 +7,23 @@ import OSLog
 import UniformTypeIdentifiers
 
 @MainActor
+protocol ProcessActivityManaging: AnyObject {
+    func beginUserInitiatedActivity(reason: String) -> NSObjectProtocol
+    func endActivity(_ activity: NSObjectProtocol)
+}
+
+@MainActor
+final class SystemProcessActivityManager: ProcessActivityManaging {
+    func beginUserInitiatedActivity(reason: String) -> NSObjectProtocol {
+        ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: reason)
+    }
+
+    func endActivity(_ activity: NSObjectProtocol) {
+        ProcessInfo.processInfo.endActivity(activity)
+    }
+}
+
+@MainActor
 final class DictationCoordinator: ObservableObject {
     static let currentOnboardingVersion = FlowDictateVersion.onboardingSchema
 
@@ -17,6 +34,8 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var microphonePermissionGranted = false
     @Published private(set) var accessibilityPermissionGranted = false
     @Published private(set) var speechPermissionState: SpeechPermissionState = .notDetermined
+    @Published private(set) var livePreviewAvailability: LivePreviewAvailability =
+        .unavailable(reason: "Checking local Live Preview availability…")
     @Published private(set) var systemAudioPermissionGranted = false
     @Published private(set) var recordingLocationConfigured = false
     @Published private(set) var recordingLocationPath: String?
@@ -36,6 +55,15 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var updateCheckMessage: String?
     @Published private(set) var latestOutputNotice: String?
     @Published private(set) var latestOutputURL: URL?
+    @Published private(set) var localModelState: LocalModelState = .notInstalled
+    @Published private(set) var isLocalTranscriptionTestRunning = false
+    @Published private(set) var localTranscriptionTestMessage: String?
+    @Published private(set) var transcriptionRestartRequired = false
+    @Published private(set) var queueSnapshot = DictationQueueSnapshot(
+        processingCount: 0,
+        queuedCount: 0,
+        reservationCount: 0
+    )
 
     let settings: AppSettings
     let launchAtLogin: LaunchAtLoginManager
@@ -65,9 +93,20 @@ final class DictationCoordinator: ObservableObject {
     private let appProfileStore: AppProfileStore
     private let smartDictationPipeline: SmartDictationPipeline
     private let injectedEnhancer: (any TranscriptEnhancing)?
+    private let transcriptEnhancerFactory: @MainActor (String) -> any TranscriptEnhancing
     private let livePreviewCoordinator: LivePreviewCoordinator
     private let livePreviewAvailabilityProvider:
         @MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability
+    private let providerRegistry: TranscriptionProviderRegistry
+    private let localModelManager: LocalModelManager
+    private var cachedLocalProvider: FluidAudioTranscriptionProvider?
+    private var cachedOpenAIProvider: OpenAITranscriptionProvider?
+    private var cachedOpenAIProviderModel: String?
+    private var cachedOpenAIEnhancer: (any TranscriptEnhancing)?
+    private var activeTranscriptionRuntimeSignature: String?
+    private let jobStore: DictationJobStore
+    private let processingQueue: DictationProcessingQueue
+    private let processActivityManager: ProcessActivityManaging
 
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
@@ -79,6 +118,7 @@ final class DictationCoordinator: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var previewTestTask: Task<Void, Never>?
     private var systemAudioTestTask: Task<Void, Never>?
+    private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
     private var didLoadAPIKeyFromKeychain = false
@@ -88,6 +128,21 @@ final class DictationCoordinator: ObservableObject {
     private var holdReleaseTask: Task<Void, Never>?
     private var activeDictationTask: Task<Void, Never>?
     private var retryTranscriptionTasks: [UUID: Task<Void, Never>] = [:]
+    private var jobProcessingTask: Task<Void, Never>?
+    private var hasQueueReservation = false
+    private var allowsRecordingDuringCompletionPersistence = false
+    private var jobInteractionWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var stagedCompletionJobIDs: Set<UUID> = []
+    private var pendingCompletionPersistenceJobIDs: Set<UUID> = []
+    private var completionPersistenceTask: Task<Void, Never>?
+    private var inMemoryJobTargets: [UUID: FocusTarget] = [:]
+    private var settingsCancellables: Set<AnyCancellable> = []
+    private var hasResolvedLivePreviewAvailability = false
+    private var criticalInteractionActivity: NSObjectProtocol?
+    private lazy var pasteboardInserter = PasteboardTextInserter(
+        pasteboard: .general,
+        restoreDelay: .milliseconds(Int(settings.clipboardRestoreDelay * 1_000))
+    )
 
     private var recorder: AudioRecording {
         if let sessionRecorder { return sessionRecorder }
@@ -149,6 +204,13 @@ final class DictationCoordinator: ObservableObject {
         writingStyleStore: WritingStyleStore? = nil,
         appProfileStore: AppProfileStore? = nil,
         transcriptEnhancer: (any TranscriptEnhancing)? = nil,
+        transcriptEnhancerFactory: @escaping @MainActor (String) -> any TranscriptEnhancing = {
+            OpenAITranscriptEnhancer(apiKey: $0)
+        },
+        providerRegistry: TranscriptionProviderRegistry = TranscriptionProviderRegistry(),
+        localModelManager: LocalModelManager? = nil,
+        jobStore: DictationJobStore? = nil,
+        processActivityManager: ProcessActivityManaging? = nil,
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         automaticallyPresentOnboarding: Bool = false
@@ -178,6 +240,13 @@ final class DictationCoordinator: ObservableObject {
         self.appProfileStore = appProfileStore ?? AppProfileStore()
         smartDictationPipeline = SmartDictationPipeline(historyStore: historyStore)
         injectedEnhancer = transcriptEnhancer
+        self.transcriptEnhancerFactory = transcriptEnhancerFactory
+        self.providerRegistry = providerRegistry
+        self.localModelManager = localModelManager ?? LocalModelManager()
+        let resolvedJobStore = jobStore ?? DictationJobStore()
+        self.jobStore = resolvedJobStore
+        processingQueue = DictationProcessingQueue(store: resolvedJobStore)
+        self.processActivityManager = processActivityManager ?? SystemProcessActivityManager()
         livePreviewCoordinator = LivePreviewCoordinator(
             provider: livePreviewProvider ?? AppleSpeechLivePreviewProvider()
         )
@@ -221,6 +290,8 @@ final class DictationCoordinator: ObservableObject {
             }
         }
 
+        observeRuntimeSettingChanges()
+
         registerInitialHotKeys()
         refreshInputDevices()
         refreshConfigurationStatus()
@@ -228,6 +299,10 @@ final class DictationCoordinator: ObservableObject {
         Task { [weak self] in
             await self?.refreshSmartDictationData()
             await self?.refreshAppProfiles()
+            await self?.refreshLocalModelState()
+            if self?.injectedProvider == nil {
+                await self?.recoverJobQueue()
+            }
             await self?.recoverAndRefreshHistory()
             if self?.settings.updateCheckEnabled == true,
                self?.settings.lastUpdateCheck?.timeIntervalSinceNow ?? -.infinity < -86_400 {
@@ -244,6 +319,8 @@ final class DictationCoordinator: ObservableObject {
         overlayDismissTask?.cancel()
         previewTestTask?.cancel()
         systemAudioTestTask?.cancel()
+        localModelInstallTask?.cancel()
+        jobProcessingTask?.cancel()
     }
 
     var primaryActionTitle: String {
@@ -261,18 +338,162 @@ final class DictationCoordinator: ObservableObject {
         default: false
         }
     }
+    var canStartNewRecording: Bool {
+        !recorder.isRecording
+            && !transcriptionRestartRequired
+            && state.acceptsStart
+            && !isPreviewTestRunning
+            && !isSystemAudioTestRunning
+            && !hasQueueReservation
+            && (
+                queueSnapshot.totalActiveCount == 0
+                    || (
+                        allowsRecordingDuringCompletionPersistence
+                            && queueSnapshot.processingCount == 1
+                            && queueSnapshot.queuedCount == 0
+                            && queueSnapshot.reservationCount == 0
+                    )
+            )
+    }
+    var canPerformPrimaryAction: Bool {
+        recorder.isRecording ? state == .recording : canStartNewRecording
+    }
     var latestEnhancementFailure: DictationRecord? {
         historyRecords.first { $0.processingStatus == .enhancementFailed }
     }
     var needsOnboarding: Bool {
         settings.onboardingVersion < Self.currentOnboardingVersion
-            || !apiKeyConfigured || !recordingLocationConfigured
+            || (settings.transcriptionProviderID == .openAI && !apiKeyConfigured)
+            || !recordingLocationConfigured
+    }
+    var transcriptionSetupReady: Bool {
+        switch settings.transcriptionProviderID {
+        case .openAI:
+            apiKeyConfigured
+        case .local:
+            if case .installed = localModelState { true } else { false }
+        }
+    }
+
+    var transcriptionLocationSummary: String {
+        settings.transcriptionProviderID == .local
+            ? "On this Mac · \(LocalModelCatalog.parakeetV3.displayName)"
+            : "OpenAI · \(settings.transcriptionModel)"
+    }
+
+    var improvementLocationSummary: String {
+        let style = selectedWritingStyle
+        guard style.usesAI else { return "Off · current style is \(style.name)" }
+        if settings.privacyMode == .offline {
+            return "Off · Fully offline"
+        }
+        if settings.privacyMode == .localWithOptionalCloudEnhancement,
+           !settings.cloudEnhancementEnabled {
+            return "Off · OpenAI permission disabled"
+        }
+        return "OpenAI · \(style.name)"
+    }
+
+    func refreshLocalModelState() async {
+        localModelState = await localModelManager.refreshState()
+    }
+
+    func installLocalModel() {
+        guard localModelInstallTask == nil else { return }
+        localModelInstallTask = Task { [weak self] in
+            guard let self else { return }
+            defer { localModelInstallTask = nil }
+            do {
+                try await localModelManager.install(
+                    policy: NetworkPolicy(
+                        mode: settings.privacyMode,
+                        cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+                    ),
+                    stateHandler: { [weak self] state in self?.localModelState = state }
+                )
+                localModelState = await localModelManager.refreshState()
+            } catch {
+                setupMessage = error.localizedDescription
+                localModelState = .failed(message: error.localizedDescription)
+            }
+        }
+    }
+
+    func removeLocalModel() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let dependentJobs = try await jobStore.all().filter {
+                    $0.providerID == TranscriptionProviderID.local.rawValue
+                        && ![DictationJobStatus.completed, .cancelled, .insertionDeferred]
+                            .contains($0.status)
+                }
+                guard dependentJobs.isEmpty else {
+                    setupMessage = "The local model is still required by \(dependentJobs.count) queued or recoverable dictation(s)."
+                    return
+                }
+                cachedLocalProvider = nil
+                try await localModelManager.remove()
+                localModelState = await localModelManager.refreshState()
+            } catch {
+                setupMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func testLocalTranscription() {
+        guard settings.transcriptionProviderID == .local,
+              case .installed = localModelState,
+              !isLocalTranscriptionTestRunning else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose Audio for a Local Transcription Test"
+        panel.prompt = "Test Locally"
+        panel.message = "Choose an existing audio file. FlowDictate will transcribe it locally without inserting text or creating a History entry."
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        isLocalTranscriptionTestRunning = true
+        localTranscriptionTestMessage = "Transcribing the selected file locally…"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isLocalTranscriptionTestRunning = false }
+            do {
+                let provider = try await activeProvider(
+                    providerID: .local,
+                    model: settings.localTranscriptionModelID,
+                    policy: NetworkPolicy(
+                        mode: settings.privacyMode,
+                        cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+                    )
+                )
+                let result = try await provider.transcribe(
+                    TranscriptionRequest(
+                        audioURL: url,
+                        language: settings.transcriptionLanguage.apiValue
+                    )
+                )
+                localTranscriptionTestMessage = "Local test succeeded (\(result.text.count) characters). Nothing was inserted and no History entry was created."
+            } catch {
+                localTranscriptionTestMessage = "Local test failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func requestToggle() {
         let now = Date()
-        guard now.timeIntervalSince(lastHotKeyDate) >= 0.25 else { return }
+        guard activeDictationTask == nil else {
+            FlowLogger.hotkey.notice("Ignored duplicate toggle while a recording transition is still running")
+            return
+        }
+        guard now.timeIntervalSince(lastHotKeyDate) >= 0.12 else {
+            FlowLogger.hotkey.notice("Ignored duplicate toggle inside the debounce interval")
+            return
+        }
         lastHotKeyDate = now
+        FlowLogger.hotkey.info(
+            "Accepted toggle request; recording=\(self.recorder.isRecording, privacy: .public)"
+        )
         if recorder.isRecording {
             // Acknowledge the shortcut immediately. System Audio may need a moment
             // to close a long M4A, but the user should never have to press twice.
@@ -280,9 +501,10 @@ final class DictationCoordinator: ObservableObject {
             audioLevel = 0
             overlay.show(status: .finalizing)
         }
-        activeDictationTask = Task { [weak self] in
-            await self?.toggleDictation()
-            self?.activeDictationTask = nil
+        activeDictationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.activeDictationTask = nil }
+            await self.toggleDictation()
         }
     }
 
@@ -316,6 +538,8 @@ final class DictationCoordinator: ObservableObject {
             overlay.hide()
             sessionRecorder = nil
             sessionConfiguration = nil
+            await releaseQueueReservation()
+            endCriticalInteractionActivityIfNeeded()
             Task {
                 var record = makeRecord(from: recording, target: target, status: .cancelled)
                 record.cancelled = true
@@ -325,6 +549,7 @@ final class DictationCoordinator: ObservableObject {
         } catch {
             sessionRecorder = nil
             sessionConfiguration = nil
+            await releaseQueueReservation()
             fail(error, retainedAudioURL: nil)
         }
     }
@@ -395,6 +620,7 @@ final class DictationCoordinator: ObservableObject {
             try credentialStore.saveAPIKey(value)
             cachedAPIKey = value
             didLoadAPIKeyFromKeychain = true
+            invalidateCachedOpenAIRuntime()
             setupMessage = "API key stored securely in Keychain."
             refreshConfigurationStatus()
             if case .failed = state { state = .idle }
@@ -409,6 +635,7 @@ final class DictationCoordinator: ObservableObject {
             try credentialStore.saveAPIKey(value)
             cachedAPIKey = value
             didLoadAPIKeyFromKeychain = true
+            invalidateCachedOpenAIRuntime()
             setupMessage = "Connection verified. API key stored securely in Keychain."
             refreshConfigurationStatus()
             return true
@@ -420,9 +647,32 @@ final class DictationCoordinator: ObservableObject {
             try credentialStore.deleteAPIKey()
             cachedAPIKey = nil
             didLoadAPIKeyFromKeychain = true
+            invalidateCachedOpenAIRuntime()
             refreshConfigurationStatus()
         }
         catch { fail(error, retainedAudioURL: nil) }
+    }
+
+    func quitAndRestart() {
+        guard !isRecording, !isProcessing else {
+            setupMessage = "Finish or cancel the current dictation before restarting FlowDictate."
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        Task {
+            do {
+                _ = try await NSWorkspace.shared.openApplication(
+                    at: Bundle.main.bundleURL,
+                    configuration: configuration
+                )
+                NSApplication.shared.terminate(nil)
+            } catch {
+                setupMessage = "FlowDictate could not restart: \(error.localizedDescription)"
+            }
+        }
     }
 
     func refreshConfigurationStatus() {
@@ -437,10 +687,76 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func refreshPermissionStatus() {
+        let previousSpeechPermission = speechPermissionState
         microphonePermissionGranted = permissionManager.hasMicrophoneAccess
         accessibilityPermissionGranted = permissionManager.hasEventPostingAccess
         speechPermissionState = permissionManager.speechRecognitionStatus
         systemAudioPermissionGranted = SystemAudioPermissionService().isAuthorized
+        if !hasResolvedLivePreviewAvailability
+            || previousSpeechPermission != speechPermissionState {
+            refreshLivePreviewAvailability()
+        }
+    }
+
+    private func observeRuntimeSettingChanges() {
+        settings.$transcriptionLanguage
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.refreshLivePreviewAvailability()
+            }
+            .store(in: &settingsCancellables)
+
+        settings.$transcriptionProviderID
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.requireRestartForTranscriptionChange()
+            }
+            .store(in: &settingsCancellables)
+
+        Publishers.Merge3(
+            settings.$privacyMode.map { _ in () },
+            settings.$transcriptionModel.map { _ in () },
+            settings.$localTranscriptionModelID.map { _ in () }
+        )
+        .dropFirst(3)
+        .sink { [weak self] _ in
+            self?.requireRestartForTranscriptionChange()
+        }
+        .store(in: &settingsCancellables)
+    }
+
+    private func requireRestartForTranscriptionChange() {
+        guard !transcriptionRestartRequired else { return }
+        transcriptionRestartRequired = true
+        setupMessage = "Transcription settings changed. Quit & Restart is required before the next dictation."
+        FlowLogger.transcription.notice(
+            "Transcription configuration changed; restart required before recording"
+        )
+    }
+
+    private func beginCriticalInteractionActivityIfNeeded() {
+        guard criticalInteractionActivity == nil else { return }
+        criticalInteractionActivity = processActivityManager.beginUserInitiatedActivity(
+            reason: "Recording and completing a FlowDictate dictation"
+        )
+        FlowLogger.app.notice("Critical dictation activity began")
+    }
+
+    private func endCriticalInteractionActivityIfNeeded() {
+        guard let activity = criticalInteractionActivity else { return }
+        criticalInteractionActivity = nil
+        processActivityManager.endActivity(activity)
+        FlowLogger.app.notice("Critical dictation activity ended")
+    }
+
+    private func refreshLivePreviewAvailability() {
+        livePreviewAvailability = livePreviewAvailabilityProvider(
+            settings.transcriptionLanguage,
+            speechPermissionState
+        )
+        hasResolvedLivePreviewAvailability = true
     }
 
     func chooseRecordingDirectory(recommended: Bool) {
@@ -461,8 +777,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func completeOnboarding() {
-        guard apiKeyConfigured, recordingLocationConfigured else {
-            setupMessage = "Configure an API key and a recordings folder first."
+        guard transcriptionSetupReady, recordingLocationConfigured else {
+            setupMessage = settings.transcriptionProviderID == .local
+                ? "Install the local model and configure a recordings folder first."
+                : "Configure an API key and a recordings folder first."
             return
         }
         settings.onboardingVersion = Self.currentOnboardingVersion
@@ -560,6 +878,11 @@ final class DictationCoordinator: ObservableObject {
             "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
             "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
             "apiKeyConfigured": apiKeyConfigured,
+            "transcriptionProvider": settings.transcriptionProviderID.rawValue,
+            "privacyMode": settings.privacyMode.rawValue,
+            "localModelState": String(describing: localModelState),
+            "queueProcessingCount": queueSnapshot.processingCount,
+            "queueWaitingCount": queueSnapshot.queuedCount,
             "recordingLocationConfigured": recordingLocationConfigured,
             "microphonePermission": microphonePermissionGranted,
             "accessibilityPermission": accessibilityPermissionGranted,
@@ -593,10 +916,32 @@ final class DictationCoordinator: ObservableObject {
                     try await historyStore.delete(id: record.id)
                     await transcriptionRunner.deleteLongFormSession(recordID: record.id)
                 }
+                if let jobID = record.jobID {
+                    try await jobStore.delete(id: jobID)
+                }
             } catch {
                 FlowLogger.app.error("History deletion failed: \(error.localizedDescription, privacy: .public)")
             }
             await refreshHistory()
+        }
+    }
+
+    func cancelQueuedDictation(_ record: DictationRecord) {
+        guard let jobID = record.jobID, record.jobStatus == .queued else { return }
+        Task {
+            do {
+                queueSnapshot = try await processingQueue.cancelQueued(id: jobID)
+                var updated = record
+                updated.jobStatus = .cancelled
+                updated.status = .cancelled
+                updated.cancelled = true
+                updated.updatedAt = Date()
+                try await historyStore.upsert(updated)
+                try await jobStore.delete(id: jobID)
+                await refreshHistory()
+            } catch {
+                setupMessage = error.localizedDescription
+            }
         }
     }
 
@@ -620,13 +965,31 @@ final class DictationCoordinator: ObservableObject {
                     audioURL: url,
                     language: updated.language,
                     maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                    provider: try activeProvider(model: updated.modelID),
+                    provider: try await activeProvider(
+                        providerID: TranscriptionProviderID(rawValue: updated.providerID),
+                        model: updated.modelID
+                    ),
                     progress: { [weak self] progress in
                         self?.state = .transcribing
                         self?.overlay.show(status: .longForm(progress.statusText))
                     }
                 )
+                let correctionResult = InlineCorrectionProcessor().process(
+                    updated.originalTranscript ?? "",
+                    language: updated.language,
+                    protectedTerms: settings.personalDictionaryEnabled
+                        ? configurationDictionaryTerms(for: updated.language) : []
+                )
+                updated.correctedTranscript = correctionResult.text
+                updated.correctionSummary = correctionResult.summary
+                updated.updatedAt = Date()
+                try await historyStore.upsert(updated)
                 let style = selectedWritingStyle
+                let enhancementPolicy = NetworkPolicy(
+                    mode: settings.privacyMode,
+                    cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+                )
+                let enhancementAllowed = enhancementPolicy.allows(.enhancement)
                 updated = try await smartDictationPipeline.run(
                     record: updated,
                     spokenFormattingEnabled: settings.spokenFormattingEnabled,
@@ -634,7 +997,9 @@ final class DictationCoordinator: ObservableObject {
                     style: style,
                     enhancementModel: settings.enhancementModel,
                     fallback: settings.smartDictationFallback,
-                    enhancer: style.usesAI ? try activeEnhancer() : nil
+                    enhancer: style.usesAI && enhancementAllowed
+                        ? try activeEnhancer(policy: enhancementPolicy) : nil,
+                    enhancementAllowed: enhancementAllowed
                 )
             } catch let failure as TranscriptionRunFailure {
                 updated = failure.record
@@ -720,13 +1085,10 @@ final class DictationCoordinator: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    var livePreviewAvailability: LivePreviewAvailability {
-        livePreviewAvailabilityProvider(settings.transcriptionLanguage, speechPermissionState)
-    }
-
     func requestSpeechRecognitionPermission() {
         Task {
             speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+            refreshLivePreviewAvailability()
             switch speechPermissionState {
             case .authorized:
                 setupMessage = "Speech Recognition is enabled for local Live Preview."
@@ -754,6 +1116,7 @@ final class DictationCoordinator: ObservableObject {
                 try await permissionManager.ensureMicrophoneAccess()
                 if permissionManager.speechRecognitionStatus == .notDetermined {
                     speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+                    refreshLivePreviewAvailability()
                 } else {
                     refreshPermissionStatus()
                 }
@@ -811,6 +1174,9 @@ final class DictationCoordinator: ObservableObject {
 
     func selectRecordingAudioSource(_ source: RecordingAudioSource) {
         guard !recorder.isRecording, !isProcessing, source != .mixed else { return }
+        guard settings.recordingAudioSource != source else { return }
+        microphoneRecorder.previewBufferHandler = nil
+        livePreviewCoordinator.cancel()
         settings.recordingAudioSource = source
         refreshPermissionStatus()
     }
@@ -882,7 +1248,7 @@ final class DictationCoordinator: ObservableObject {
         isHandlingToggle = true
         defer { isHandlingToggle = false }
         if recorder.isRecording { await stopAndTranscribe() }
-        else if state.acceptsStart { await startRecording() }
+        else if canStartNewRecording { await startRecording() }
     }
 
     func refreshHistory() async {
@@ -909,22 +1275,55 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func saveAppProfile(_ profile: AppDictationProfile) {
+        let previous = appProfiles.first { $0.id == profile.id }
+        let changesTranscriptionRuntime = profileTranscriptionRuntimeChanged(
+            from: previous,
+            to: profile
+        )
         Task {
             do {
                 try await appProfileStore.upsert(profile)
                 await refreshAppProfiles()
-                setupMessage = "App profile saved."
+                if changesTranscriptionRuntime {
+                    requireRestartForTranscriptionChange()
+                } else {
+                    setupMessage = "App profile saved."
+                }
             } catch { setupMessage = error.localizedDescription }
         }
     }
 
     func deleteAppProfile(_ profile: AppDictationProfile) {
+        let changesTranscriptionRuntime = profile.isEnabled
+            && (profile.transcriptionProviderID != nil || profile.transcriptionModel != nil)
         Task {
             do {
                 try await appProfileStore.delete(id: profile.id)
                 await refreshAppProfiles()
+                if changesTranscriptionRuntime {
+                    requireRestartForTranscriptionChange()
+                }
             } catch { setupMessage = error.localizedDescription }
         }
+    }
+
+    private func profileTranscriptionRuntimeChanged(
+        from previous: AppDictationProfile?,
+        to updated: AppDictationProfile
+    ) -> Bool {
+        guard let previous else {
+            return updated.isEnabled
+                && (updated.transcriptionProviderID != nil || updated.transcriptionModel != nil)
+        }
+        return previous.transcriptionProviderID != updated.transcriptionProviderID
+            || previous.transcriptionModel != updated.transcriptionModel
+            || (
+                previous.isEnabled != updated.isEnabled
+                    && (previous.transcriptionProviderID != nil
+                        || previous.transcriptionModel != nil
+                        || updated.transcriptionProviderID != nil
+                        || updated.transcriptionModel != nil)
+            )
     }
 
     var recentProfileCandidates: [(bundleIdentifier: String, displayName: String)] {
@@ -963,6 +1362,18 @@ final class DictationCoordinator: ObservableObject {
         isCheckingForUpdates = true
         defer { isCheckingForUpdates = false }
         if manual { updateCheckMessage = nil }
+        do {
+            try NetworkPolicy(
+                mode: settings.privacyMode,
+                cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+            ).requirePermission(for: .updateCheck)
+        } catch {
+            if manual {
+                updateCheckMessage = "Update checks are disabled in Fully offline mode."
+                setupMessage = updateCheckMessage
+            }
+            return
+        }
         settings.lastUpdateCheck = Date()
         do {
             let release = try await GitHubReleaseChecker().latestStableRelease()
@@ -1072,8 +1483,16 @@ final class DictationCoordinator: ObservableObject {
             ).text
             let style = selectedWritingStyle
             guard style.usesAI else { smartDictationTestOutput = local; return }
+            let enhancementPolicy = NetworkPolicy(
+                mode: settings.privacyMode,
+                cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+            )
+            guard enhancementPolicy.allows(.enhancement) else {
+                smartDictationTestOutput = local
+                return
+            }
             do {
-                let result = try await activeEnhancer().enhance(
+                let result = try await activeEnhancer(policy: enhancementPolicy).enhance(
                     TranscriptEnhancementRequest(
                         text: local,
                         styleInstruction: style.instruction,
@@ -1112,13 +1531,20 @@ final class DictationCoordinator: ObservableObject {
         guard let style = writingStyles.first(where: { $0.id == writingStyleID }) else { return }
         Task {
             do {
+                let enhancementPolicy = NetworkPolicy(
+                    mode: settings.privacyMode,
+                    cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+                )
+                let enhancementAllowed = enhancementPolicy.allows(.enhancement)
                 _ = try await smartDictationPipeline.processWithStyle(
                     record: record,
                     style: style,
                     model: settings.enhancementModel,
                     fallback: .ask,
                     dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
-                    enhancer: style.usesAI ? try activeEnhancer() : nil
+                    enhancer: style.usesAI && enhancementAllowed
+                        ? try activeEnhancer(policy: enhancementPolicy) : nil,
+                    enhancementAllowed: enhancementAllowed
                 )
                 setupMessage = "Dictation reprocessed. Review the result in History."
             } catch { setupMessage = error.localizedDescription }
@@ -1306,7 +1732,7 @@ final class DictationCoordinator: ObservableObject {
         holdReleaseTask?.cancel()
         holdHotKeyIsDown = true
         guard !recorder.isRecording else { return }
-        Task { [weak self] in await self?.toggleDictation() }
+        requestToggle()
     }
 
     private func dictationHotKeyReleased() {
@@ -1319,7 +1745,7 @@ final class DictationCoordinator: ObservableObject {
             // and stop as soon as the recorder has actually entered recording state.
             for _ in 0..<80 {
                 guard !Task.isCancelled, !self.holdHotKeyIsDown else { return }
-                if self.recorder.isRecording {
+                if self.recorder.isRecording, !self.isHandlingToggle {
                     await self.toggleDictation()
                     return
                 }
@@ -1338,22 +1764,89 @@ final class DictationCoordinator: ObservableObject {
     private func startRecording() async {
         latestOutputNotice = nil
         latestOutputURL = nil
+        guard !transcriptionRestartRequired else {
+            setupMessage = "Transcription settings changed. Use Quit & Restart before starting another dictation."
+            return
+        }
         refreshConfigurationStatus()
-        guard apiKeyConfigured else { showOnboarding(); fail(TranscriptionProviderError.missingAPIKey, retainedAudioURL: nil); return }
-        guard recordingLocationConfigured else { showOnboarding(); fail(RecordingLocationError.notConfigured, retainedAudioURL: nil); return }
+        guard recordingLocationConfigured else {
+            showOnboarding()
+            fail(RecordingLocationError.notConfigured, retainedAudioURL: nil)
+            return
+        }
         guard let target = focusTargetProvider() else {
             fail(TextInsertionError.targetUnavailable, retainedAudioURL: nil,
-                 message: "Place the cursor in another application before starting dictation."); return
+                 message: "Place the cursor in another application before starting dictation.")
+            return
+        }
+        let configuration = effectiveConfiguration(for: target)
+        let runtimeSignature = "\(configuration.providerID.rawValue)/\(configuration.transcriptionModel)"
+        if let activeTranscriptionRuntimeSignature,
+           activeTranscriptionRuntimeSignature != runtimeSignature {
+            requireRestartForTranscriptionChange()
+            setupMessage = "This app profile uses a different transcription provider or model. Quit & Restart is required before recording."
+            return
+        }
+        activeTranscriptionRuntimeSignature = runtimeSignature
+        if configuration.providerID == .openAI, !apiKeyConfigured {
+            showOnboarding()
+            fail(TranscriptionProviderError.missingAPIKey, retainedAudioURL: nil)
+            return
+        }
+        let availability = providerRegistry.availability(for: configuration.providerID)
+        guard availability.isAvailable else {
+            fail(
+                TranscriptionProviderError.providerUnavailable(
+                    reason: availability.reason ?? "The selected transcription provider is unavailable."
+                ),
+                retainedAudioURL: nil
+            )
+            return
+        }
+        if configuration.providerID == .openAI {
+            do {
+                try NetworkPolicy(
+                    mode: configuration.privacyMode,
+                    cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+                ).requirePermission(for: .transcription)
+            } catch {
+                fail(error, retainedAudioURL: nil)
+                return
+            }
+        }
+        if configuration.providerID == .local, injectedProvider != nil {
+            // Test and embedding seam: the supplied provider owns its readiness contract.
+        } else if configuration.providerID == .local,
+                  case .installed = localModelState {
+            // Ready.
+        } else if configuration.providerID == .local {
+            showOnboarding()
+            fail(
+                TranscriptionProviderError.localModelMissing(
+                    modelID: configuration.transcriptionModel
+                ),
+                retainedAudioURL: nil
+            )
+            return
+        }
+        beginCriticalInteractionActivityIfNeeded()
+        do {
+            queueSnapshot = try await processingQueue.reserveRecordingSlot()
+            hasQueueReservation = true
+        } catch {
+            fail(error, retainedAudioURL: nil)
+            return
         }
         do {
             if settings.recordingAudioSource == .microphone {
                 try await permissionManager.ensureMicrophoneAccess()
             }
             try permissionManager.ensureEventPostingAccess()
-            sessionConfiguration = effectiveConfiguration(for: target)
+            sessionConfiguration = configuration
             refreshPermissionStatus()
             if settings.livePreviewEnabled, speechPermissionState == .notDetermined {
                 speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
+                refreshLivePreviewAvailability()
             }
             sessionRecorder = settings.recordingAudioSource == .systemAudio
                 ? systemAudioRecorder
@@ -1363,6 +1856,7 @@ final class DictationCoordinator: ObservableObject {
             }
             try await startRecorderWithPreview()
             overlayDismissTask?.cancel()
+            allowsRecordingDuringCompletionPersistence = false
             focusTarget = target
             lastExternalFocusTarget = target
             state = .recording
@@ -1374,14 +1868,24 @@ final class DictationCoordinator: ObservableObject {
             do {
                 sessionRecorder = microphoneRecorder
                 try await startRecorderWithPreview()
+                allowsRecordingDuringCompletionPersistence = false
                 focusTarget = target
                 lastExternalFocusTarget = target
                 state = .recording
                 overlay.updateSource(.microphone)
                 overlay.show(status: .recording, reposition: true)
             }
-            catch { sessionRecorder = nil; fail(error, retainedAudioURL: nil) }
-        } catch { sessionRecorder = nil; refreshPermissionStatus(); fail(error, retainedAudioURL: nil) }
+            catch {
+                sessionRecorder = nil
+                await releaseQueueReservation()
+                fail(error, retainedAudioURL: nil)
+            }
+        } catch {
+            sessionRecorder = nil
+            await releaseQueueReservation()
+            refreshPermissionStatus()
+            fail(error, retainedAudioURL: nil)
+        }
     }
 
     private func stopAndTranscribe() async {
@@ -1396,106 +1900,524 @@ final class DictationCoordinator: ObservableObject {
                 "Recording stop/finalization completed in \(String(describing: stopStarted.duration(to: .now)), privacy: .public)"
             )
         }
-        catch { sessionRecorder = nil; fail(error, retainedAudioURL: nil); return }
+        catch {
+            sessionRecorder = nil
+            await releaseQueueReservation()
+            fail(error, retainedAudioURL: nil)
+            return
+        }
         recorder.previewBufferHandler = nil
         sessionRecorder = nil
         livePreviewCoordinator.finish()
         latestOutputURL = recording.url
-        guard let target = focusTarget else { fail(TextInsertionError.targetUnavailable, retainedAudioURL: recording.url); return }
+        guard let target = focusTarget else {
+            await releaseQueueReservation()
+            fail(TextInsertionError.targetUnavailable, retainedAudioURL: recording.url)
+            return
+        }
 
         var record = makeRecord(from: recording, target: target, status: .recorded)
         do { try await historyStore.upsert(record); await refreshHistory() }
         catch {
+            await releaseQueueReservation()
             fail(error, retainedAudioURL: recording.url,
                  message: "The recording was saved, but its history entry could not be created: \(error.localizedDescription)")
             return
         }
 
-        state = .transcribing
         do {
-            record = try await transcriptionRunner.run(
-                record: record,
-                audioURL: recording.url,
-                language: record.language,
-                maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
-                provider: try activeProvider(model: record.modelID),
-                progress: { [weak self] progress in
-                    self?.overlay.show(status: .longForm(progress.statusText))
-                }
-            )
-            state = .enhancing
-            overlay.show(status: .processing)
-            let style = writingStyles.first { $0.id == record.writingStyleID && $0.isEnabled }
-                ?? BuiltInWritingStyles.all[0]
-            record = try await smartDictationPipeline.run(
-                record: record,
-                spokenFormattingEnabled: record.spokenFormattingEnabled,
-                dictionaryEntries: settings.personalDictionaryEnabled ? dictionaryEntries : [],
-                style: style,
-                enhancementModel: settings.enhancementModel,
-                fallback: settings.smartDictationFallback,
-                enhancer: style.usesAI ? try activeEnhancer() : nil
-            )
-            state = .inserting
-            overlay.show(status: .inserting)
-            record.status = .inserting; record.updatedAt = Date()
-            try await historyStore.upsert(record)
-            let outputText = record.finalText ?? record.originalTranscript ?? ""
-            var successMessage = "Text inserted"
-            if record.audioSource == .systemAudio {
-                let copied = copyToClipboard(outputText)
-                latestOutputNotice = copied
-                    ? "System Audio transcript copied to the clipboard."
-                    : "System Audio transcript is available in History."
-                successMessage = copied
-                    ? "Text inserted · copied to clipboard"
-                    : "Text inserted · clipboard unavailable"
-            }
-            try await makeInserter().insert(outputText, into: target)
-
-            // The target application has accepted the text. Reflect that immediately;
-            // rewriting the JSON History must not leave a completed insertion looking
-            // as if it were still processing.
-            focusTarget = nil
-            state = .success
-            overlay.show(status: .success(message: successMessage))
-            sessionConfiguration = nil
-            scheduleOverlayDismiss(after: .milliseconds(600), transitionToIdle: true)
-
-            record.status = .completed; record.errorCategory = nil; record.errorMessage = nil; record.updatedAt = Date()
+            let job = try await makeJob(record: record)
+            queueSnapshot = try await processingQueue.commit(job)
+            hasQueueReservation = false
+            record.jobID = job.id
+            record.jobStatus = job.status
+            record.queueSequence = job.queueSequence
+            record.updatedAt = Date()
             do {
-                try await historyStore.upsert(record)
+                // The recording and job manifest are durable now. Keep this
+                // summary in memory so queue startup does not rewrite the full
+                // JSON History a second time before transcription begins.
+                try await historyStore.stage(record)
             } catch {
-                setupMessage = "Text was inserted, but the completed History status could not be saved."
                 FlowLogger.app.error(
-                    "Post-insertion History update failed: \(error.localizedDescription, privacy: .public)"
+                    "Queued job summary could not be written to History: \(error.localizedDescription, privacy: .public)"
                 )
             }
-        } catch let failure as TranscriptionRunFailure {
-            record = failure.record
-            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
-            fail(failure.underlyingError, retainedAudioURL: recording.url)
-        } catch let failure as TranscriptionPersistenceFailure {
-            record = failure.record
-            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
-            fail(failure, retainedAudioURL: recording.url)
-        } catch let failure as SmartDictationRunFailure {
-            record = failure.record
-            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
-            fail(
-                failure.underlyingError,
-                retainedAudioURL: recording.url,
-                message: "Smart Dictation failed. Your original and locally processed text were kept. \(failure.underlyingError.localizedDescription)"
-            )
+            inMemoryJobTargets[job.id] = target
+            focusTarget = nil
+            // The recording is durable, but no text has been inserted yet. Using the
+            // success state here made longer local runs look like a stuck "Inserted".
+            state = .transcribing
+            overlay.show(status: .processing)
+            sessionConfiguration = nil
+            // Keep the persistent worker sequential, but release the active
+            // toggle as soon as insertion feedback has completed. Final History
+            // and manifest writes continue in the worker and remain recoverable.
+            await withCheckedContinuation { continuation in
+                jobInteractionWaiters[job.id] = continuation
+                startJobProcessingIfNeeded()
+            }
+            if state == .success {
+                state = .idle
+            }
         } catch {
-            record.status = record.originalTranscript == nil ? .transcriptionFailed : .insertionFailed
-            record.errorCategory = DictationFailureClassifier.category(for: error)
-            record.errorMessage = error.localizedDescription; record.updatedAt = Date()
-            await persistBestEffort(record, context: "dictation failure")
-            copySystemAudioTranscriptForRecovery(record, recordingURL: recording.url)
+            await releaseQueueReservation()
             fail(error, retainedAudioURL: recording.url)
         }
-        await refreshHistory()
+        Task { [weak self] in await self?.refreshHistory() }
+    }
+
+    private func makeJob(record: DictationRecord) async throws -> DictationJob {
+        guard let configuration = sessionConfiguration else {
+            throw DictationQueueError.reservationMissing
+        }
+        let executionLocation = configuration.providerID == .local
+            ? TranscriptionExecutionLocation.local : .cloud
+        let persisted = PersistedDictationConfiguration(
+            providerID: configuration.providerID,
+            engineID: configuration.engineID,
+            modelID: configuration.transcriptionModel,
+            executionLocation: executionLocation,
+            language: configuration.language.apiValue,
+            writingStyleID: configuration.writingStyleID,
+            spokenFormattingEnabled: configuration.spokenFormattingEnabled,
+            personalDictionaryEnabled: settings.personalDictionaryEnabled,
+            insertionPreference: configuration.insertionPreference,
+            privacyMode: configuration.privacyMode,
+            cloudEnhancementEnabled: settings.cloudEnhancementEnabled,
+            enhancementModel: settings.enhancementModel,
+            enhancementFallback: settings.smartDictationFallback,
+            profileID: configuration.profileID
+        )
+        let now = Date()
+        return DictationJob(
+            schemaVersion: DictationJob.currentSchemaVersion,
+            id: UUID(),
+            recordID: record.id,
+            createdAt: now,
+            updatedAt: now,
+            queueSequence: try await jobStore.nextSequence(),
+            audioRelativePath: record.audioRelativePath,
+            audioSource: record.audioSource,
+            providerID: configuration.providerID.rawValue,
+            engineID: configuration.engineID,
+            modelID: configuration.transcriptionModel,
+            executionLocation: executionLocation,
+            language: configuration.language.apiValue,
+            targetBundleIdentifier: record.targetBundleIdentifier,
+            targetApplicationName: record.targetApplicationName,
+            effectiveConfiguration: persisted,
+            status: .queued,
+            correctionSummary: nil,
+            insertionAttemptCount: 0,
+            automaticInsertionCompleted: false,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+    }
+
+    private func recoverJobQueue() async {
+        do {
+            _ = try await jobStore.normalizeInterrupted()
+            queueSnapshot = try await processingQueue.snapshot()
+            startJobProcessingIfNeeded()
+        } catch {
+            FlowLogger.app.error(
+                "Job queue recovery failed: \(error.localizedDescription, privacy: .public)"
+            )
+            setupMessage = "Some queued dictations need review in History."
+        }
+    }
+
+    private func releaseQueueReservation() async {
+        guard hasQueueReservation else { return }
+        do {
+            queueSnapshot = try await processingQueue.releaseRecordingSlot()
+        } catch {
+            FlowLogger.app.error(
+                "Queue reservation release failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        hasQueueReservation = false
+    }
+
+    private func startJobProcessingIfNeeded() {
+        guard jobProcessingTask == nil else { return }
+        jobProcessingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.drainJobQueue()
+            // Clear the task before re-reading the queue. A recording can be
+            // committed exactly while the previous drain loop is exiting.
+            self.jobProcessingTask = nil
+            do {
+                self.queueSnapshot = try await self.processingQueue.snapshot()
+                if self.queueSnapshot.queuedCount > 0 {
+                    self.startJobProcessingIfNeeded()
+                }
+            } catch {
+                FlowLogger.app.error(
+                    "Could not refresh dictation queue after processing: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func persistCompletedHistoryAndRemoveManifest(jobID: UUID) {
+        pendingCompletionPersistenceJobIDs.insert(jobID)
+        guard completionPersistenceTask == nil else { return }
+        completionPersistenceTask = Task { [weak self] in
+            await self?.runCompletionPersistenceLoop()
+        }
+    }
+
+    private func runCompletionPersistenceLoop() async {
+        defer { completionPersistenceTask = nil }
+        while !pendingCompletionPersistenceJobIDs.isEmpty {
+            let jobIDs = pendingCompletionPersistenceJobIDs
+            pendingCompletionPersistenceJobIDs.removeAll()
+            let startedAt = Date()
+            do {
+                // One snapshot covers every completion accumulated while the
+                // previous flush was running. This prevents detached full-file
+                // writes from building an unbounded serial backlog.
+                try await historyStore.flush()
+                for jobID in jobIDs {
+                    try await jobStore.delete(id: jobID)
+                }
+                FlowLogger.transcription.info(
+                    "Background completion persistence flushed \(jobIDs.count, privacy: .public) job(s) in \(Self.elapsedSeconds(since: startedAt), privacy: .public)s"
+                )
+            } catch {
+                // Keeping an undeleted manifest is intentional: on restart the
+                // recording can be recovered conservatively.
+                FlowLogger.app.error(
+                    "Background completion persistence failed; recovery manifest retained: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func drainJobQueue() async {
+        while !Task.isCancelled {
+            let job: DictationJob
+            do {
+                guard let next = try await processingQueue.next() else { break }
+                job = next
+                queueSnapshot = try await processingQueue.snapshot()
+            } catch {
+                FlowLogger.app.error(
+                    "Could not read next dictation job: \(error.localizedDescription, privacy: .public)"
+                )
+                break
+            }
+
+            let completed = await process(job)
+            do {
+                if completed.status == .completed,
+                   stagedCompletionJobIDs.remove(completed.id) != nil {
+                    // Release the interactive queue immediately. The manifest
+                    // remains in its conservative `inserting` state until the
+                    // completed History snapshot is safely on disk.
+                    await processingQueue.releaseAfterInsertion(id: completed.id)
+                    queueSnapshot.processingCount = 0
+                    allowsRecordingDuringCompletionPersistence = false
+                    persistCompletedHistoryAndRemoveManifest(jobID: completed.id)
+                    FlowLogger.transcription.info(
+                        "Job \(job.id, privacy: .public) handed off for background completion persistence"
+                    )
+                } else {
+                    let queueFinishStartedAt = Date()
+                    queueSnapshot = try await processingQueue.didFinish(completed)
+                    if queueSnapshot.totalActiveCount == 0 {
+                        allowsRecordingDuringCompletionPersistence = false
+                    }
+                    FlowLogger.transcription.info(
+                        "Job \(job.id, privacy: .public) queue finalization completed in \(Self.elapsedSeconds(since: queueFinishStartedAt), privacy: .public)s"
+                    )
+                }
+                if completed.status == .cancelled {
+                    let manifestDeletionStartedAt = Date()
+                    try await jobStore.delete(id: completed.id)
+                    FlowLogger.transcription.info(
+                        "Job \(job.id, privacy: .public) manifest deletion completed in \(Self.elapsedSeconds(since: manifestDeletionStartedAt), privacy: .public)s"
+                    )
+                }
+            } catch {
+                FlowLogger.app.error(
+                    "Could not finish dictation job \(job.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                break
+            }
+            inMemoryJobTargets[job.id] = nil
+            let historyRefreshStartedAt = Date()
+            await refreshHistory()
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) History refresh completed in \(Self.elapsedSeconds(since: historyRefreshStartedAt), privacy: .public)s"
+            )
+        }
+    }
+
+    private func process(_ input: DictationJob) async -> DictationJob {
+        var job = input
+        var record: DictationRecord?
+        let jobStartedAt = Date()
+        FlowLogger.transcription.info(
+            "Job \(job.id, privacy: .public) started after waiting \(Self.elapsedSeconds(since: job.createdAt), privacy: .public)s in the queue"
+        )
+        do {
+            let recordLookupStartedAt = Date()
+            guard var currentRecord = try await historyStore.record(id: job.recordID) else {
+                throw DictationHistoryError.recordNotFound
+            }
+            record = currentRecord
+            let audioURL = try audioURL(for: currentRecord)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) record lookup and audio resolution completed in \(Self.elapsedSeconds(since: recordLookupStartedAt), privacy: .public)s"
+            )
+
+            let statePersistenceStartedAt = Date()
+            job.status = .transcribing
+            job.updatedAt = Date()
+            try await jobStore.update(job)
+            if !isRecording {
+                state = .transcribing
+                overlay.show(status: .processing)
+            }
+            currentRecord.jobID = job.id
+            currentRecord.jobStatus = job.status
+            currentRecord.queueSequence = job.queueSequence
+            currentRecord.updatedAt = Date()
+            try await historyStore.stage(currentRecord)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) pre-transcription state persistence completed in \(Self.elapsedSeconds(since: statePersistenceStartedAt), privacy: .public)s"
+            )
+            if !isRecording {
+                let providerStatus = job.providerID == TranscriptionProviderID.local.rawValue
+                    ? "Transcribing on this Mac…" : "Waiting for OpenAI…"
+                overlay.show(status: .longForm(providerStatus))
+            }
+            let providerResolutionStartedAt = Date()
+            let provider = try await activeProvider(
+                providerID: TranscriptionProviderID(rawValue: job.providerID),
+                model: job.modelID,
+                policy: NetworkPolicy(
+                    mode: job.effectiveConfiguration.privacyMode,
+                    cloudEnhancementEnabled: job.effectiveConfiguration.cloudEnhancementEnabled
+                )
+            )
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) provider resolution completed in \(Self.elapsedSeconds(since: providerResolutionStartedAt), privacy: .public)s"
+            )
+            let transcriptionStartedAt = Date()
+            currentRecord = try await transcriptionRunner.run(
+                record: currentRecord,
+                audioURL: audioURL,
+                language: job.language,
+                maximumAttempts: settings.automaticRetryEnabled ? 3 : 1,
+                provider: provider,
+                deferSuccessfulPersistence: true,
+                progress: { [weak self] progress in
+                    guard let self, !self.isRecording else { return }
+                    self.overlay.show(status: .longForm(progress.statusText))
+                }
+            )
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) transcription stage completed in \(Self.elapsedSeconds(since: transcriptionStartedAt), privacy: .public)s using \(job.providerID, privacy: .public)/\(job.modelID, privacy: .public)"
+            )
+            record = currentRecord
+
+            let correctionStartedAt = Date()
+            job.status = .correcting
+            job.updatedAt = Date()
+            try await jobStore.update(job)
+            let correctionResult = InlineCorrectionProcessor().process(
+                currentRecord.originalTranscript ?? "",
+                language: currentRecord.language,
+                protectedTerms: job.effectiveConfiguration.personalDictionaryEnabled
+                    ? configurationDictionaryTerms(for: currentRecord.language) : []
+            )
+            currentRecord.correctedTranscript = correctionResult.text
+            currentRecord.correctionSummary = correctionResult.summary
+            currentRecord.jobStatus = job.status
+            currentRecord.updatedAt = Date()
+            job.correctionSummary = correctionResult.summary
+            try await historyStore.stage(currentRecord)
+            try await jobStore.update(job)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) local correction stage completed in \(Self.elapsedSeconds(since: correctionStartedAt), privacy: .public)s"
+            )
+            record = currentRecord
+
+            job.status = .formatting
+            job.updatedAt = Date()
+            try await jobStore.update(job)
+            currentRecord.jobStatus = job.status
+            let configuration = job.effectiveConfiguration
+            let style = writingStyles.first {
+                $0.id == configuration.writingStyleID && $0.isEnabled
+            } ?? BuiltInWritingStyles.all[0]
+            let enhancementPolicy = NetworkPolicy(
+                mode: configuration.privacyMode,
+                cloudEnhancementEnabled: configuration.cloudEnhancementEnabled
+            )
+            let enhancementAllowed = enhancementPolicy.allows(.enhancement)
+            if !isRecording, style.usesAI, enhancementAllowed {
+                state = .enhancing
+                overlay.show(status: .longForm("Improving text…"))
+            }
+            let formattingStartedAt = Date()
+            currentRecord = try await smartDictationPipeline.run(
+                record: currentRecord,
+                spokenFormattingEnabled: configuration.spokenFormattingEnabled,
+                dictionaryEntries: configuration.personalDictionaryEnabled ? dictionaryEntries : [],
+                style: style,
+                enhancementModel: configuration.enhancementModel,
+                fallback: configuration.enhancementFallback,
+                enhancer: style.usesAI && enhancementAllowed
+                    ? try activeEnhancer(policy: enhancementPolicy) : nil,
+                enhancementAllowed: enhancementAllowed,
+                deferSuccessfulPersistence: true
+            )
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) writing-style stage completed in \(Self.elapsedSeconds(since: formattingStartedAt), privacy: .public)s; style=\(style.name, privacy: .public), AI=\(style.usesAI, privacy: .public)"
+            )
+            record = currentRecord
+
+            let outputText = currentRecord.finalText ?? currentRecord.originalTranscript ?? ""
+            guard !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw TranscriptionProviderError.emptyTranscript
+            }
+            job.status = .readyToInsert
+            job.updatedAt = Date()
+            try await jobStore.update(job)
+
+            guard let target = inMemoryJobTargets[job.id], target.isAvailable else {
+                _ = copyToClipboard(outputText)
+                currentRecord.status = .insertionUnknown
+                currentRecord.jobStatus = .insertionDeferred
+                currentRecord.errorCategory = .interrupted
+                currentRecord.errorMessage = "Automatic insertion was deferred because the original target is no longer safely available."
+                currentRecord.updatedAt = Date()
+                try await historyStore.upsert(currentRecord)
+                job.status = .insertionDeferred
+                job.lastErrorCategory = .interrupted
+                job.lastErrorMessage = currentRecord.errorMessage
+                job.updatedAt = Date()
+                signalJobInteractionCompleted(job.id)
+                return job
+            }
+
+            job.status = .inserting
+            job.insertionAttemptCount += 1
+            job.updatedAt = Date()
+            try await jobStore.update(job)
+            currentRecord.status = .inserting
+            currentRecord.jobStatus = .inserting
+            currentRecord.updatedAt = Date()
+            try await historyStore.stage(currentRecord)
+            if !isRecording {
+                overlay.show(status: .inserting)
+            }
+            let insertionStartedAt = Date()
+            try await makeInserter(
+                preference: job.effectiveConfiguration.insertionPreference
+            ).insert(outputText, into: target)
+            FlowLogger.insertion.info(
+                "Job \(job.id, privacy: .public) insertion stage completed in \(Self.elapsedSeconds(since: insertionStartedAt), privacy: .public)s"
+            )
+
+            job.automaticInsertionCompleted = true
+            job.status = .completed
+            job.lastErrorCategory = nil
+            job.lastErrorMessage = nil
+            job.updatedAt = Date()
+            currentRecord.status = .completed
+            currentRecord.jobStatus = .completed
+            currentRecord.errorCategory = nil
+            currentRecord.errorMessage = nil
+            currentRecord.updatedAt = Date()
+
+            if currentRecord.audioSource == .systemAudio {
+                _ = copyToClipboard(outputText)
+                latestOutputNotice = "System Audio transcript copied to the clipboard."
+            }
+            // The paste has already completed at this point. Complete the visible
+            // UI lifecycle before starting durable persistence. In practice, a
+            // slow atomic History write can delay Main Actor timers even when the
+            // write itself runs on a background queue.
+            if !isRecording {
+                let message = currentRecord.audioSource == .systemAudio
+                    ? "Text inserted · copied to clipboard" : "Text inserted"
+                presentSuccessfulInsertion(message: message)
+            }
+            signalJobInteractionCompleted(job.id)
+            // The completed state is immediately visible in the actor-backed
+            // History. The disk flush is handed off after the active queue slot
+            // has been released, so slow JSON or filesystem work cannot retain
+            // the hotkey transition or the success overlay.
+            try await historyStore.stage(currentRecord)
+            stagedCompletionJobIDs.insert(job.id)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) interaction completed in \(Self.elapsedSeconds(since: jobStartedAt), privacy: .public)s"
+            )
+            return job
+        } catch let failure as TranscriptionRunFailure {
+            record = failure.record
+            job.lastErrorCategory = DictationFailureClassifier.category(for: failure.underlyingError)
+            job.lastErrorMessage = failure.underlyingError.localizedDescription
+        } catch let failure as TranscriptionPersistenceFailure {
+            record = failure.record
+            job.lastErrorCategory = .sessionPersistence
+            job.lastErrorMessage = failure.localizedDescription
+        } catch let failure as SmartDictationRunFailure {
+            record = failure.record
+            job.lastErrorCategory = DictationFailureClassifier.category(for: failure.underlyingError)
+            job.lastErrorMessage = failure.underlyingError.localizedDescription
+        } catch {
+            job.lastErrorCategory = DictationFailureClassifier.category(for: error)
+            job.lastErrorMessage = error.localizedDescription
+        }
+
+        job.status = .failed
+        job.updatedAt = Date()
+        if var failedRecord = record {
+            failedRecord.jobID = job.id
+            failedRecord.jobStatus = .failed
+            failedRecord.queueSequence = job.queueSequence
+            failedRecord.errorCategory = job.lastErrorCategory
+            failedRecord.errorMessage = job.lastErrorMessage
+            failedRecord.updatedAt = job.updatedAt
+            try? await historyStore.upsert(failedRecord)
+            record = failedRecord
+        }
+        if let record, let url = try? audioURL(for: record) {
+            copySystemAudioTranscriptForRecovery(record, recordingURL: url)
+        }
+        if !isRecording {
+            let message = job.lastErrorMessage ?? "Dictation processing failed"
+            let retainedURL = record.flatMap { try? audioURL(for: $0) }
+            latestOutputNotice = "A queued dictation needs attention in History: \(message)"
+            // A transcription failure is terminal for this job. Leaving the
+            // coordinator in `.transcribing` kept source/profile controls locked
+            // after silent microphone or System Audio recordings.
+            state = .failed(message: message, retainedAudioURL: retainedURL)
+            overlay.show(status: .error(message))
+            scheduleOverlayDismiss(after: .seconds(3), transitionToIdle: false)
+        }
+        signalJobInteractionCompleted(job.id)
+        return job
+    }
+
+    nonisolated private static func elapsedSeconds(since date: Date) -> String {
+        String(format: "%.3f", max(0, Date().timeIntervalSince(date)))
+    }
+
+    private func configurationDictionaryTerms(for language: String?) -> [String] {
+        dictionaryEntries
+            .filter { entry in
+                entry.isEnabled && (entry.language == nil || language == nil || entry.language == language)
+            }
+            .flatMap { [$0.spokenForm, $0.replacement] }
     }
 
     private func insertStoredText(_ text: String, record: DictationRecord, target: FocusTarget) async {
@@ -1539,7 +2461,8 @@ final class DictationCoordinator: ObservableObject {
             status: status,
             audioRelativePath: (try? audioStore.relativePath(for: recording.url)) ?? recording.url.path,
             audioFileSize: size,
-            providerID: "OpenAI",
+            providerID: sessionConfiguration?.providerID.rawValue
+                ?? settings.transcriptionProviderID.rawValue,
             modelID: sessionConfiguration?.transcriptionModel ?? settings.transcriptionModel,
             language: (sessionConfiguration?.language ?? settings.transcriptionLanguage).apiValue,
             targetBundleIdentifier: target?.bundleIdentifier,
@@ -1568,14 +2491,19 @@ final class DictationCoordinator: ObservableObject {
             ? URL(fileURLWithPath: record.audioRelativePath)
             : try audioStore.url(forRelativePath: record.audioRelativePath)
     }
-    private func makeInserter() -> TextInserting {
+    private func makeInserter(preference: InsertionPreference? = nil) -> TextInserting {
         if let injectedInserter { return injectedInserter }
-        let clipboard = PasteboardTextInserter(
-            pasteboard: .general,
-            restoreDelay: .milliseconds(Int(settings.clipboardRestoreDelay * 1_000))
+        pasteboardInserter.updateRestoreDelay(
+            .milliseconds(Int(settings.clipboardRestoreDelay * 1_000))
         )
-        if sessionConfiguration?.insertionPreference == .clipboard { return clipboard }
-        return FallbackTextInserter(direct: AccessibilityTextInserter(), clipboard: clipboard)
+        let resolvedPreference = preference ?? sessionConfiguration?.insertionPreference ?? .automatic
+        if !resolvedPreference.attemptsDirectAccessibility {
+            return pasteboardInserter
+        }
+        return FallbackTextInserter(
+            direct: AccessibilityTextInserter(),
+            clipboard: pasteboardInserter
+        )
     }
 
     private func prepareLivePreview() {
@@ -1654,8 +2582,38 @@ final class DictationCoordinator: ObservableObject {
         }
         return nil
     }
-    private func activeProvider(model preferredModel: String? = nil) throws -> any TranscriptionProvider {
+    private func activeProvider(
+        providerID preferredProviderID: TranscriptionProviderID? = nil,
+        model preferredModel: String? = nil,
+        policy preferredPolicy: NetworkPolicy? = nil
+    ) async throws -> any TranscriptionProvider {
         if let injectedProvider { return injectedProvider }
+        let providerID = preferredProviderID ?? settings.transcriptionProviderID
+        let policy = preferredPolicy ?? NetworkPolicy(
+            mode: settings.privacyMode,
+            cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+        )
+        if providerID == .local {
+            let availability = providerRegistry.availability(for: .local)
+            guard availability.isAvailable else {
+                throw TranscriptionProviderError.providerUnavailable(
+                    reason: availability.reason ?? "Local transcription is unavailable."
+                )
+            }
+            guard case .installed = await localModelManager.refreshState() else {
+                throw TranscriptionProviderError.localModelMissing(
+                    modelID: preferredModel ?? settings.localTranscriptionModelID
+                )
+            }
+            if let cachedLocalProvider { return cachedLocalProvider }
+            let provider = FluidAudioTranscriptionProvider(
+                modelDirectory: await localModelManager.activeDirectory,
+                modelID: preferredModel ?? settings.localTranscriptionModelID
+            )
+            cachedLocalProvider = provider
+            return provider
+        }
+        try policy.requirePermission(for: .transcription)
         let environmentKey = environment["OPENAI_API_KEY"]
         let keychainKey = environmentKey?.isEmpty == false ? nil : try keychainAPIKey()
         guard let key = [environmentKey, keychainKey].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
@@ -1665,7 +2623,19 @@ final class DictationCoordinator: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let model = environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]?.isEmpty == false
             ? environment["FLOWDICTATE_TRANSCRIPTION_MODEL"]! : (configured.isEmpty ? "gpt-4o-mini-transcribe" : configured)
-        return OpenAITranscriptionProvider(apiKey: key, model: model)
+        if let cachedOpenAIProvider, cachedOpenAIProviderModel == model {
+            return cachedOpenAIProvider
+        }
+        let provider = OpenAITranscriptionProvider(apiKey: key, model: model)
+        cachedOpenAIProvider = provider
+        cachedOpenAIProviderModel = model
+        return provider
+    }
+
+    private func invalidateCachedOpenAIRuntime() {
+        cachedOpenAIProvider = nil
+        cachedOpenAIProviderModel = nil
+        cachedOpenAIEnhancer = nil
     }
 
     private var selectedWritingStyle: WritingStyleProfile {
@@ -1678,9 +2648,15 @@ final class DictationCoordinator: ObservableObject {
             $0.isEnabled && $0.bundleIdentifier == target.bundleIdentifier
         }
         return EffectiveDictationConfiguration(
+            providerID: profile?.transcriptionProviderID ?? settings.transcriptionProviderID,
+            engineID: (profile?.transcriptionProviderID ?? settings.transcriptionProviderID) == .local
+                ? TranscriptionProviderRegistry.local.capabilities.engineID
+                : TranscriptionProviderRegistry.openAI.capabilities.engineID,
             language: profile?.language ?? settings.transcriptionLanguage,
             transcriptionModel: profile?.transcriptionModel?.trimmingCharacters(in: .whitespacesAndNewlines)
-                .nilIfEmpty ?? settings.transcriptionModel,
+                .nilIfEmpty ?? ((profile?.transcriptionProviderID ?? settings.transcriptionProviderID) == .local
+                    ? settings.localTranscriptionModelID : settings.transcriptionModel),
+            privacyMode: settings.privacyMode,
             writingStyleID: profile?.writingStyleID ?? settings.writingStyleID,
             spokenFormattingEnabled: profile?.spokenFormattingEnabled
                 ?? settings.spokenFormattingEnabled,
@@ -1689,14 +2665,21 @@ final class DictationCoordinator: ObservableObject {
         )
     }
 
-    private func activeEnhancer() throws -> any TranscriptEnhancing {
+    private func activeEnhancer(policy: NetworkPolicy? = nil) throws -> any TranscriptEnhancing {
         if let injectedEnhancer { return injectedEnhancer }
+        try (policy ?? NetworkPolicy(
+            mode: settings.privacyMode,
+            cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+        )).requirePermission(for: .enhancement)
         let environmentKey = environment["OPENAI_API_KEY"]
         let keychainKey = environmentKey?.isEmpty == false ? nil : try keychainAPIKey()
         guard let key = [environmentKey, keychainKey].compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
             throw TranscriptionProviderError.missingAPIKey
         }
-        return OpenAITranscriptEnhancer(apiKey: key)
+        if let cachedOpenAIEnhancer { return cachedOpenAIEnhancer }
+        let enhancer = transcriptEnhancerFactory(key)
+        cachedOpenAIEnhancer = enhancer
+        return enhancer
     }
 
     private func chooseSmartDictationExport(
@@ -1774,6 +2757,7 @@ final class DictationCoordinator: ObservableObject {
         focusTarget = nil; audioLevel = 0
         sessionRecorder = nil
         sessionConfiguration = nil
+        endCriticalInteractionActivityIfNeeded()
         overlay.show(status: .error(message))
         scheduleOverlayDismiss(after: .seconds(3), transitionToIdle: false)
         FlowLogger.app.error("Dictation failed: \(message, privacy: .public)")
@@ -1785,6 +2769,30 @@ final class DictationCoordinator: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             overlay.hide()
             if transitionToIdle, state == .success { state = .idle }
+        }
+    }
+
+    /// Presents confirmation without making job completion wait for a UI timer.
+    /// This keeps a delayed Main Actor wake-up from holding the next dictation.
+    private func presentSuccessfulInsertion(message: String) {
+        state = .success
+        overlay.show(status: .success(message: message))
+        // The completed job still owns its durable manifest until History has
+        // finished writing. A new recording may nevertheless reserve the next
+        // queue slot; it cannot begin processing until this job leaves the drain.
+        allowsRecordingDuringCompletionPersistence = true
+        scheduleOverlayDismiss(after: .milliseconds(350), transitionToIdle: true)
+        FlowLogger.app.notice("Inserted interaction released; overlay dismissal scheduled independently")
+    }
+
+    private func signalJobInteractionCompleted(_ jobID: UUID) {
+        endCriticalInteractionActivityIfNeeded()
+        if let continuation = jobInteractionWaiters.removeValue(forKey: jobID) {
+            continuation.resume()
+        } else if state == .success {
+            // Recovered jobs have no foreground stop task waiting to perform the
+            // final state transition.
+            state = .idle
         }
     }
 }

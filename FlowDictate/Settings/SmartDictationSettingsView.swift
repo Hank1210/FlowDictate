@@ -41,17 +41,29 @@ struct SmartDictationSettingsView: View {
                         Button("Manage Writing Styles…") { showingStyles = true }
 
                         if selectedStyle.usesAI {
-                            Label(
-                                "This style sends text—not audio—to OpenAI and creates one additional API request per dictation.",
-                                systemImage: "sparkles"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.indigo)
-                            TextField("Enhancement model", text: $settings.enhancementModel)
-                            Picker("If enhancement fails", selection: $settings.smartDictationFallback) {
-                                ForEach(SmartDictationFallback.allCases) { option in
-                                    Text(option.title).tag(option)
+                            if enhancementAllowed {
+                                Label(
+                                    "This style sends text—not audio—to OpenAI and creates one additional API request per dictation.",
+                                    systemImage: "sparkles"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.indigo)
+                                Text("The additional cloud request can noticeably extend Processing. Choose Original for the fastest insertion.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                TextField("Enhancement model", text: $settings.enhancementModel)
+                                Picker("If enhancement fails", selection: $settings.smartDictationFallback) {
+                                    ForEach(SmartDictationFallback.allCases) { option in
+                                        Text(option.title).tag(option)
+                                    }
                                 }
+                            } else {
+                                Label(
+                                    "\(selectedStyle.name) is inactive because OpenAI improvement is not permitted. FlowDictate will insert the locally processed text.",
+                                    systemImage: "cloud.slash"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                             }
                         } else {
                             Label("Original uses no additional AI request.", systemImage: "lock.shield")
@@ -103,6 +115,13 @@ struct SmartDictationSettingsView: View {
     private var selectedStyle: WritingStyleProfile {
         coordinator.writingStyles.first { $0.id == settings.writingStyleID }
             ?? BuiltInWritingStyles.all[0]
+    }
+
+    private var enhancementAllowed: Bool {
+        NetworkPolicy(
+            mode: settings.privacyMode,
+            cloudEnhancementEnabled: settings.cloudEnhancementEnabled
+        ).allows(.enhancement)
     }
 
     private var header: some View {

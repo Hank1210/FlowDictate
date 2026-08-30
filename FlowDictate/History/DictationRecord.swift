@@ -74,6 +74,12 @@ enum DictationErrorCategory: String, Codable, Sendable {
     case rateLimit
     case providerTemporary
     case providerPermanent
+    case providerUnavailable
+    case localModelMissing
+    case localModelCorrupt
+    case unsupportedLanguage
+    case localInitialization
+    case networkBlocked
     case insertion
     case directInsertionUnsupported
     case directInsertionUnknown
@@ -104,6 +110,8 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var audioSampleRate: Double = 0
     var audioChannelCount: Int = 0
     var originalTranscript: String?
+    var correctedTranscript: String? = nil
+    var correctionSummary: CorrectionSummary? = nil
     var formattedTranscript: String? = nil
     var dictionaryTranscript: String? = nil
     var finalText: String?
@@ -132,6 +140,9 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var completedTranscriptionSegmentCount: Int = 0
     var hasPartialTranscript: Bool = false
     var partialTranscript: String? = nil
+    var jobID: UUID? = nil
+    var jobStatus: DictationJobStatus? = nil
+    var queueSequence: Int64? = nil
     var cancelled: Bool
     var updatedAt: Date
     var schemaVersion: Int
@@ -159,6 +170,10 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     }
 
     nonisolated var isAutomaticallyProtected: Bool {
+        if let jobStatus,
+           ![DictationJobStatus.completed, .cancelled, .insertionDeferred].contains(jobStatus) {
+            return true
+        }
         if transcriptionSessionID != nil || hasPartialTranscript {
             return true
         }
@@ -266,7 +281,7 @@ extension DictationRecord {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, recordingStartedAt, recordingEndedAt, duration, status
         case audioRelativePath, audioFileSize, audioSource, audioSampleRate, audioChannelCount
-        case originalTranscript, formattedTranscript
+        case originalTranscript, correctedTranscript, correctionSummary, formattedTranscript
         case dictionaryTranscript, finalText, writingStyleID, processingStatus
         case enhancementProviderID, enhancementModelID, enhancementAttemptCount
         case enhancementErrorCategory, enhancementErrorMessage, dictionaryReplacementCount
@@ -275,6 +290,7 @@ extension DictationRecord {
         case errorCategory, errorCode, errorMessage, transcriptionSessionID
         case transcriptionSegmentCount, completedTranscriptionSegmentCount
         case hasPartialTranscript, partialTranscript
+        case jobID, jobStatus, queueSequence
         case cancelled, updatedAt, schemaVersion, archivedAt
     }
 
@@ -293,6 +309,8 @@ extension DictationRecord {
         audioSampleRate = try values.decodeIfPresent(Double.self, forKey: .audioSampleRate) ?? 0
         audioChannelCount = try values.decodeIfPresent(Int.self, forKey: .audioChannelCount) ?? 0
         originalTranscript = try values.decodeIfPresent(String.self, forKey: .originalTranscript)
+        correctedTranscript = try values.decodeIfPresent(String.self, forKey: .correctedTranscript)
+        correctionSummary = try values.decodeIfPresent(CorrectionSummary.self, forKey: .correctionSummary)
         formattedTranscript = try values.decodeIfPresent(String.self, forKey: .formattedTranscript)
         dictionaryTranscript = try values.decodeIfPresent(String.self, forKey: .dictionaryTranscript)
         finalText = try values.decodeIfPresent(String.self, forKey: .finalText)
@@ -327,6 +345,9 @@ extension DictationRecord {
         ) ?? 0
         hasPartialTranscript = try values.decodeIfPresent(Bool.self, forKey: .hasPartialTranscript) ?? false
         partialTranscript = try values.decodeIfPresent(String.self, forKey: .partialTranscript)
+        jobID = try values.decodeIfPresent(UUID.self, forKey: .jobID)
+        jobStatus = try values.decodeIfPresent(DictationJobStatus.self, forKey: .jobStatus)
+        queueSequence = try values.decodeIfPresent(Int64.self, forKey: .queueSequence)
         cancelled = try values.decode(Bool.self, forKey: .cancelled)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
         schemaVersion = FlowDictateVersion.dictationRecordSchema

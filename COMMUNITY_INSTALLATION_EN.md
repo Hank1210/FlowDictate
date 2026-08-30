@@ -27,14 +27,14 @@ Only approve FlowDictate if you received the ZIP file directly from someone you 
 ## First-time setup
 
 1. Choose the recordings folder. `Documents/Recordings` is recommended.
-2. Enter your own OpenAI API key. It is stored exclusively in the macOS Keychain.
+2. Choose transcription: on Apple Silicon, you can download the local Parakeet model and work without an API key. Alternatively, enter your own OpenAI API key; it is stored exclusively in the macOS Keychain. On Intel Macs, OpenAI remains the available final-transcription path.
 3. Grant Microphone and Accessibility permissions.
 4. Grant Speech Recognition only if you want to use the optional local Live Preview.
 5. To record system audio, allow FlowDictate under `System Settings → Privacy & Security → Screen & System Audio Recording`. Depending on your macOS version, the permission may be labelled `Screen Recording` or `System Audio Only`.
 6. Quit and reopen FlowDictate if macOS asks you to do so after granting a new permission.
 7. Configure your preferred keyboard shortcuts.
 
-The ZIP file does not contain an API key or any credentials belonging to the person who created it.
+The ZIP file contains neither an API key nor a speech model or any credentials belonging to the person who created it. The optional model download shows its source, size and license in Transcription settings.
 
 ## Updating
 
@@ -54,7 +54,7 @@ Always test the exact Community ZIP that will be published. A separately built o
 
 When updating from a version earlier than 3.2.0, existing History data is extended automatically. Before saving the new format for the first time, FlowDictate creates a one-time `dictations-pre-3.2.json` backup in the local History folder. Recordings and the selected recordings folder are not moved.
 
-Live Preview is optional and requires Apple's on-device speech recognition. Spoken formatting and the personal dictionary run locally. Only a writing style that explicitly uses AI sends the already transcribed text to OpenAI in an additional request.
+Live Preview is optional and requires Apple's on-device speech recognition. Local final transcription, spoken corrections, formatting and the personal dictionary run on the Mac. `Fully offline` blocks transcription, enhancement and update-check network access. Only an explicitly selected cloud path sends audio or text to OpenAI; a local failure never triggers an automatic cloud upload.
 
 ### Keychain access after an update
 

@@ -40,37 +40,52 @@ nonisolated final class OpenAITranscriptionProvider: TranscriptionProvider, @unc
             throw TranscriptionProviderError.missingAPIKey
         }
 
-        let prepared = try await uploadPreparer.prepare(request.audioURL)
-        defer { prepared.cleanup(fileManager: fileManager) }
-
-        let values = try prepared.fileURL.resourceValues(forKeys: [.fileSizeKey])
-        let audioByteCount = Int64(values.fileSize ?? 0)
-        guard audioByteCount >= Self.minimumAudioFileBytes else {
-            throw TranscriptionProviderError.audioFileContainsNoSamples
-        }
-        guard audioByteCount <= Self.maximumAudioFileBytes else {
-            throw TranscriptionProviderError.audioFileTooLarge(
-                actualBytes: audioByteCount,
-                maximumBytes: Self.maximumAudioFileBytes
-            )
-        }
-
         let boundary = "FlowDictate-\(UUID().uuidString)"
-        let multipart = try MultipartUploadFileBuilder(
-            boundary: boundary,
-            fileManager: fileManager
-        ).build(
-            fields: [
-                ("model", model),
-                ("language", request.language),
-                ("prompt", request.prompt)
-            ],
-            fileFieldName: "file",
-            filename: prepared.filename,
-            mimeType: prepared.mimeType,
-            sourceURL: prepared.fileURL
-        )
-        defer { multipart.cleanup(fileManager: fileManager) }
+        let upload = try await Task.detached(priority: .userInitiated) {
+            [uploadPreparer, fileManager, model] in
+            let prepared = try await uploadPreparer.prepare(request.audioURL)
+            do {
+                let values = try prepared.fileURL.resourceValues(forKeys: [.fileSizeKey])
+                let audioByteCount = Int64(values.fileSize ?? 0)
+                guard audioByteCount >= Self.minimumAudioFileBytes else {
+                    throw TranscriptionProviderError.audioFileContainsNoSamples
+                }
+                guard audioByteCount <= Self.maximumAudioFileBytes else {
+                    throw TranscriptionProviderError.audioFileTooLarge(
+                        actualBytes: audioByteCount,
+                        maximumBytes: Self.maximumAudioFileBytes
+                    )
+                }
+                let multipart = try MultipartUploadFileBuilder(
+                    boundary: boundary,
+                    fileManager: fileManager
+                ).build(
+                    fields: [
+                        ("model", model),
+                        ("language", request.language),
+                        ("prompt", request.prompt)
+                    ],
+                    fileFieldName: "file",
+                    filename: prepared.filename,
+                    mimeType: prepared.mimeType,
+                    sourceURL: prepared.fileURL
+                )
+                return PreparedOpenAIUpload(
+                    audio: prepared,
+                    multipart: multipart,
+                    audioByteCount: audioByteCount
+                )
+            } catch {
+                prepared.cleanup(fileManager: fileManager)
+                throw error
+            }
+        }.value
+        // Temporary-file removal can occasionally block for several seconds on
+        // macOS. The upload is already complete when this scope exits, so cleanup
+        // must not delay the transcript result or hold the next dictation.
+        defer {
+            OpenAIUploadCleanup.schedule(upload, fileManager: fileManager)
+        }
 
         var urlRequest = URLRequest(url: endpoint)
         urlRequest.httpMethod = "POST"
@@ -80,12 +95,12 @@ nonisolated final class OpenAITranscriptionProvider: TranscriptionProvider, @unc
             "multipart/form-data; boundary=\(boundary)",
             forHTTPHeaderField: "Content-Type"
         )
-        urlRequest.setValue(String(multipart.byteCount), forHTTPHeaderField: "Content-Length")
+        urlRequest.setValue(String(upload.multipart.byteCount), forHTTPHeaderField: "Content-Length")
 
         FlowLogger.transcription.info(
-            "Sending \(audioByteCount, privacy: .public) audio bytes for transcription"
+            "Sending \(upload.audioByteCount, privacy: .public) audio bytes for transcription"
         )
-        let (data, response) = try await session.upload(for: urlRequest, fromFile: multipart.url)
+        let (data, response) = try await session.upload(for: urlRequest, fromFile: upload.multipart.url)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw TranscriptionProviderError.invalidResponse
         }
@@ -105,6 +120,23 @@ nonisolated final class OpenAITranscriptionProvider: TranscriptionProvider, @unc
 
         FlowLogger.transcription.info("Transcription completed")
         return TranscriptionResult(text: text, provider: "OpenAI", model: model)
+    }
+}
+
+nonisolated struct PreparedOpenAIUpload: Sendable {
+    let audio: PreparedAudioUpload
+    let multipart: MultipartUploadFile
+    let audioByteCount: Int64
+}
+
+nonisolated enum OpenAIUploadCleanup {
+    static func schedule(_ upload: PreparedOpenAIUpload, fileManager: FileManager = .default) {
+        let fileManager = SerialFileManagerReference(fileManager)
+        Task.detached(priority: .utility) {
+            upload.multipart.cleanup(fileManager: fileManager.value)
+            upload.audio.cleanup(fileManager: fileManager.value)
+            FlowLogger.transcription.debug("Temporary OpenAI upload files cleaned")
+        }
     }
 }
 

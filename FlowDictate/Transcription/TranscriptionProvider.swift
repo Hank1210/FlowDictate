@@ -29,6 +29,12 @@ nonisolated enum TranscriptionProviderError: LocalizedError {
     case invalidResponse
     case emptyTranscript
     case server(statusCode: Int, message: String)
+    case providerUnavailable(reason: String)
+    case localModelMissing(modelID: String)
+    case localModelCorrupt(modelID: String)
+    case unsupportedLanguage(language: String)
+    case localInitializationFailed(message: String)
+    case networkBlocked(purpose: NetworkPurpose)
 
     var errorDescription: String? {
         switch self {
@@ -44,6 +50,18 @@ nonisolated enum TranscriptionProviderError: LocalizedError {
             "The transcription service returned no text."
         case let .server(statusCode, message):
             "Transcription failed (HTTP \(statusCode)): \(message)"
+        case let .providerUnavailable(reason):
+            reason
+        case let .localModelMissing(modelID):
+            "The local transcription model \(modelID) is not installed. Download it in Settings → Transcription."
+        case let .localModelCorrupt(modelID):
+            "The local transcription model \(modelID) could not be verified. Remove and download it again."
+        case let .unsupportedLanguage(language):
+            "The selected local transcription model does not support \(language)."
+        case let .localInitializationFailed(message):
+            "Local transcription could not start: \(message)"
+        case let .networkBlocked(purpose):
+            "The current privacy mode blocks the \(purpose.rawValue) network request. Change the privacy mode to continue."
         }
     }
 

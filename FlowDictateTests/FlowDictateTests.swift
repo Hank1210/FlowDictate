@@ -8,6 +8,7 @@
 import AppKit
 import AVFoundation
 import Carbon.HIToolbox
+import Combine
 import CoreAudio
 import Foundation
 import ServiceManagement
@@ -98,6 +99,36 @@ struct FlowDictateTests {
                 return
             }
         }
+    }
+
+    @Test func openAIReturnsBeforeSlowTemporaryFileCleanupFinishes() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateCleanupSource-\(UUID()).m4a")
+        try Data(repeating: 0x2A, count: 2_048).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SuccessfulOpenAIURLProtocol.self]
+        let fileManager = SlowRemovalFileManager(delay: 0.6)
+        let provider = OpenAITranscriptionProvider(
+            apiKey: "test-key",
+            session: URLSession(configuration: configuration),
+            uploadPreparer: PassThroughAudioUploadPreparer(),
+            fileManager: fileManager
+        )
+
+        let startedAt = ContinuousClock.now
+        let result = try await provider.transcribe(
+            TranscriptionRequest(audioURL: source, language: nil)
+        )
+        let elapsed = startedAt.duration(to: .now)
+
+        #expect(result.text == "Cleanup stays off the response path")
+        #expect(elapsed < .milliseconds(300))
+        for _ in 0..<100 where fileManager.removalCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fileManager.removalCount == 1)
     }
 
     @MainActor
@@ -202,6 +233,102 @@ struct FlowDictateTests {
         #expect(restored.livePreviewCharacterLimit == 320)
         #expect(restored.overlayPosition == .bottomCenter)
         #expect(restored.usageStatisticsResetDate == statisticsResetDate)
+    }
+
+    @MainActor
+    @Test func clipboardRestoreDelayIsClampedWhenLoadingLegacySettings() {
+        let suiteName = "FlowDictateClipboardDelay-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(13.0, forKey: "clipboardRestoreDelay")
+        #expect(AppSettings(defaults: defaults).clipboardRestoreDelay == 2.0)
+
+        defaults.set(0.05, forKey: "clipboardRestoreDelay")
+        #expect(AppSettings(defaults: defaults).clipboardRestoreDelay == 0.3)
+    }
+
+    @MainActor
+    @Test func privacyModeAndProviderRemainCompatible() {
+        let suiteName = "FlowDictateProviderPrivacy-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let settings = AppSettings(defaults: defaults)
+        settings.privacyMode = .offline
+        #expect(settings.transcriptionProviderID == .local)
+
+        settings.privacyMode = .cloudTranscription
+        #expect(settings.transcriptionProviderID == .openAI)
+
+        settings.transcriptionProviderID = .local
+        #expect(settings.privacyMode == .localWithOptionalCloudEnhancement)
+
+        settings.transcriptionProviderID = .openAI
+        #expect(settings.privacyMode == .cloudTranscription)
+    }
+
+    @MainActor
+    @Test func privacySelectionPublishesOneNormalizedProviderTransition() {
+        let suiteName = "FlowDictateAtomicProviderPrivacy-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        var observedModes: [PrivacyMode] = []
+        var observedProviders: [TranscriptionProviderID] = []
+        var cancellables: Set<AnyCancellable> = []
+
+        settings.$privacyMode.dropFirst().sink { observedModes.append($0) }
+            .store(in: &cancellables)
+        settings.$transcriptionProviderID.dropFirst().sink { observedProviders.append($0) }
+            .store(in: &cancellables)
+
+        settings.selectPrivacyMode(.offline)
+
+        #expect(observedModes == [.offline])
+        #expect(observedProviders == [.local])
+        #expect(settings.privacyMode == .offline)
+        #expect(settings.transcriptionProviderID == .local)
+    }
+
+    @Test func localModelPromotionMovesFluidAudioRepositoryAndPreservesReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateModelPromotion-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = LocalModelManager(modelsRoot: root)
+        let repository = await manager.repositoryDirectory
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: repository.appendingPathComponent("marker"))
+
+        let stagingRoot = repository.deletingLastPathComponent()
+            .appendingPathComponent("staging-test", isDirectory: true)
+        let stagedRepository = stagingRoot.appendingPathComponent(
+            LocalModelCatalog.parakeetV3.id,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: stagedRepository, withIntermediateDirectories: true)
+        try Data("new".utf8).write(to: stagedRepository.appendingPathComponent("marker"))
+
+        try await manager.promoteDownloadedModel(from: stagingRoot)
+
+        #expect(try String(contentsOf: repository.appendingPathComponent("marker"), encoding: .utf8) == "new")
+        #expect(!FileManager.default.fileExists(atPath: stagedRepository.path))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: repository.deletingLastPathComponent().path)
+        #expect(!leftovers.contains(where: { $0.hasPrefix("previous-") }))
+    }
+
+    @Test func removingLocalModelDeletesFluidAudioRepositoryRatherThanAnchor() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateModelRemoval-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = LocalModelManager(modelsRoot: root)
+        let repository = await manager.repositoryDirectory
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try Data("model".utf8).write(to: repository.appendingPathComponent("marker"))
+
+        try await manager.remove()
+
+        #expect(!FileManager.default.fileExists(atPath: repository.path))
     }
 
     @MainActor
@@ -391,6 +518,66 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func queuedAIStyleStagesAllHistoryUntilOneFinalFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateQueuedAIHistory-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("history.json")
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let pipeline = SmartDictationPipeline(historyStore: store)
+
+        let result = try await pipeline.run(
+            record: makeTranscribedRecord(text: "Locally staged input"),
+            spokenFormattingEnabled: false,
+            dictionaryEntries: [],
+            style: BuiltInWritingStyles.all[1],
+            enhancementModel: "test-model",
+            fallback: .ask,
+            enhancer: MockTranscriptEnhancer(output: "Cloud-enhanced output"),
+            deferSuccessfulPersistence: true
+        )
+
+        #expect(result.finalText == "Cloud-enhanced output")
+        #expect(result.processingStatus == .completed)
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+        #expect(try await store.record(id: result.id)?.finalText == "Cloud-enhanced output")
+
+        try await store.flush()
+        let reloaded = DictationHistoryStore(fileURL: fileURL)
+        #expect(try await reloaded.record(id: result.id)?.finalText == "Cloud-enhanced output")
+    }
+
+    @MainActor
+    @Test func smartPipelineSkipsDisallowedAIStyleAndKeepsLocalText() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartPrivacySkip-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let pipeline = SmartDictationPipeline(
+            historyStore: DictationHistoryStore(fileURL: fileURL)
+        )
+        let enhancer = MockTranscriptEnhancer(output: "Must not be used")
+
+        let result = try await pipeline.run(
+            record: makeTranscribedRecord(text: "Lokaler Text Punkt"),
+            spokenFormattingEnabled: true,
+            dictionaryEntries: [],
+            style: BuiltInWritingStyles.all[1],
+            enhancementModel: "test-model",
+            fallback: .ask,
+            enhancer: enhancer,
+            enhancementAllowed: false
+        )
+
+        #expect(result.finalText == "Lokaler Text.")
+        #expect(result.writingStyleID == BuiltInWritingStyles.cleanedID)
+        #expect(result.processingStatus == .completed)
+        #expect(result.enhancementAttemptCount == 0)
+        #expect(result.enhancementFallback == .useLocallyProcessed)
+        #expect(enhancer.callCount == 0)
+    }
+
+    @MainActor
     @Test func changingWritingStyleStartsFromExistingLocalStage() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateStyleOnly-\(UUID()).json")
@@ -510,9 +697,33 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.inserter.insertedText == "Transcribed text")
-        #expect(harness.coordinator.state == .success)
+        #expect(harness.coordinator.state == .idle)
         #expect(harness.overlay.presentations.contains(.inserting))
         #expect(harness.overlay.presentations.last == .success(message: "Text inserted"))
+        #expect(harness.overlay.presentations.filter {
+            if case .success = $0 { true } else { false }
+        }.count == 1)
+        #expect(harness.processActivityManager.beginCount == 1)
+        #expect(harness.processActivityManager.endCount == 1)
+    }
+
+    @MainActor
+    @Test func emptyTranscriptionUnlocksRecordingSourceAfterFailure() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.provider.error = TranscriptionProviderError.emptyTranscript
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        guard case .failed = harness.coordinator.state else {
+            Issue.record("Expected an empty recording to end in a recoverable failed state")
+            return
+        }
+        #expect(!harness.coordinator.isRecording)
+        #expect(!harness.coordinator.isProcessing)
+
+        harness.coordinator.selectRecordingAudioSource(.systemAudio)
+        #expect(harness.coordinator.settings.recordingAudioSource == .systemAudio)
     }
 
     @MainActor
@@ -521,31 +732,75 @@ struct FlowDictateTests {
 
         await harness.coordinator.toggleDictation()
         await harness.coordinator.toggleDictation()
-        #expect(harness.coordinator.state == .success)
 
-        try await Task.sleep(for: .milliseconds(750))
-
+        for _ in 0..<50 where harness.overlay.hideCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(harness.overlay.hideCount == 1)
         #expect(harness.coordinator.state == .idle)
     }
 
     @MainActor
-    @Test func startingNewDictationCancelsInsertedOverlayDismissal() async throws {
+    @Test func newRecordingRemainsDisabledUntilCurrentDictationCompletes() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.provider.delay = .milliseconds(400)
+
+        await harness.coordinator.toggleDictation()
+        let processing = Task { await harness.coordinator.toggleDictation() }
+        for _ in 0..<40 where harness.provider.transcribeCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.provider.transcribeCount == 1)
+        #expect(!harness.coordinator.canStartNewRecording)
+        harness.coordinator.requestToggle()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(harness.recorder.startCount == 1)
+
+        await processing.value
+        #expect(harness.coordinator.canStartNewRecording)
+    }
+
+    @MainActor
+    @Test func completedInsertionDoesNotWaitForOverlayDismissal() async throws {
         let harness = makeCoordinatorHarness()
 
         await harness.coordinator.toggleDictation()
         await harness.coordinator.toggleDictation()
-        #expect(harness.coordinator.state == .success)
 
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.overlay.hideCount == 0)
         await harness.coordinator.toggleDictation()
         #expect(harness.coordinator.state == .recording)
         #expect(harness.overlay.presentations.last == .recording)
-
-        try await Task.sleep(for: .milliseconds(900))
-
-        #expect(harness.coordinator.state == .recording)
-        #expect(harness.overlay.presentations.last == .recording)
         #expect(harness.overlay.hideCount == 0)
+    }
+
+    @MainActor
+    @Test func providerChangeRequiresRestartAndBlocksNewRecording() async {
+        let harness = makeCoordinatorHarness(
+            transcriptionProviderID: .openAI,
+            privacyMode: .cloudTranscription
+        )
+
+        #expect(!harness.coordinator.transcriptionRestartRequired)
+        harness.coordinator.settings.selectTranscriptionProvider(.local)
+
+        #expect(harness.coordinator.transcriptionRestartRequired)
+        #expect(!harness.coordinator.canStartNewRecording)
+        await harness.coordinator.toggleDictation()
+        #expect(harness.recorder.startCount == 0)
+    }
+
+    @MainActor
+    @Test func recognitionModelChangeRequiresRestart() {
+        let harness = makeCoordinatorHarness()
+
+        #expect(!harness.coordinator.transcriptionRestartRequired)
+        harness.coordinator.settings.transcriptionModel = "another-transcription-model"
+
+        #expect(harness.coordinator.transcriptionRestartRequired)
+        #expect(!harness.coordinator.canStartNewRecording)
     }
 
     @MainActor
@@ -580,11 +835,29 @@ struct FlowDictateTests {
         #expect(harness.coordinator.state == .finalizing)
         #expect(harness.overlay.presentations.last == .finalizing)
 
-        for _ in 0..<60 where harness.coordinator.state != .success {
+        for _ in 0..<60 where !harness.coordinator.canStartNewRecording {
             try await Task.sleep(for: .milliseconds(25))
         }
         #expect(harness.recorder.stopCount == 1)
-        #expect(harness.coordinator.state == .success)
+        #expect(harness.coordinator.canStartNewRecording)
+    }
+
+    @MainActor
+    @Test func duplicateToggleDuringStartDoesNotImmediatelyStopRecording() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.recorder.startDelay = .milliseconds(150)
+
+        harness.coordinator.requestToggle()
+        harness.coordinator.requestToggle()
+
+        for _ in 0..<40 where !harness.recorder.isRecording {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(harness.recorder.startCount == 1)
+        #expect(harness.recorder.stopCount == 0)
+        #expect(harness.recorder.isRecording)
+        #expect(harness.coordinator.state == .recording)
     }
 
     @MainActor
@@ -649,7 +922,38 @@ struct FlowDictateTests {
         await harness.coordinator.toggleDictation()
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
-        #expect(harness.coordinator.state == .success)
+        #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func livePreviewAvailabilityIsCachedAcrossRepeatedUIReads() {
+        var resolutionCount = 0
+        let harness = makeCoordinatorHarness(
+            livePreviewAvailabilityProvider: { _, _ in
+                resolutionCount += 1
+                return .available(localeIdentifier: "de-DE")
+            }
+        )
+
+        let initialResolutionCount = resolutionCount
+        #expect(initialResolutionCount >= 1)
+        for _ in 0..<100 {
+            _ = harness.coordinator.livePreviewAvailability.statusText
+        }
+        #expect(resolutionCount == initialResolutionCount)
+    }
+
+    @MainActor
+    @Test func changingRecordingSourceCancelsStaleLivePreviewResources() {
+        let previewProvider = MockLivePreviewProvider()
+        let harness = makeCoordinatorHarness(livePreviewProvider: previewProvider)
+        let previousCancelCount = previewProvider.cancelCount
+
+        harness.coordinator.selectRecordingAudioSource(.systemAudio)
+
+        #expect(harness.coordinator.settings.recordingAudioSource == .systemAudio)
+        #expect(previewProvider.cancelCount == previousCancelCount + 1)
+        #expect(harness.recorder.previewBufferHandler == nil)
     }
 
     @MainActor
@@ -718,6 +1022,35 @@ struct FlowDictateTests {
 
         let reloaded = DictationHistoryStore(fileURL: fileURL)
         #expect(try await reloaded.record(id: id)?.errorCategory == .interrupted)
+    }
+
+    @Test func stagedHistoryStateRemainsInMemoryUntilFinalFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateStagedHistory-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("history.json")
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let now = Date()
+        var record = DictationRecord.newRecording(
+            id: UUID(), startedAt: now, endedAt: now, duration: 1,
+            status: .transcribed, audioRelativePath: "test.wav", audioFileSize: 1,
+            providerID: "OpenAI", modelID: "test", language: "de",
+            targetBundleIdentifier: nil, targetApplicationName: nil
+        )
+        record.originalTranscript = "Staged text"
+        record.finalText = "Staged text"
+
+        try await store.stage(record)
+        #expect(try await store.record(id: record.id)?.finalText == "Staged text")
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+
+        record.status = .completed
+        try await store.stage(record)
+        try await store.flush()
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
+        let reloaded = DictationHistoryStore(fileURL: fileURL)
+        #expect(try await reloaded.record(id: record.id)?.status == .completed)
     }
 
     @Test func phaseTwoHistoryWithoutArchivedAtStillDecodes() async throws {
@@ -1057,6 +1390,26 @@ struct FlowDictateTests {
         #expect(credentialStore.readCount == 1)
     }
 
+    @Test @MainActor func openAIEnhancerRuntimeIsReusedAcrossDictations() async {
+        var factoryCallCount = 0
+        let enhancer = MockTranscriptEnhancer(output: "Enhanced text")
+        let harness = makeCoordinatorHarness(
+            transcriptEnhancerFactory: { _ in
+                factoryCallCount += 1
+                return enhancer
+            }
+        )
+        harness.coordinator.settings.writingStyleID = BuiltInWritingStyles.cleanedID
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        #expect(factoryCallCount == 1)
+        #expect(enhancer.callCount == 2)
+    }
+
     @Test func longFormPlannerCoversRecordingInOrderWithBoundedOverlap() async throws {
         let planner = AudioSegmentPlanner()
         let duration: Int64 = 40 * 60 * 1_000
@@ -1158,7 +1511,7 @@ struct FlowDictateTests {
         #expect(migrated.transcriptionSegmentCount == nil)
         #expect(migrated.completedTranscriptionSegmentCount == 0)
         #expect(!migrated.hasPartialTranscript)
-        #expect(migrated.schemaVersion == 5)
+        #expect(migrated.schemaVersion == FlowDictateVersion.dictationRecordSchema)
     }
 
     @Test func sessionStorePersistsAndNormalizesInterruptedWork() async throws {
@@ -1283,11 +1636,382 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func phaseFourProviderCapabilitiesAndPrivacyPolicyAreExplicit() throws {
+        let registry = TranscriptionProviderRegistry()
+        let local = try #require(registry.descriptor(for: .local))
+        let cloud = try #require(registry.descriptor(for: .openAI))
+
+        #expect(local.capabilities.executionLocation == .local)
+        #expect(!local.capabilities.requiresCredential)
+        #expect(local.capabilities.supportedLanguages?.contains("de") == true)
+        #expect(cloud.capabilities.executionLocation == .cloud)
+        #expect(cloud.capabilities.requiresCredential)
+        #expect(!registry.availability(for: .local, architecture: "x86_64").isAvailable)
+        #expect(registry.availability(for: .local, architecture: "arm64").isAvailable)
+
+        let offline = NetworkPolicy(mode: .offline, cloudEnhancementEnabled: true)
+        for purpose in [NetworkPurpose.transcription, .enhancement, .credentialValidation,
+                        .updateCheck, .modelDownload] {
+            #expect(!offline.allows(purpose))
+        }
+        let localPolicy = NetworkPolicy(
+            mode: .localWithOptionalCloudEnhancement,
+            cloudEnhancementEnabled: false
+        )
+        #expect(!localPolicy.allows(.transcription))
+        #expect(!localPolicy.allows(.enhancement))
+        #expect(localPolicy.allows(.modelDownload))
+    }
+
+    @MainActor
+    @Test func phaseFourSettingsMigrationKeepsExistingInstallationsOnOpenAI() {
+        let suite = "FlowDictatePhaseFourSettings-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(3, forKey: "onboardingVersion")
+
+        let settings = AppSettings(defaults: defaults)
+
+        #expect(settings.transcriptionProviderID == .openAI)
+        #expect(settings.privacyMode == .cloudTranscription)
+        #expect(settings.localTranscriptionModelID == LocalModelCatalog.parakeetV3.id)
+    }
+
+    @MainActor
+    @Test func localProviderDoesNotRequireAPIKeyAndOfflineForcesLocalSelection() async {
+        let local = makeCoordinatorHarness(
+            credentialStore: EmptyCredentialStore(),
+            transcriptionProviderID: .local,
+            privacyMode: .offline
+        )
+        await local.coordinator.toggleDictation()
+        await local.coordinator.toggleDictation()
+        #expect(local.provider.transcribeCount == 1)
+        #expect(local.inserter.insertCount == 1)
+
+        let normalizedOffline = makeCoordinatorHarness(
+            transcriptionProviderID: .openAI,
+            privacyMode: .offline
+        )
+        #expect(normalizedOffline.coordinator.settings.transcriptionProviderID == .local)
+        #expect(normalizedOffline.coordinator.settings.privacyMode == .offline)
+        #expect(!NetworkPolicy(mode: .offline, cloudEnhancementEnabled: false).allows(.transcription))
+    }
+
+    @MainActor
+    @Test func offlineLocalDictationWithAIStyleStillInsertsLocalText() async {
+        let harness = makeCoordinatorHarness(
+            credentialStore: EmptyCredentialStore(),
+            transcriptionProviderID: .local,
+            privacyMode: .offline
+        )
+        harness.coordinator.settings.writingStyleID = BuiltInWritingStyles.cleanedID
+        harness.coordinator.settings.cloudEnhancementEnabled = false
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.refreshHistory()
+
+        #expect(harness.provider.transcribeCount == 1)
+        #expect(harness.inserter.insertCount == 1)
+        #expect(harness.coordinator.historyRecords.first?.processingStatus == .completed)
+        #expect(harness.coordinator.historyRecords.first?.writingStyleID == BuiltInWritingStyles.cleanedID)
+        #expect(harness.coordinator.historyRecords.first?.enhancementAttemptCount == 0)
+    }
+
+    @Test func inlineCorrectionsAreDeterministicLiteralAndProtected() {
+        let processor = InlineCorrectionProcessor()
+
+        let last = processor.process(
+            "Alpha beta alpha. Ersetze alpha durch gamma.",
+            language: "de"
+        )
+        #expect(last.text == "Alpha beta gamma.")
+        #expect(last.summary.appliedCount == 1)
+
+        let all = processor.process(
+            "Alpha beta alpha. Ersetze alle alpha durch gamma.",
+            language: "de"
+        )
+        #expect(all.text == "gamma beta gamma.")
+
+        let english = processor.process(
+            "One two three delete the last word. Undo the last correction.",
+            language: "en"
+        )
+        #expect(english.text == "One two three.")
+        #expect(english.summary.undoneCount == 1)
+
+        let literal = processor.process(
+            "Say literal replace alpha with beta.",
+            language: "en"
+        )
+        #expect(literal.text == "Say replace alpha with beta.")
+
+        let protected = processor.process(
+            "https://alpha.example alpha. Replace all alpha with beta.",
+            language: "en"
+        )
+        #expect(protected.text == "https://alpha.example beta.")
+
+        let dictionaryProtected = processor.process(
+            "FlowDictate works. Replace FlowDictate with Other.",
+            language: "en",
+            protectedTerms: ["FlowDictate"]
+        )
+        #expect(dictionaryProtected.text.contains("FlowDictate"))
+        #expect(dictionaryProtected.summary.ignoredAmbiguousCount == 1)
+    }
+
+    @Test func automaticInsertionUsesAccessibilityBeforeClipboardFallback() {
+        #expect(InsertionPreference.automatic.attemptsDirectAccessibility)
+        #expect(!InsertionPreference.clipboard.attemptsDirectAccessibility)
+        #expect(InsertionPreference.accessibility.attemptsDirectAccessibility)
+    }
+
+    @MainActor
+    @Test func wordSkipsKnownSlowAccessibilityProbeAndUsesClipboardImmediately() async throws {
+        let application = NSRunningApplication(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier
+        ) ?? NSWorkspace.shared.frontmostApplication!
+        let target = FocusTarget(
+            application: application,
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: "com.microsoft.Word",
+            localizedName: "Microsoft Word"
+        )
+        let direct = MockTextInserter()
+        let clipboard = MockTextInserter()
+        let inserter = FallbackTextInserter(direct: direct, clipboard: clipboard)
+
+        try await inserter.insert("Fast Word insertion", into: target)
+
+        #expect(direct.insertCount == 0)
+        #expect(clipboard.insertCount == 1)
+        #expect(clipboard.insertedText == "Fast Word insertion")
+    }
+
+    @Test func dictationJobStoreRoundTripsSequencesAndNormalizesInterruption() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateJobStore-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DictationJobStore(directory: directory)
+        let firstSequence = try await store.nextSequence()
+        let secondSequence = try await store.nextSequence()
+        #expect(secondSequence == firstSequence + 1)
+
+        var job = makePhaseFourJob(sequence: firstSequence, status: .transcribing)
+        try await store.create(job)
+        let loaded = try #require(try await store.job(id: job.id))
+        #expect(loaded.id == job.id)
+        #expect(loaded.queueSequence == job.queueSequence)
+        #expect(loaded.effectiveConfiguration == job.effectiveConfiguration)
+        #expect(loaded.status == job.status)
+
+        let normalized = try await store.normalizeInterrupted()
+        #expect(normalized.count == 1)
+        job.status = .failed
+        #expect(try await store.job(id: job.id)?.status == job.status)
+        #expect(try await store.job(id: job.id)?.lastErrorCategory == .interrupted)
+    }
+
+    @Test func dictationQueueIsFIFOAndLimitsWaitingJobs() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateQueue-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DictationJobStore(directory: directory)
+        let queue = DictationProcessingQueue(store: store, maximumWaitingJobs: 5)
+
+        for sequence in 1...5 {
+            _ = try await queue.reserveRecordingSlot()
+            _ = try await queue.commit(makePhaseFourJob(sequence: Int64(sequence)))
+        }
+        do {
+            _ = try await queue.reserveRecordingSlot()
+            Issue.record("A sixth waiting job should be rejected")
+        } catch let error as DictationQueueError {
+            guard case .full(maximumWaiting: 5) = error else {
+                Issue.record("Unexpected queue error: \(error)")
+                return
+            }
+        }
+
+        let first = try #require(try await queue.next())
+        #expect(first.queueSequence == 1)
+        var completed = first
+        completed.status = .completed
+        _ = try await queue.didFinish(completed)
+        let second = try #require(try await queue.next())
+        #expect(second.queueSequence == 2)
+    }
+
+    @Test func queuedJobCanBeCancelledWithoutDeletingItsHistoryAudio() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateQueueCancel-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DictationJobStore(directory: directory)
+        let queue = DictationProcessingQueue(store: store)
+        let job = makePhaseFourJob(sequence: 1)
+        _ = try await queue.reserveRecordingSlot()
+        _ = try await queue.commit(job)
+
+        let snapshot = try await queue.cancelQueued(id: job.id)
+
+        #expect(snapshot.queuedCount == 0)
+        #expect(try await store.job(id: job.id)?.status == .cancelled)
+    }
+
+    @Test func queuedHistoryRecordsAreProtectedFromRetention() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateQueuedRetention-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DictationHistoryStore(fileURL: directory.appendingPathComponent("history.json"))
+        var record = makeTranscribedRecord(text: "Queued")
+        record.createdAt = Date(timeIntervalSince1970: 1)
+        record.audioFileSize = 500
+        record.jobID = UUID()
+        record.jobStatus = .queued
+        record.queueSequence = 1
+        try await store.upsert(record)
+
+        let result = try await store.applyRetention(
+            maximumAgeDays: 0,
+            maximumRecordCount: 0,
+            now: Date()
+        )
+
+        #expect(result == HistoryRetentionResult())
+        #expect(try await store.record(id: record.id)?.archivedAt == nil)
+    }
+
+    @Test func phaseThreeAppProfileMigratesByInheritingProvider() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateProfileMigration-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("app-profiles.json")
+        let id = UUID()
+        let legacy: [String: Any] = [
+            "schemaVersion": 1,
+            "profiles": [[
+                "id": id.uuidString,
+                "bundleIdentifier": "com.example.Editor",
+                "displayName": "Editor",
+                "insertionPreference": "automatic",
+                "isEnabled": true,
+                "schemaVersion": 1
+            ]]
+        ]
+        try JSONSerialization.data(withJSONObject: legacy).write(to: fileURL)
+
+        let store = AppProfileStore(fileURL: fileURL)
+        let profile = try #require(try await store.all().first)
+
+        #expect(profile.id == id)
+        #expect(profile.transcriptionProviderID == nil)
+        #expect(profile.schemaVersion == 1)
+        try await store.upsert(profile)
+        #expect(try await store.all().first?.schemaVersion == 2)
+    }
+
+    @Test func schemaFiveHistoryCreatesPhaseFourBackupAndRejectsFutureSchema() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSchemaSix-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("dictations.json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let recordData = try encoder.encode(makeTranscribedRecord(text: "Preserved"))
+        let recordObject = try #require(JSONSerialization.jsonObject(with: recordData) as? [String: Any])
+        let legacy = try JSONSerialization.data(
+            withJSONObject: ["schemaVersion": 5, "records": [recordObject]]
+        )
+        try legacy.write(to: fileURL)
+
+        let store = DictationHistoryStore(fileURL: fileURL)
+        #expect(try await store.all().first?.finalText == "Preserved")
+        #expect(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("dictations-pre-4.0.json").path
+        ))
+
+        let futureURL = directory.appendingPathComponent("future.json")
+        try JSONSerialization.data(
+            withJSONObject: ["schemaVersion": 999, "records": []]
+        ).write(to: futureURL)
+        let future = DictationHistoryStore(fileURL: futureURL)
+        do {
+            _ = try await future.all()
+            Issue.record("A future History schema must not be overwritten")
+        } catch let error as DictationHistoryError {
+            guard case .unsupportedSchema(999) = error else {
+                Issue.record("Unexpected History error: \(error)")
+                return
+            }
+        }
+    }
+
+    private func makePhaseFourJob(
+        sequence: Int64,
+        status: DictationJobStatus = .queued
+    ) -> DictationJob {
+        let now = Date()
+        let configuration = PersistedDictationConfiguration(
+            providerID: .local,
+            engineID: "fluidaudio-parakeet-v3",
+            modelID: LocalModelCatalog.parakeetV3.id,
+            executionLocation: .local,
+            language: "de",
+            writingStyleID: BuiltInWritingStyles.originalID,
+            spokenFormattingEnabled: true,
+            personalDictionaryEnabled: true,
+            insertionPreference: .automatic,
+            privacyMode: .offline,
+            cloudEnhancementEnabled: false,
+            enhancementModel: "unused",
+            enhancementFallback: .useLocallyProcessed,
+            profileID: nil
+        )
+        return DictationJob(
+            schemaVersion: DictationJob.currentSchemaVersion,
+            id: UUID(),
+            recordID: UUID(),
+            createdAt: now,
+            updatedAt: now,
+            queueSequence: sequence,
+            audioRelativePath: "recording.m4a",
+            audioSource: .microphone,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: configuration.engineID,
+            modelID: configuration.modelID,
+            executionLocation: .local,
+            language: "de",
+            targetBundleIdentifier: "test.app",
+            targetApplicationName: "Test",
+            effectiveConfiguration: configuration,
+            status: status,
+            correctionSummary: nil,
+            insertionAttemptCount: 0,
+            automaticInsertionCompleted: false,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+    }
+
+    @MainActor
     private func makeCoordinatorHarness(
         credentialStore: any CredentialStoring = MockCredentialStore(),
+        transcriptEnhancerFactory: @escaping @MainActor (String) -> any TranscriptEnhancing = {
+            OpenAITranscriptEnhancer(apiKey: $0)
+        },
         livePreviewProvider: (any LivePreviewProviding)? = nil,
+        livePreviewAvailabilityProvider:
+            (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         livePreviewEnabled: Bool = false,
-        recordingSource: RecordingAudioSource = .microphone
+        recordingSource: RecordingAudioSource = .microphone,
+        transcriptionProviderID: TranscriptionProviderID = .openAI,
+        privacyMode: PrivacyMode = .cloudTranscription
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -1302,6 +2026,7 @@ struct FlowDictateTests {
         let provider = MockTranscriptionProvider()
         let inserter = MockTextInserter()
         let overlay = MockRecordingOverlay()
+        let processActivityManager = MockProcessActivityManager()
         let application = NSRunningApplication(
             processIdentifier: ProcessInfo.processInfo.processIdentifier
         ) ?? NSWorkspace.shared.frontmostApplication!
@@ -1315,6 +2040,8 @@ struct FlowDictateTests {
         let settings = AppSettings(defaults: defaults)
         settings.livePreviewEnabled = livePreviewEnabled
         settings.recordingAudioSource = recordingSource
+        settings.transcriptionProviderID = transcriptionProviderID
+        settings.privacyMode = privacyMode
 
         let coordinator = DictationCoordinator(
             settings: settings,
@@ -1338,7 +2065,13 @@ struct FlowDictateTests {
                     .appendingPathComponent("FlowDictateHistory-\(UUID()).json")
             ),
             livePreviewProvider: livePreviewProvider,
-            livePreviewAvailabilityProvider: { _, _ in
+            transcriptEnhancerFactory: transcriptEnhancerFactory,
+            jobStore: DictationJobStore(
+                directory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("FlowDictateJobs-\(UUID())", isDirectory: true)
+            ),
+            processActivityManager: processActivityManager,
+            livePreviewAvailabilityProvider: livePreviewAvailabilityProvider ?? { _, _ in
                 .available(localeIdentifier: "de-DE")
             }
         )
@@ -1349,7 +2082,8 @@ struct FlowDictateTests {
             provider: provider,
             inserter: inserter,
             overlay: overlay,
-            focusTargetBox: focusTargetBox
+            focusTargetBox: focusTargetBox,
+            processActivityManager: processActivityManager
         )
     }
 
@@ -1383,6 +2117,23 @@ private struct CoordinatorHarness {
     let inserter: MockTextInserter
     let overlay: MockRecordingOverlay
     let focusTargetBox: FocusTargetBox
+    let processActivityManager: MockProcessActivityManager
+}
+
+@MainActor
+private final class MockProcessActivityManager: ProcessActivityManaging {
+    private final class Token: NSObject {}
+    private(set) var beginCount = 0
+    private(set) var endCount = 0
+
+    func beginUserInitiatedActivity(reason: String) -> NSObjectProtocol {
+        beginCount += 1
+        return Token()
+    }
+
+    func endActivity(_ activity: NSObjectProtocol) {
+        endCount += 1
+    }
 }
 
 @MainActor
@@ -1401,6 +2152,7 @@ private final class MockAudioRecorder: AudioRecording {
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    var startDelay: Duration?
     var stopDelay: Duration?
     var sourceMetadata = AudioSourceMetadata.microphoneDefault
 
@@ -1408,6 +2160,7 @@ private final class MockAudioRecorder: AudioRecording {
 
     func start() async throws {
         startCount += 1
+        if let startDelay { try await Task.sleep(for: startDelay) }
         isRecording = true
     }
 
@@ -1427,9 +2180,13 @@ private final class MockAudioRecorder: AudioRecording {
 
 private nonisolated final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     private(set) var transcribeCount = 0
+    var error: Error?
+    var delay: Duration?
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
         transcribeCount += 1
+        if let delay { try await Task.sleep(for: delay) }
+        if let error { throw error }
         return TranscriptionResult(
             text: "Transcribed text",
             provider: "Test",
@@ -1532,6 +2289,12 @@ private struct MockCredentialStore: CredentialStoring {
     func deleteAPIKey() throws {}
 }
 
+private struct EmptyCredentialStore: CredentialStoring {
+    func readAPIKey() throws -> String? { nil }
+    func saveAPIKey(_ value: String) throws {}
+    func deleteAPIKey() throws {}
+}
+
 private nonisolated final class PassThroughAudioUploadPreparer: AudioUploadPreparing, @unchecked Sendable {
     func prepare(_ sourceURL: URL) async throws -> PreparedAudioUpload {
         PreparedAudioUpload(
@@ -1540,6 +2303,54 @@ private nonisolated final class PassThroughAudioUploadPreparer: AudioUploadPrepa
             mimeType: "audio/m4a",
             temporaryFileURL: nil
         )
+    }
+}
+
+private nonisolated final class SuccessfulOpenAIURLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(
+            self,
+            didLoad: Data(#"{"text":"Cleanup stays off the response path"}"#.utf8)
+        )
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private nonisolated final class SlowRemovalFileManager: FileManager, @unchecked Sendable {
+    private let delay: TimeInterval
+    private let lock = NSLock()
+    private var storedRemovalCount = 0
+
+    init(delay: TimeInterval) {
+        self.delay = delay
+        super.init()
+    }
+
+    var removalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRemovalCount
+    }
+
+    override func removeItem(at URL: URL) throws {
+        Thread.sleep(forTimeInterval: delay)
+        try super.removeItem(at: URL)
+        lock.lock()
+        storedRemovalCount += 1
+        lock.unlock()
     }
 }
 

@@ -5,8 +5,23 @@ struct AppProfilesSettingsView: View {
 
     var body: some View {
         Form {
+            if coordinator.transcriptionRestartRequired {
+                Section("Restart Required") {
+                    Label(
+                        "A profile changed the transcription provider or model.",
+                        systemImage: "arrow.clockwise.circle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    Button("Quit & Restart Now") { coordinator.quitAndRestart() }
+                        .disabled(coordinator.isRecording || coordinator.isProcessing)
+                }
+            }
+
             Section {
                 Text("Profiles are selected by app bundle identifier when recording starts. Empty values inherit the global setting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Switching to an app profile with a different transcription provider or model requires a restart before recording.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -30,6 +45,12 @@ struct AppProfilesSettingsView: View {
                 Section(profile.displayName) {
                     Toggle("Enabled", isOn: binding(profile, \.isEnabled))
                     LabeledContent("Bundle ID", value: profile.bundleIdentifier)
+                    Picker("Transcription provider", selection: optionalProviderBinding(profile)) {
+                        Text("Inherit global").tag(nil as TranscriptionProviderID?)
+                        ForEach(TranscriptionProviderID.allCases) { provider in
+                            Text(provider.title).tag(Optional(provider))
+                        }
+                    }
                     Picker("Language", selection: optionalLanguageBinding(profile)) {
                         Text("Inherit global").tag(nil as TranscriptionLanguage?)
                         ForEach(TranscriptionLanguage.allCases) { language in
@@ -53,6 +74,11 @@ struct AppProfilesSettingsView: View {
                             Text(preference.title).tag(preference)
                         }
                     }
+                    Text(profile.insertionPreference == .clipboard
+                         ? "Always pastes through the clipboard. macOS may show a privacy notice when FlowDictate reads or restores clipboard contents from another app."
+                         : "Inserts directly through Accessibility first. If the target app does not support direct insertion, FlowDictate uses the clipboard as a bounded fallback.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Button("Delete Profile", role: .destructive) {
                         coordinator.deleteAppProfile(profile)
                     }
@@ -83,6 +109,10 @@ struct AppProfilesSettingsView: View {
 
     private func optionalLanguageBinding(_ profile: AppDictationProfile) -> Binding<TranscriptionLanguage?> {
         binding(profile, \.language)
+    }
+
+    private func optionalProviderBinding(_ profile: AppDictationProfile) -> Binding<TranscriptionProviderID?> {
+        binding(profile, \.transcriptionProviderID)
     }
 
     private func optionalStyleBinding(_ profile: AppDictationProfile) -> Binding<UUID?> {

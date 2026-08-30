@@ -7,13 +7,16 @@ struct FlowDictateMenu: View {
     var body: some View {
         Text(coordinator.state.title)
 
+        if coordinator.queueSnapshot.processingCount > 0 || coordinator.queueSnapshot.queuedCount > 0 {
+            Text("\(coordinator.queueSnapshot.processingCount) processing · \(coordinator.queueSnapshot.queuedCount) queued")
+                .foregroundStyle(.secondary)
+        }
+
         Button(coordinator.primaryActionTitle) {
             coordinator.requestToggle()
         }
         .disabled(
-            coordinator.isProcessing
-                || coordinator.isPreviewTestRunning
-                || coordinator.isSystemAudioTestRunning
+            !coordinator.canPerformPrimaryAction
         )
 
         Button("Cancel Dictation") {
@@ -123,6 +126,11 @@ struct FlowDictateMenu: View {
         Button("Quit FlowDictate") {
             NSApplication.shared.terminate(nil)
         }
+
+        Button("Quit & Restart FlowDictate") {
+            coordinator.quitAndRestart()
+        }
+        .disabled(coordinator.isRecording || coordinator.isProcessing)
     }
 
     @ViewBuilder
@@ -234,6 +242,12 @@ struct FlowDictateSettingsView: View {
                 Button("Open Dictation History…") {
                     coordinator.showHistory()
                 }
+            }
+
+            Section("Restart") {
+                restartControls(
+                    "Changing the transcription provider, privacy mode or recognition model requires a restart. Settings, History and recordings are retained."
+                )
             }
         }
     }
@@ -412,7 +426,76 @@ struct FlowDictateSettingsView: View {
 
     private var transcriptionSettings: some View {
         settingsForm {
-            Section("OpenAI") {
+            if coordinator.transcriptionRestartRequired {
+                Section("Restart Required") {
+                    Label(
+                        "Transcription settings changed",
+                        systemImage: "arrow.clockwise.circle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                    Text("FlowDictate will not start another dictation until it has restarted. This prevents local and OpenAI transcription resources from being mixed in one app session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Quit & Restart Now") {
+                        coordinator.quitAndRestart()
+                    }
+                    .disabled(coordinator.isRecording || coordinator.isProcessing)
+                }
+            }
+
+            Section("Privacy & Provider") {
+                Picker(
+                    "Mode",
+                    selection: Binding(
+                        get: { settings.privacyMode },
+                        set: { settings.selectPrivacyMode($0) }
+                    )
+                ) {
+                    ForEach(PrivacyMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .disabled(coordinator.isRecording || coordinator.isProcessing)
+                Text(settings.privacyMode.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(
+                    "Transcription",
+                    selection: Binding(
+                        get: { settings.transcriptionProviderID },
+                        set: { settings.selectTranscriptionProvider($0) }
+                    )
+                ) {
+                    ForEach(compatibleTranscriptionProviders) { provider in
+                        Text(provider.title).tag(provider)
+                    }
+                }
+                .disabled(
+                    compatibleTranscriptionProviders.count == 1
+                        || coordinator.isRecording
+                        || coordinator.isProcessing
+                )
+                if settings.transcriptionProviderID == .local {
+                    Text("Runs on this Mac. Recording audio is not uploaded for transcription.")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else {
+                    Text("Sends recording audio directly to OpenAI.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                LabeledContent("Audio transcription", value: coordinator.transcriptionLocationSummary)
+                LabeledContent("AI improvements", value: coordinator.improvementLocationSummary)
+                if settings.transcriptionProviderID == .local {
+                    Text("Local transcription never uploads recording audio. OpenAI receives locally transcribed text only when an AI writing style is selected and cloud improvements are allowed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if settings.transcriptionProviderID == .openAI {
+                Section("OpenAI") {
                 HStack {
                     Text("API key")
                     Spacer()
@@ -440,16 +523,106 @@ struct FlowDictateSettingsView: View {
                     }
                 }
             }
+            }
 
             Section("Recognition") {
-                TextField("Model", text: $settings.transcriptionModel)
+                if settings.transcriptionProviderID == .openAI {
+                    TextField("Model", text: $settings.transcriptionModel)
+                } else {
+                    LabeledContent("Model", value: LocalModelCatalog.parakeetV3.displayName)
+                    localModelControls
+                }
                 Picker("Language", selection: $settings.transcriptionLanguage) {
                     ForEach(TranscriptionLanguage.allCases) { language in
                         Text(language.title).tag(language)
                     }
                 }
             }
+
+            if settings.transcriptionProviderID == .local,
+               settings.privacyMode == .localWithOptionalCloudEnhancement {
+                Section("Optional Cloud Enhancement") {
+                    Toggle(
+                        "Allow enabled AI writing styles to send text to OpenAI",
+                        isOn: $settings.cloudEnhancementEnabled
+                    )
+                    Text("Recording audio remains local. Only the locally transcribed text is sent when an AI writing style is selected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Provider Troubleshooting") {
+                restartControls(
+                    "A provider, privacy-mode or recognition-model change is saved immediately but becomes active only after Quit & Restart. This deliberately resets every loaded transcription resource."
+                )
+            }
         }
+    }
+
+    @ViewBuilder
+    private func restartControls(_ explanation: String) -> some View {
+        Button("Quit & Restart") {
+            coordinator.quitAndRestart()
+        }
+        .disabled(coordinator.isRecording || coordinator.isProcessing)
+        Text(explanation)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private var localModelControls: some View {
+        Text("Parakeet is an open-weight speech-recognition model. The download is approximately \(ByteCountFormatter.string(fromByteCount: LocalModelCatalog.parakeetV3.downloadBytes, countStyle: .file)); installation requires about \(ByteCountFormatter.string(fromByteCount: LocalModelCatalog.parakeetV3.installedBytes * 2, countStyle: .file)) of free storage and uses about \(ByteCountFormatter.string(fromByteCount: LocalModelCatalog.parakeetV3.installedBytes, countStyle: .file)) after installation.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        switch coordinator.localModelState {
+        case let .unavailable(reason):
+            Label(reason, systemImage: "xmark.circle")
+                .foregroundStyle(.secondary)
+        case .notInstalled:
+            LabeledContent("Status", value: "Not installed")
+            Button("Download Local Model…") { coordinator.installLocalModel() }
+                .disabled(settings.privacyMode == .offline)
+            Text("Downloaded from Hugging Face. Model license: \(LocalModelCatalog.parakeetV3.licenseIdentifier).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case let .downloading(progress):
+            ProgressView(value: progress) {
+                Text("Downloading and preparing local model…")
+            }
+        case .installed:
+            Label("Installed", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Button(
+                coordinator.isLocalTranscriptionTestRunning
+                    ? "Testing Local Transcription…" : "Choose Audio File and Test Locally…"
+            ) {
+                coordinator.testLocalTranscription()
+            }
+            .disabled(coordinator.isLocalTranscriptionTestRunning)
+            Text("Select an existing WAV, M4A, MP3 or other audio file. It is transcribed only on this Mac; the result is not inserted and no History entry is created.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let message = coordinator.localTranscriptionTestMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Remove Local Model", role: .destructive) {
+                coordinator.removeLocalModel()
+            }
+        case let .failed(message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.red)
+            Button("Try Download Again…") { coordinator.installLocalModel() }
+                .disabled(settings.privacyMode == .offline)
+        }
+    }
+
+    private var compatibleTranscriptionProviders: [TranscriptionProviderID] {
+        settings.privacyMode == .cloudTranscription ? [.openAI] : [.local]
     }
 
     private var advancedSettings: some View {

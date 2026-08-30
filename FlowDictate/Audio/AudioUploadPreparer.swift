@@ -44,6 +44,15 @@ nonisolated final class AudioUploadPreparer: AudioUploadPreparing, @unchecked Se
     }
 
     func prepare(_ sourceURL: URL) async throws -> PreparedAudioUpload {
+        // AVAudioFile and the AAC encoder may perform substantial synchronous
+        // work. Explicitly move the whole preparation off the caller's actor so
+        // a MainActor coordinator cannot stall the overlay or hotkey handling.
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try prepareOnWorker(sourceURL)
+        }.value
+    }
+
+    private func prepareOnWorker(_ sourceURL: URL) throws -> PreparedAudioUpload {
         guard fileManager.fileExists(atPath: sourceURL.path) else {
             throw AudioUploadPreparationError.sourceUnavailable
         }
@@ -58,7 +67,7 @@ nonisolated final class AudioUploadPreparer: AudioUploadPreparing, @unchecked Se
         }
 
         do {
-            return try await prepareCompactUpload(sourceURL)
+            return try prepareCompactUploadOnWorker(sourceURL)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -75,7 +84,13 @@ nonisolated final class AudioUploadPreparer: AudioUploadPreparing, @unchecked Se
     }
 
     func prepareCompactUpload(_ sourceURL: URL) async throws -> PreparedAudioUpload {
-        let convertedURL = try await convertToM4A(sourceURL)
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try prepareCompactUploadOnWorker(sourceURL)
+        }.value
+    }
+
+    private func prepareCompactUploadOnWorker(_ sourceURL: URL) throws -> PreparedAudioUpload {
+        let convertedURL = try convertToM4A(sourceURL)
         return PreparedAudioUpload(
             fileURL: convertedURL,
             filename: sourceURL.deletingPathExtension().lastPathComponent + ".m4a",
@@ -101,7 +116,7 @@ nonisolated final class AudioUploadPreparer: AudioUploadPreparing, @unchecked Se
         }
     }
 
-    private func convertToM4A(_ sourceURL: URL) async throws -> URL {
+    private func convertToM4A(_ sourceURL: URL) throws -> URL {
         let destination = fileManager.temporaryDirectory
             .appendingPathComponent("FlowDictate-Upload-\(UUID().uuidString).m4a")
         do {

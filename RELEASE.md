@@ -1,6 +1,6 @@
 # FlowDictate Release Guide
 
-FlowDictate 3.4.0 runs as a standalone macOS menu bar app. A release never contains an API key; every installation collects and stores the owner's key during onboarding.
+FlowDictate 4.0.0 runs as a standalone macOS menu bar app. A release contains neither API keys nor speech models. Each installation chooses local transcription or supplies its own OpenAI key during onboarding.
 
 ## Free Community release
 
@@ -12,8 +12,8 @@ The Community release is intended for personal Macs and a trusted circle. It doe
 
 The script performs an unsigned universal Release build, applies an ad hoc signature with the required sandbox entitlements, verifies that signature, and creates these files in `dist/`:
 
-- `FlowDictate-3.4.0-Community-macOS.zip`
-- `FlowDictate-3.4.0-Community-macOS.zip.sha256`
+- `FlowDictate-4.0.0-Community-macOS.zip`
+- `FlowDictate-4.0.0-Community-macOS.zip.sha256`
 
 The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, Screen & System Audio Recording or Keychain permission to be granted again.
 
@@ -21,7 +21,7 @@ Verify the generated archive before uploading it:
 
 ```sh
 cd dist
-shasum -a 256 -c FlowDictate-3.4.0-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-4.0.0-Community-macOS.zip.sha256
 ```
 
 ## GitHub release checklist
@@ -30,8 +30,8 @@ shasum -a 256 -c FlowDictate-3.4.0-Community-macOS.zip.sha256
 2. Run the automated tests and the manual Preview/recording smoke test.
 3. Run `./scripts/build-community-release.sh` on a clean checkout.
 4. Verify the SHA-256 checksum and test the ZIP on a second macOS account or Mac.
-5. Create the annotated tag `v3.4.0` from the reviewed commit.
-6. Create a GitHub Release for that tag using `RELEASE_NOTES_3.4.0.md`.
+5. Create the annotated tag `v4.0.0` from the reviewed commit.
+6. Create a GitHub Release for that tag using the reviewed 4.0 release notes.
 7. Attach only the Community ZIP and its `.sha256` file. GitHub supplies source archives automatically.
 8. Keep the release marked as a prerelease until the downloaded asset has passed the installation test; then publish it as the latest stable release.
 
@@ -39,7 +39,7 @@ Do not commit the generated `dist/` or `build/` directories. They are intentiona
 
 ## Updating an existing installation
 
-The 3.4.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused. History gains migration-safe long-form fields and creates a one-time `dictations-pre-3.4.json` backup before the migrated file is written. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again. Follow the targeted permission-repair procedure in the bundled installation guide instead of resetting all permissions at once.
+The 4.0.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on OpenAI until changed deliberately. History creates a one-time `dictations-pre-4.0.json` backup before writing schema 6. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
 
 The following sections describe the optional paid Developer ID workflow.
 
@@ -84,3 +84,7 @@ Never distribute builds containing an `.env` file, Xcode Scheme secret, personal
 ## Additional Phase 3.4 gate
 
 Before a Phase 3.4 release, test the exact generated Community ZIP with a recording that produces at least three segments. Pause after a successful segment, relaunch the packaged app and confirm that continuation does not upload the successful segment again. Also test one temporary segment failure, insufficient working storage guidance, ordered merged text, retained original audio and deletion of temporary segment files. Do not create a tag or GitHub Release until this packaged-app test and the existing checklist both pass.
+
+## Additional Phase 4.0 gate
+
+Before a Phase 4.0 release, verify the exact generated ZIP on Apple Silicon with no API key: install the local model, transcribe short German and English recordings, run a long segmented recording, and complete at least three consecutive dictations. Confirm that each new recording becomes available after the previous dictation finishes, safe deferred insertion after relaunch, Fully offline network blocking, inline correction commands and model removal protection. Verify that the x86_64 slice builds with the OpenAI path even though local transcription is unavailable; perform a physical Intel launch test when suitable hardware is available and otherwise document that residual risk explicitly. Do not tag or publish until the available packaged-app tests pass and any unavailable hardware gate has been consciously accepted.

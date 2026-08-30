@@ -40,6 +40,10 @@ final class AppSettings: ObservableObject {
         static let inputDeviceUID = "inputDeviceUID"
         static let recordingAudioSource = "recordingAudioSource"
         static let transcriptionModel = "transcriptionModel"
+        static let transcriptionProviderID = "transcriptionProviderID"
+        static let localTranscriptionModelID = "localTranscriptionModelID"
+        static let privacyMode = "privacyMode"
+        static let cloudEnhancementEnabled = "cloudEnhancementEnabled"
         static let transcriptionLanguage = "transcriptionLanguage"
         static let clipboardRestoreDelay = "clipboardRestoreDelay"
         static let onboardingVersion = "onboardingVersion"
@@ -65,6 +69,7 @@ final class AppSettings: ObservableObject {
     }
 
     private let defaults: UserDefaults
+    private var isApplyingTranscriptionConfiguration = false
 
     @Published var dictationHotKey: HotKeyConfiguration {
         didSet {
@@ -96,6 +101,47 @@ final class AppSettings: ObservableObject {
 
     @Published var transcriptionModel: String {
         didSet { defaults.set(transcriptionModel, forKey: Key.transcriptionModel) }
+    }
+
+    @Published var transcriptionProviderID: TranscriptionProviderID {
+        didSet {
+            defaults.set(transcriptionProviderID.rawValue, forKey: Key.transcriptionProviderID)
+            guard !isApplyingTranscriptionConfiguration else { return }
+            if transcriptionProviderID == .openAI, privacyMode != .cloudTranscription {
+                applyTranscriptionConfiguration(
+                    privacyMode: .cloudTranscription,
+                    providerID: .openAI
+                )
+            } else if transcriptionProviderID == .local, privacyMode == .cloudTranscription {
+                applyTranscriptionConfiguration(
+                    privacyMode: .localWithOptionalCloudEnhancement,
+                    providerID: .local
+                )
+            }
+        }
+    }
+
+    @Published var localTranscriptionModelID: String {
+        didSet { defaults.set(localTranscriptionModelID, forKey: Key.localTranscriptionModelID) }
+    }
+
+    @Published var privacyMode: PrivacyMode {
+        didSet {
+            defaults.set(privacyMode.rawValue, forKey: Key.privacyMode)
+            guard !isApplyingTranscriptionConfiguration else { return }
+            let compatibleProvider: TranscriptionProviderID = privacyMode == .cloudTranscription
+                ? .openAI : .local
+            if transcriptionProviderID != compatibleProvider {
+                applyTranscriptionConfiguration(
+                    privacyMode: privacyMode,
+                    providerID: compatibleProvider
+                )
+            }
+        }
+    }
+
+    @Published var cloudEnhancementEnabled: Bool {
+        didSet { defaults.set(cloudEnhancementEnabled, forKey: Key.cloudEnhancementEnabled) }
     }
 
     @Published var transcriptionLanguage: TranscriptionLanguage {
@@ -214,12 +260,28 @@ final class AppSettings: ObservableObject {
         ) ?? .microphone
         transcriptionModel = defaults.string(forKey: Key.transcriptionModel)
             ?? "gpt-4o-mini-transcribe"
+        let storedProviderID = TranscriptionProviderID(
+            rawValue: defaults.string(forKey: Key.transcriptionProviderID) ?? ""
+        ) ?? .openAI
+        localTranscriptionModelID = defaults.string(forKey: Key.localTranscriptionModelID)
+            ?? LocalModelCatalog.parakeetV3.id
+        let resolvedPrivacyMode = PrivacyMode(
+            rawValue: defaults.string(forKey: Key.privacyMode) ?? ""
+        ) ?? (storedProviderID == .local
+            ? .localWithOptionalCloudEnhancement : .cloudTranscription)
+        let resolvedProviderID: TranscriptionProviderID = resolvedPrivacyMode == .cloudTranscription
+            ? .openAI : .local
+        privacyMode = resolvedPrivacyMode
+        transcriptionProviderID = resolvedProviderID
+        defaults.set(resolvedProviderID.rawValue, forKey: Key.transcriptionProviderID)
+        cloudEnhancementEnabled = defaults.object(forKey: Key.cloudEnhancementEnabled) as? Bool
+            ?? false
 
         let languageValue = defaults.string(forKey: Key.transcriptionLanguage)
         transcriptionLanguage = TranscriptionLanguage(rawValue: languageValue ?? "") ?? .automatic
 
         let storedDelay = defaults.object(forKey: Key.clipboardRestoreDelay) as? Double
-        clipboardRestoreDelay = storedDelay ?? 0.6
+        clipboardRestoreDelay = min(max(storedDelay ?? 0.6, 0.3), 2.0)
 
         let storedOnboardingVersion = defaults.integer(forKey: Key.onboardingVersion)
         onboardingVersion = storedOnboardingVersion
@@ -268,6 +330,40 @@ final class AppSettings: ObservableObject {
         dictationActivationMode = DictationActivationMode(
             rawValue: defaults.string(forKey: Key.dictationActivationMode) ?? ""
         ) ?? .toggle
+    }
+
+    /// Changes the two coupled settings as one normalized operation. Individual
+    /// property assignments remain migration-compatible, but the Settings UI
+    /// uses this method to avoid recursive provider/privacy transitions.
+    func selectPrivacyMode(_ mode: PrivacyMode) {
+        applyTranscriptionConfiguration(
+            privacyMode: mode,
+            providerID: mode == .cloudTranscription ? .openAI : .local
+        )
+    }
+
+    func selectTranscriptionProvider(_ providerID: TranscriptionProviderID) {
+        let mode: PrivacyMode = providerID == .openAI
+            ? .cloudTranscription
+            : (privacyMode == .offline ? .offline : .localWithOptionalCloudEnhancement)
+        applyTranscriptionConfiguration(privacyMode: mode, providerID: providerID)
+    }
+
+    private func applyTranscriptionConfiguration(
+        privacyMode newPrivacyMode: PrivacyMode,
+        providerID newProviderID: TranscriptionProviderID
+    ) {
+        guard privacyMode != newPrivacyMode || transcriptionProviderID != newProviderID else {
+            return
+        }
+        isApplyingTranscriptionConfiguration = true
+        if privacyMode != newPrivacyMode {
+            privacyMode = newPrivacyMode
+        }
+        if transcriptionProviderID != newProviderID {
+            transcriptionProviderID = newProviderID
+        }
+        isApplyingTranscriptionConfiguration = false
     }
 
     private static func savedHotKey(_ defaults: UserDefaults, key: String) -> HotKeyConfiguration? {

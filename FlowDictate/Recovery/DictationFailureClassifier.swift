@@ -35,6 +35,12 @@ enum DictationFailureClassifier {
                 default: return .providerPermanent
                 }
             case .invalidResponse, .emptyTranscript: return .providerPermanent
+            case .providerUnavailable: return .providerUnavailable
+            case .localModelMissing: return .localModelMissing
+            case .localModelCorrupt: return .localModelCorrupt
+            case .unsupportedLanguage: return .unsupportedLanguage
+            case .localInitializationFailed: return .localInitialization
+            case .networkBlocked: return .networkBlocked
             }
         }
         if error is RecordingLocationError || error is AudioStoreError { return .storageUnavailable }

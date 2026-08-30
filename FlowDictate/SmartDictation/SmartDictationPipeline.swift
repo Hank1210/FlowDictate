@@ -8,6 +8,13 @@ struct SmartDictationRunFailure: LocalizedError {
     var errorDescription: String? { underlyingError.localizedDescription }
 }
 
+private nonisolated struct LocalSmartProcessingResult: Sendable {
+    var formattedText: String
+    var dictionaryResult: TextTransformationResult
+    var formattingDuration: TimeInterval
+    var dictionaryDuration: TimeInterval
+}
+
 @MainActor
 final class SmartDictationPipeline {
     private let historyStore: DictationHistoryStore
@@ -31,9 +38,11 @@ final class SmartDictationPipeline {
         style: WritingStyleProfile,
         enhancementModel: String,
         fallback: SmartDictationFallback,
-        enhancer: (any TranscriptEnhancing)?
+        enhancer: (any TranscriptEnhancing)?,
+        enhancementAllowed: Bool = true,
+        deferSuccessfulPersistence: Bool = false
     ) async throws -> DictationRecord {
-        guard let original = record.originalTranscript else {
+        guard let original = record.correctedTranscript ?? record.originalTranscript else {
             throw TranscriptEnhancementError.emptyInput
         }
         var updated = record
@@ -44,31 +53,87 @@ final class SmartDictationPipeline {
         updated.enhancementErrorMessage = nil
         updated.enhancementFallback = nil
         updated.updatedAt = Date()
-        try await persist(updated)
-
-        let formatted = spokenFormattingEnabled
-            ? formatter.process(original, language: updated.language).text
-            : original
-        updated.formattedTranscript = formatted
-
-        let dictionaryResult = dictionaryProcessor.process(
-            formatted,
-            entries: dictionaryEntries,
-            language: updated.language
+        // A queued dictation retains its durable audio and recovery manifest.
+        // Keep every intermediate text transformation in memory and write the
+        // complete JSON History only once after insertion. Persisting each AI
+        // stage rewrote the whole History several times and could accumulate a
+        // long serial file-I/O backlog during one app session.
+        let stageLocally = deferSuccessfulPersistence
+        let initialStageStartedAt = Date()
+        try await store(updated, persistToDisk: !stageLocally)
+        FlowLogger.transcription.info(
+            "Smart Dictation initial History stage completed in \(Self.elapsedSeconds(since: initialStageStartedAt), privacy: .public)s"
         )
-        updated.dictionaryTranscript = dictionaryResult.text
-        updated.dictionaryReplacementCount = dictionaryResult.replacementCount
+
+        let formatter = formatter
+        let dictionaryProcessor = dictionaryProcessor
+        let language = updated.language
+        let localResult = await Task.detached(priority: .userInitiated) {
+            let formattingStartedAt = Date()
+            let formatted = spokenFormattingEnabled
+                ? formatter.process(original, language: language).text
+                : original
+            let formattingDuration = Date().timeIntervalSince(formattingStartedAt)
+
+            let dictionaryStartedAt = Date()
+            let dictionaryResult = dictionaryProcessor.process(
+                formatted,
+                entries: dictionaryEntries,
+                language: language
+            )
+            return LocalSmartProcessingResult(
+                formattedText: formatted,
+                dictionaryResult: dictionaryResult,
+                formattingDuration: formattingDuration,
+                dictionaryDuration: Date().timeIntervalSince(dictionaryStartedAt)
+            )
+        }.value
+        FlowLogger.transcription.info(
+            "Spoken formatting completed in \(Self.formattedSeconds(localResult.formattingDuration), privacy: .public)s"
+        )
+        FlowLogger.transcription.info(
+            "Personal dictionary completed in \(Self.formattedSeconds(localResult.dictionaryDuration), privacy: .public)s"
+        )
+        updated.formattedTranscript = localResult.formattedText
+        updated.dictionaryTranscript = localResult.dictionaryResult.text
+        updated.dictionaryReplacementCount = localResult.dictionaryResult.replacementCount
         updated.processingStatus = .formatted
-        updated.finalText = dictionaryResult.text
+        updated.finalText = localResult.dictionaryResult.text
         updated.updatedAt = Date()
-        try await persist(updated)
+        let formattedStageStartedAt = Date()
+        try await store(updated, persistToDisk: !stageLocally)
+        FlowLogger.transcription.info(
+            "Smart Dictation formatted History stage completed in \(Self.elapsedSeconds(since: formattedStageStartedAt), privacy: .public)s"
+        )
 
         guard style.usesAI else {
             updated.processingStatus = .completed
             updated.enhancementProviderID = nil
             updated.enhancementModelID = nil
             updated.updatedAt = Date()
-            try await persist(updated)
+            let completedStageStartedAt = Date()
+            try await store(updated, persistToDisk: !stageLocally)
+            FlowLogger.transcription.info(
+                "Smart Dictation completed History stage completed in \(Self.elapsedSeconds(since: completedStageStartedAt), privacy: .public)s"
+            )
+            return updated
+        }
+        guard enhancementAllowed else {
+            updated.processingStatus = .completed
+            updated.enhancementProviderID = nil
+            updated.enhancementModelID = nil
+            updated.enhancementErrorCategory = nil
+            updated.enhancementErrorMessage = nil
+            updated.enhancementFallback = .useLocallyProcessed
+            updated.updatedAt = Date()
+            let completedStageStartedAt = Date()
+            try await store(updated, persistToDisk: !stageLocally)
+            FlowLogger.transcription.notice(
+                "AI writing style skipped because cloud enhancement is not permitted; using locally processed text"
+            )
+            FlowLogger.transcription.info(
+                "Smart Dictation skipped-enhancement History stage completed in \(Self.elapsedSeconds(since: completedStageStartedAt), privacy: .public)s"
+            )
             return updated
         }
         guard let enhancer else { throw TranscriptionProviderError.missingAPIKey }
@@ -78,7 +143,8 @@ final class SmartDictationPipeline {
             model: enhancementModel,
             fallback: fallback,
             dictionaryEntries: dictionaryEntries,
-            enhancer: enhancer
+            enhancer: enhancer,
+            persistToDisk: !deferSuccessfulPersistence
         )
     }
 
@@ -106,7 +172,8 @@ final class SmartDictationPipeline {
         model: String,
         fallback: SmartDictationFallback,
         dictionaryEntries: [DictionaryEntry],
-        enhancer: (any TranscriptEnhancing)?
+        enhancer: (any TranscriptEnhancing)?,
+        enhancementAllowed: Bool = true
     ) async throws -> DictationRecord {
         guard let localText = record.dictionaryTranscript ?? record.formattedTranscript ?? record.originalTranscript else {
             throw TranscriptEnhancementError.emptyInput
@@ -123,6 +190,17 @@ final class SmartDictationPipeline {
             updated.processingStatus = .completed
             updated.enhancementProviderID = nil
             updated.enhancementModelID = nil
+            try await persist(updated)
+            return updated
+        }
+        guard enhancementAllowed else {
+            updated.finalText = localText
+            updated.processingStatus = .completed
+            updated.enhancementProviderID = nil
+            updated.enhancementModelID = nil
+            updated.enhancementErrorCategory = nil
+            updated.enhancementErrorMessage = nil
+            updated.enhancementFallback = .useLocallyProcessed
             try await persist(updated)
             return updated
         }
@@ -170,7 +248,8 @@ final class SmartDictationPipeline {
         model: String,
         fallback: SmartDictationFallback,
         dictionaryEntries: [DictionaryEntry],
-        enhancer: any TranscriptEnhancing
+        enhancer: any TranscriptEnhancing,
+        persistToDisk: Bool = true
     ) async throws -> DictationRecord {
         guard let input = record.dictionaryTranscript ?? record.formattedTranscript ?? record.originalTranscript else {
             throw TranscriptEnhancementError.emptyInput
@@ -182,7 +261,7 @@ final class SmartDictationPipeline {
         updated.enhancementErrorCategory = nil
         updated.enhancementErrorMessage = nil
         updated.updatedAt = Date()
-        try await persist(updated)
+        try await store(updated, persistToDisk: persistToDisk)
 
         do {
             let result = try await enhancer.enhance(
@@ -199,10 +278,10 @@ final class SmartDictationPipeline {
             updated.enhancementProviderID = result.provider
             updated.enhancementModelID = result.model
             updated.updatedAt = Date()
-            try await persist(updated)
+            try await store(updated, persistToDisk: persistToDisk)
             updated.processingStatus = .completed
             updated.updatedAt = Date()
-            try await persist(updated)
+            try await store(updated, persistToDisk: persistToDisk)
             return updated
         } catch {
             updated.processingStatus = .enhancementFailed
@@ -213,17 +292,17 @@ final class SmartDictationPipeline {
 
             switch fallback {
             case .ask:
-                try await persist(updated)
+                try await store(updated, persistToDisk: persistToDisk)
                 throw SmartDictationRunFailure(underlyingError: error, record: updated)
             case .useLocallyProcessed:
                 updated.finalText = input
                 updated.processingStatus = .completed
-                try await persist(updated)
+                try await store(updated, persistToDisk: persistToDisk)
                 return updated
             case .useOriginal:
                 updated.finalText = updated.originalTranscript
                 updated.processingStatus = .completed
-                try await persist(updated)
+                try await store(updated, persistToDisk: persistToDisk)
                 return updated
             }
         }
@@ -232,6 +311,23 @@ final class SmartDictationPipeline {
     private func persist(_ record: DictationRecord) async throws {
         do { try await historyStore.upsert(record) }
         catch { throw TranscriptionPersistenceFailure(underlyingError: error, record: record) }
+    }
+
+    private func store(_ record: DictationRecord, persistToDisk: Bool) async throws {
+        guard !persistToDisk else {
+            try await persist(record)
+            return
+        }
+        do { try await historyStore.stage(record) }
+        catch { throw TranscriptionPersistenceFailure(underlyingError: error, record: record) }
+    }
+
+    private nonisolated static func elapsedSeconds(since date: Date) -> String {
+        formattedSeconds(Date().timeIntervalSince(date))
+    }
+
+    private nonisolated static func formattedSeconds(_ interval: TimeInterval) -> String {
+        String(format: "%.3f", interval)
     }
 
     private func enhancementCategory(for error: Error) -> DictationErrorCategory {

@@ -24,7 +24,7 @@ struct OnboardingView: View {
     @State private var apiKey = ""
     @State private var validating = false
 
-    private let steps = ["Welcome", "Storage", "API Key", "Permissions", "Shortcuts", "Ready"]
+    private let steps = ["Welcome", "Storage", "Transcription", "Permissions", "Shortcuts", "Ready"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,7 +66,7 @@ struct OnboardingView: View {
                 } else {
                     Button("Start FlowDictate") { coordinator.completeOnboarding() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!coordinator.apiKeyConfigured || !coordinator.recordingLocationConfigured)
+                        .disabled(!coordinator.transcriptionSetupReady || !coordinator.recordingLocationConfigured)
                 }
             }
             .padding()
@@ -81,7 +81,7 @@ struct OnboardingView: View {
         VStack(spacing: 18) {
             Image(systemName: "waveform.circle.fill").font(.system(size: 72)).foregroundStyle(.tint)
             Text("Welcome to FlowDictate").font(.largeTitle.bold())
-            Text("Dictate into any app from the menu bar. Your recordings and history stay on this Mac; audio is sent to OpenAI only when you request transcription.")
+            Text("Dictate into any app from the menu bar. Choose local transcription to keep audio on this Mac, or explicitly use OpenAI with your own API key.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 520)
         }
     }
@@ -106,21 +106,67 @@ struct OnboardingView: View {
 
     private var credentials: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Label("Connect OpenAI", systemImage: "key.fill").font(.title2.bold())
-            Text("Each installation uses the owner's API key. It is stored only in macOS Keychain and is never included in recordings, history, logs, or exports.")
-                .foregroundStyle(.secondary)
-            statusRow("API key", value: coordinator.apiKeyConfigured ? "Configured" : "Missing",
-                      ready: coordinator.apiKeyConfigured)
-            SecureField("OpenAI API key", text: $apiKey)
-                .textContentType(.password)
-            Button(validating ? "Checking…" : "Verify and Save Securely") {
-                validating = true
-                Task {
-                    if await coordinator.validateAndSaveAPIKey(apiKey) { apiKey = "" }
-                    validating = false
-                }
+            Label("Choose transcription", systemImage: "waveform.badge.magnifyingglass")
+                .font(.title2.bold())
+            Picker(
+                "Provider",
+                selection: Binding(
+                    get: { coordinator.settings.transcriptionProviderID },
+                    set: { coordinator.settings.selectTranscriptionProvider($0) }
+                )
+            ) {
+                Text("On this Mac").tag(TranscriptionProviderID.local)
+                Text("OpenAI").tag(TranscriptionProviderID.openAI)
             }
-            .disabled(validating || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .pickerStyle(.segmented)
+
+            if coordinator.transcriptionRestartRequired {
+                Label(
+                    "Restart FlowDictate to activate this transcription provider.",
+                    systemImage: "arrow.clockwise.circle.fill"
+                )
+                .foregroundStyle(.orange)
+                Button("Quit & Restart Now") { coordinator.quitAndRestart() }
+            }
+
+            if coordinator.settings.transcriptionProviderID == .local {
+                Text("Audio stays on this Mac. Local transcription requires Apple Silicon and an approximately \(ByteCountFormatter.string(fromByteCount: LocalModelCatalog.parakeetV3.downloadBytes, countStyle: .file)) model download.")
+                    .foregroundStyle(.secondary)
+                localModelSetup
+            } else {
+                Text("Your API key is stored only in macOS Keychain. Recording audio is sent directly to OpenAI for transcription.")
+                    .foregroundStyle(.secondary)
+                statusRow("API key", value: coordinator.apiKeyConfigured ? "Configured" : "Missing",
+                          ready: coordinator.apiKeyConfigured)
+                SecureField("OpenAI API key", text: $apiKey)
+                    .textContentType(.password)
+                Button(validating ? "Checking…" : "Verify and Save Securely") {
+                    validating = true
+                    Task {
+                        if await coordinator.validateAndSaveAPIKey(apiKey) { apiKey = "" }
+                        validating = false
+                    }
+                }
+                .disabled(validating || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var localModelSetup: some View {
+        switch coordinator.localModelState {
+        case let .unavailable(reason):
+            Label(reason, systemImage: "xmark.circle").foregroundStyle(.orange)
+        case .notInstalled:
+            statusRow("Local model", value: "Not installed", ready: false)
+            Button("Download Local Model") { coordinator.installLocalModel() }
+        case let .downloading(progress):
+            ProgressView(value: progress) { Text("Downloading local model…") }
+        case .installed:
+            statusRow("Local model", value: "Installed", ready: true)
+        case let .failed(message):
+            Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+            Button("Try Download Again") { coordinator.installLocalModel() }
         }
     }
 

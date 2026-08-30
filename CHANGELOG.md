@@ -4,6 +4,57 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-08-30
+
+### Added
+
+- Optional fully local final transcription on Apple Silicon using FluidAudio and Parakeet TDT 0.6B v3; OpenAI remains available as a BYOK cloud provider and Intel fallback.
+- Explicit Fully offline, Local transcription and Cloud transcription privacy modes with a central network-policy gate and no silent local-to-cloud fallback.
+- A persistent dictation-job manifest that preserves frozen provider/profile/target configuration, supports restart recovery and defers unsafe post-restart insertion.
+- Local model download, validation, staged activation, removal and hardware/storage availability feedback.
+- German and English inline correction commands for replace, replace all, last word/sentence deletion, undo and literal escape.
+- Provider overrides in app profiles plus queue/correction metadata and a corrected-transcript stage in History.
+
+### Changed
+
+- History and dictation-record schemas upgraded to version 6 with a one-time `dictations-pre-4.0.json` backup; unknown future schemas are never overwritten.
+- First-run onboarding now offers Local or OpenAI and requires an API key only for the cloud path.
+- Local inference and upload preparation are isolated from the Main Actor; the model manager is reused across jobs and processing never automatically inserts into an unknown target after restart.
+- Continuous dictation queueing is disabled in 4.0. A new recording starts only after the current dictation has completed, matching the predictable 3.4 interaction model.
+- FluidAudio is pinned to 0.15.5. The Community app remains universal; local inference is available only on Apple Silicon while Intel retains OpenAI and all non-local features.
+- Processing diagnostics now separate queue wait, transcription, local correction, writing-style enhancement and insertion duration; AI styles also identify their additional cloud request in Settings and in the overlay.
+- Changing the transcription provider, privacy mode or recognition model now requires `Quit & Restart` before another dictation can begin. This also applies when an app profile would change provider or model. The selection is saved, but a single app session never mixes previously loaded local and OpenAI transcription resources.
+
+### Fixed
+
+- Optional OpenAI text improvement now reuses one enhancer and network session across consecutive dictations instead of rebuilding the connection for every `Improving Text` stage. API-key changes invalidate both OpenAI runtimes, and the menu now offers `Quit & Restart FlowDictate` directly beside the normal Quit action.
+- Session-long processing and `Inserted` delays no longer accumulate: queued Smart Dictation stages remain in memory until one final History flush, completion flushes are coalesced, and Microsoft Word goes directly through the reliable clipboard path instead of its occasionally blocking Accessibility probe.
+- OpenAI transcription now reuses its provider and URL session across consecutive cloud dictations, and temporary multipart/audio cleanup runs asynchronously after the response. A slow filesystem cleanup can therefore no longer turn an already completed cloud response into several additional seconds of Processing.
+- Successful insertion no longer awaits the `Inserted` display timer before releasing the interaction and enabling the next dictation. The confirmation now dismisses independently, preventing an occasional delayed Main Actor wake-up from holding the completed job. General and Transcription settings also provide a clearly explained `Quit & Restart` recovery action for exceptional post-configuration slowdowns.
+- Changing privacy mode or transcription provider now applies one normalized settings transition and is blocked during an active dictation. A mandatory restart gate prevents further recording until all previously loaded transcription resources have been reset.
+- Live Preview availability is cached instead of constructing a new macOS speech recognizer during every Settings redraw. Changing the recording source also cancels stale preview resources.
+- The short `Inserted` confirmation and active queue slot now finish before the completed History record is flushed. The recovery manifest is retained until the background JSON write succeeds, so slow atomic persistence cannot keep the black overlay visible or delay the next recording without sacrificing restart recovery.
+- History JSON and dictation-job manifest reads, encoding and atomic writes now run on dedicated serial background queues, so slow local storage cannot hold the Main Actor, hotkeys or overlay dismissal.
+- Spoken formatting and personal-dictionary processing now run outside the Main Actor. Diagnostics split both transformations, their in-memory History stages and post-completion queue cleanup into separate timings.
+- Automatic app profiles again insert directly through Accessibility first, matching the 3.4 behavior and avoiding unnecessary macOS clipboard privacy notices. The direct request runs off the Main Actor with a short messaging timeout; unsupported targets use the clipboard as a bounded fallback, while `Clipboard only` remains an explicit per-app option.
+- Selecting an AI writing style no longer blocks insertion when Fully offline mode is active or optional OpenAI improvement is disabled. FlowDictate keeps the selected style, clearly marks it inactive and inserts the locally formatted transcript without making a network request.
+- Privacy & Provider now distinguishes where audio transcription runs from whether an optional AI writing-style improvement can send text to OpenAI.
+- Processing diagnostics now measure record lookup, state persistence and provider resolution separately, making delays before the provider request visible instead of attributing them to transcription.
+- Accessibility insertion runs outside the Main Actor and applies its timeout
+  to both the target application and focused text element before using the
+  clipboard fallback.
+- Successful short dictations no longer rewrite the complete JSON History at
+  every intermediate stage; the final record is persisted after visible text
+  insertion while the durable job manifest retains recovery state.
+- Duplicate shortcut events during a recording transition no longer produce an unintended immediate start-stop cycle, including an early release in press-and-hold mode.
+- Global shortcuts use a deduplicated NSEvent fallback when macOS does not deliver the registered Carbon hotkey event reliably.
+- Newly committed dictations begin processing immediately instead of waiting behind a stale background queue drain.
+- Successful insertion is confirmed and dismissed immediately after the paste; delayed History persistence can no longer leave the overlay visibly stuck on Inserting.
+- Empty or silent recordings release the processing state after failure so recording source and profile controls remain available.
+- Local model installation promotes FluidAudio's actual downloaded repository instead of a temporary anchor folder and safely handles repeated install requests.
+
+## [3.4.0] - 2026-08-25
+
 ### Added
 
 - Automatic local segmentation of long or oversized recordings, with silence-sensitive boundaries and a short overlap between adjacent segments.

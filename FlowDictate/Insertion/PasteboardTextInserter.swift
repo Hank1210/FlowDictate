@@ -29,7 +29,10 @@ protocol TextInserting: AnyObject {
 @MainActor
 final class PasteboardTextInserter: TextInserting {
     private let pasteboard: NSPasteboard
-    private let restoreDelay: Duration
+    private var restoreDelay: Duration
+    private var pendingRestorationTask: Task<Void, Never>?
+    private var pendingOriginalSnapshot: PasteboardSnapshot?
+    private var pendingInjectedChangeCount: Int?
 
     convenience init() {
         self.init(pasteboard: .general, restoreDelay: .milliseconds(600))
@@ -40,11 +43,26 @@ final class PasteboardTextInserter: TextInserting {
         self.restoreDelay = restoreDelay
     }
 
+    func updateRestoreDelay(_ restoreDelay: Duration) {
+        self.restoreDelay = restoreDelay
+    }
+
     func insert(_ text: String, into target: FocusTarget) async throws {
         await waitForModifierRelease()
         guard await target.activate() else { throw TextInsertionError.targetUnavailable }
 
-        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        pendingRestorationTask?.cancel()
+        let snapshot: PasteboardSnapshot
+        if let pendingOriginalSnapshot,
+           pendingInjectedChangeCount == pasteboard.changeCount {
+            snapshot = pendingOriginalSnapshot
+        } else {
+            snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        }
+        pendingRestorationTask = nil
+        pendingOriginalSnapshot = nil
+        pendingInjectedChangeCount = nil
+
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
             snapshot.restore(to: pasteboard)
@@ -59,18 +77,35 @@ final class PasteboardTextInserter: TextInserting {
             throw error
         }
 
-        try? await Task.sleep(for: restoreDelay)
-        if pasteboard.changeCount == injectedChangeCount {
-            guard snapshot.restore(to: pasteboard) else {
-                FlowLogger.insertion.error("Clipboard restoration returned false")
-                return
-            }
-            FlowLogger.insertion.info("Transcript pasted and clipboard restored")
-        } else {
+        pendingOriginalSnapshot = snapshot
+        pendingInjectedChangeCount = injectedChangeCount
+        let delay = restoreDelay
+        pendingRestorationTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            self?.restoreClipboardIfUnchanged(expectedChangeCount: injectedChangeCount)
+        }
+        FlowLogger.insertion.info("Transcript pasted; clipboard restoration scheduled")
+    }
+
+    private func restoreClipboardIfUnchanged(expectedChangeCount: Int) {
+        defer {
+            pendingRestorationTask = nil
+            pendingOriginalSnapshot = nil
+            pendingInjectedChangeCount = nil
+        }
+        guard pasteboard.changeCount == expectedChangeCount else {
             FlowLogger.insertion.notice(
                 "Clipboard changed after paste; skipped restoration to avoid overwriting newer content"
             )
+            return
         }
+        guard let snapshot = pendingOriginalSnapshot,
+              snapshot.restore(to: pasteboard) else {
+            FlowLogger.insertion.error("Clipboard restoration returned false")
+            return
+        }
+        FlowLogger.insertion.info("Clipboard restored after completed paste")
     }
 
     private func waitForModifierRelease(timeout: Duration = .seconds(2)) async {

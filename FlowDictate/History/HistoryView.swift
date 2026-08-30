@@ -164,6 +164,18 @@ struct HistoryView: View {
                     }
                     GridRow { Text("Provider").foregroundStyle(.secondary); Text(record.providerID.isEmpty ? "—" : record.providerID) }
                     GridRow { Text("Model").foregroundStyle(.secondary); Text(record.modelID.isEmpty ? "—" : record.modelID) }
+                    if let jobStatus = record.jobStatus {
+                        GridRow {
+                            Text("Processing job").foregroundStyle(.secondary)
+                            Text("#\(record.queueSequence ?? 0) · \(jobStatus.rawValue)")
+                        }
+                    }
+                    if let summary = record.correctionSummary {
+                        GridRow {
+                            Text("Spoken corrections").foregroundStyle(.secondary)
+                            Text("\(summary.appliedCount) applied · \(summary.ignoredAmbiguousCount) ignored · \(summary.undoneCount) undone")
+                        }
+                    }
                     GridRow { Text("Attempts").foregroundStyle(.secondary); Text("\(record.attemptCount)") }
                     if let total = record.transcriptionSegmentCount {
                         GridRow {
@@ -188,6 +200,11 @@ struct HistoryView: View {
                     }
                 }
                 HStack(alignment: .top) {
+                    if record.jobStatus == .queued {
+                        Button("Cancel Queued Dictation", role: .destructive) {
+                            coordinator.cancelQueuedDictation(record)
+                        }
+                    }
                     Button("Play Audio") { coordinator.playAudio(for: record) }.disabled(record.audioFileSize == 0)
                     Button("Show in Finder") { coordinator.revealAudio(for: record) }.disabled(record.audioFileSize == 0)
                     Menu("Copy") {
@@ -233,7 +250,11 @@ struct HistoryView: View {
                 transcriptBox("RECOVERED PARTIAL", text: record.partialTranscript)
             }
             transcriptBox("ORIGINAL", text: record.originalTranscript)
-            if let formatted = record.formattedTranscript, formatted != record.originalTranscript {
+            if let corrected = record.correctedTranscript, corrected != record.originalTranscript {
+                transcriptBox("CORRECTED", text: corrected)
+            }
+            if let formatted = record.formattedTranscript,
+               formatted != (record.correctedTranscript ?? record.originalTranscript) {
                 transcriptBox("FORMATTED", text: formatted)
             }
             if let dictionary = record.dictionaryTranscript, dictionary != record.formattedTranscript {

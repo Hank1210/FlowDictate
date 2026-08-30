@@ -74,6 +74,8 @@ struct ProductivitySettingsView: View {
             }
 
             Section("Community Updates") {
+                LabeledContent("Installed", value: "FlowDictate \(FlowDictateVersion.displayString)")
+                LabeledContent("Edition", value: "Community")
                 Toggle("Check for new stable releases once per day", isOn: $settings.updateCheckEnabled)
                 Button {
                     Task { await coordinator.checkForUpdates() }

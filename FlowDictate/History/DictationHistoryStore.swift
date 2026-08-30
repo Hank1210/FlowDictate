@@ -2,9 +2,15 @@ import Foundation
 
 enum DictationHistoryError: LocalizedError {
     case recordNotFound
+    case unsupportedSchema(Int)
 
     var errorDescription: String? {
-        "The dictation history entry could not be found."
+        switch self {
+        case .recordNotFound:
+            "The dictation history entry could not be found."
+        case let .unsupportedSchema(schema):
+            "The dictation history uses unsupported schema version \(schema)."
+        }
     }
 }
 
@@ -14,15 +20,22 @@ nonisolated struct HistoryRetentionResult: Equatable, Sendable {
 }
 
 actor DictationHistoryStore {
-    private struct Envelope: Codable {
+    private nonisolated struct Envelope: Codable, Sendable {
         var schemaVersion: Int
         var records: [DictationRecord]
     }
 
+    private nonisolated struct LoadSnapshot: Sendable {
+        var data: Data
+        var envelope: Envelope
+    }
+
     private let fileURL: URL
     private let fileManager: FileManager
+    private let fileIO = SerialFileIO(label: "de.euler.FlowDictate.history-file-io")
     private var recordsByID: [UUID: DictationRecord] = [:]
     private var loaded = false
+    private var loadTask: Task<LoadSnapshot?, Error>?
 
     init(fileURL: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -37,48 +50,63 @@ actor DictationHistoryStore {
         }
     }
 
-    func upsert(_ record: DictationRecord) throws {
-        try loadIfNeeded()
+    func upsert(_ record: DictationRecord) async throws {
+        try await loadIfNeeded()
         recordsByID[record.id] = record
-        try persist()
+        try await persist()
     }
 
-    func record(id: UUID) throws -> DictationRecord? {
-        try loadIfNeeded()
+    /// Updates the in-memory view without rewriting the complete JSON file.
+    /// The durable job manifest covers intermediate recovery; the completed
+    /// record is flushed after text insertion.
+    func stage(_ record: DictationRecord) async throws {
+        try await loadIfNeeded()
+        recordsByID[record.id] = record
+    }
+
+    /// Persists the latest staged snapshot without keeping UI or recording
+    /// interaction code on the write path.
+    func flush() async throws {
+        try await loadIfNeeded()
+        try await persist()
+    }
+
+    func record(id: UUID) async throws -> DictationRecord? {
+        try await loadIfNeeded()
         return recordsByID[id]
     }
 
-    func all(includeArchived: Bool = false) throws -> [DictationRecord] {
-        try loadIfNeeded()
+    func all(includeArchived: Bool = false) async throws -> [DictationRecord] {
+        try await loadIfNeeded()
         return recordsByID.values
             .filter { includeArchived || $0.archivedAt == nil }
             .sorted { $0.createdAt > $1.createdAt }
     }
 
-    func recent(limit: Int) throws -> [DictationRecord] {
-        Array(try all().prefix(limit))
+    func recent(limit: Int) async throws -> [DictationRecord] {
+        Array(try await all().prefix(limit))
     }
 
-    func lastInsertable() throws -> DictationRecord? {
-        try all().first(where: \.canInsert)
+    func lastInsertable() async throws -> DictationRecord? {
+        try await all().first(where: \.canInsert)
     }
 
-    func delete(id: UUID) throws {
-        try loadIfNeeded()
+    func delete(id: UUID) async throws {
+        try await loadIfNeeded()
         recordsByID.removeValue(forKey: id)
-        try persist()
+        try await persist()
     }
 
-    func archive(id: UUID, now: Date = Date()) throws {
-        try loadIfNeeded()
+    func archive(id: UUID, now: Date = Date()) async throws {
+        try await loadIfNeeded()
         guard var record = recordsByID[id] else { throw DictationHistoryError.recordNotFound }
         compactForArchive(&record, now: now)
         recordsByID[id] = record
-        try persist()
+        try await persist()
     }
 
-    func knownAudioRelativePaths() throws -> Set<String> {
-        try loadIfNeeded()
+    func knownAudioRelativePaths() async throws -> Set<String> {
+        try await loadIfNeeded()
         return Set(recordsByID.values.map(\.audioRelativePath))
     }
 
@@ -86,8 +114,8 @@ actor DictationHistoryStore {
         maximumAgeDays: Int,
         maximumRecordCount: Int,
         now: Date = Date()
-    ) throws -> HistoryRetentionResult {
-        try loadIfNeeded()
+    ) async throws -> HistoryRetentionResult {
+        try await loadIfNeeded()
         var result = HistoryRetentionResult()
 
         // Archived records only keep the metadata needed to retain their audio.
@@ -124,7 +152,7 @@ actor DictationHistoryStore {
                 result.removedCount += 1
             }
         }
-        if result != HistoryRetentionResult() { try persist() }
+        if result != HistoryRetentionResult() { try await persist() }
         return result
     }
 
@@ -132,6 +160,8 @@ actor DictationHistoryStore {
         record.archivedAt = now
         record.updatedAt = now
         record.originalTranscript = nil
+        record.correctedTranscript = nil
+        record.correctionSummary = nil
         record.formattedTranscript = nil
         record.dictionaryTranscript = nil
         record.finalText = nil
@@ -144,8 +174,8 @@ actor DictationHistoryStore {
         record.enhancementErrorMessage = nil
     }
 
-    func recoverInterrupted(now: Date = Date()) throws -> [DictationRecord] {
-        try loadIfNeeded()
+    func recoverInterrupted(now: Date = Date()) async throws -> [DictationRecord] {
+        try await loadIfNeeded()
         var recovered: [DictationRecord] = []
         for (id, var record) in recordsByID {
             if record.processingStatus == .formatting || record.processingStatus == .formatted {
@@ -189,43 +219,91 @@ actor DictationHistoryStore {
             recordsByID[id] = record
             recovered.append(record)
         }
-        if !recovered.isEmpty { try persist() }
+        if !recovered.isEmpty { try await persist() }
         return recovered
     }
 
-    private func loadIfNeeded() throws {
+    private func loadIfNeeded() async throws {
         guard !loaded else { return }
-        guard fileManager.fileExists(atPath: fileURL.path) else {
+        let task: Task<LoadSnapshot?, Error>
+        if let loadTask {
+            task = loadTask
+        } else {
+            let fileURL = fileURL
+            let fileManager = SerialFileManagerReference(fileManager)
+            let fileIO = fileIO
+            let created: Task<LoadSnapshot?, Error> = Task {
+                try await fileIO.perform { () -> LoadSnapshot? in
+                    guard fileManager.value.fileExists(atPath: fileURL.path) else { return nil }
+                    let data = try Data(contentsOf: fileURL)
+                    let envelope = try JSONDecoder.flowDictate.decode(Envelope.self, from: data)
+                    return LoadSnapshot(data: data, envelope: envelope)
+                }
+            }
+            loadTask = created
+            task = created
+        }
+
+        let snapshot: LoadSnapshot?
+        do {
+            snapshot = try await task.value
+        } catch {
+            loadTask = nil
+            throw error
+        }
+        guard !loaded else { return }
+        loadTask = nil
+        guard let snapshot else {
             loaded = true
             return
         }
-        let data = try Data(contentsOf: fileURL)
-        let envelope = try JSONDecoder.flowDictate.decode(Envelope.self, from: data)
-        recordsByID = Dictionary(uniqueKeysWithValues: envelope.records.map { ($0.id, $0) })
+        guard snapshot.envelope.schemaVersion <= FlowDictateVersion.historySchema else {
+            throw DictationHistoryError.unsupportedSchema(snapshot.envelope.schemaVersion)
+        }
         loaded = true
-        if envelope.schemaVersion < FlowDictateVersion.historySchema {
-            let backupNames = envelope.schemaVersion < 4
-                ? ["dictations-pre-3.2.json", "dictations-pre-3.4.json"]
-                : ["dictations-pre-3.4.json"]
-            for name in backupNames {
-                let backupURL = fileURL.deletingLastPathComponent().appendingPathComponent(name)
-                if !fileManager.fileExists(atPath: backupURL.path) {
-                    try data.write(to: backupURL, options: .atomic)
+        recordsByID = Dictionary(
+            uniqueKeysWithValues: snapshot.envelope.records.map { ($0.id, $0) }
+        )
+        if snapshot.envelope.schemaVersion < FlowDictateVersion.historySchema {
+            var backupNames: [String] = []
+            if snapshot.envelope.schemaVersion < 4 {
+                backupNames += ["dictations-pre-3.2.json", "dictations-pre-3.4.json"]
+            } else if snapshot.envelope.schemaVersion < 5 {
+                backupNames.append("dictations-pre-3.4.json")
+            }
+            if snapshot.envelope.schemaVersion < 6 {
+                backupNames.append("dictations-pre-4.0.json")
+            }
+            let fileURL = fileURL
+            let fileManager = SerialFileManagerReference(fileManager)
+            let data = snapshot.data
+            let resolvedBackupNames = backupNames
+            try await fileIO.perform {
+                for name in resolvedBackupNames {
+                    let backupURL = fileURL.deletingLastPathComponent()
+                        .appendingPathComponent(name)
+                    if !fileManager.value.fileExists(atPath: backupURL.path) {
+                        try data.write(to: backupURL, options: .atomic)
+                    }
                 }
             }
-            try persist()
+            try await persist()
         }
     }
 
-    private func persist() throws {
+    private func persist() async throws {
+        let fileURL = fileURL
+        let fileManager = SerialFileManagerReference(fileManager)
         let directory = fileURL.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let envelope = Envelope(
             schemaVersion: FlowDictateVersion.historySchema,
             records: Array(recordsByID.values)
         )
-        let data = try JSONEncoder.flowDictate.encode(envelope)
-        try data.write(to: fileURL, options: .atomic)
+        try await fileIO.perform {
+            try fileManager.value.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder.flowDictate.encode(envelope)
+            try data.write(to: fileURL, options: .atomic)
+        }
     }
 }
 
