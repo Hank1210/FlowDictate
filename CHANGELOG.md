@@ -4,6 +4,12 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-09-01
+
+### Fixed
+
+- Press-and-hold shortcut activation now stops and processes the recording when the dictation hotkey is released. The release callback is part of the registrar protocol contract and is covered by a coordinator regression test.
+
 ## [4.0.0] - 2026-08-30
 
 ### Added

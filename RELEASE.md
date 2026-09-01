@@ -1,6 +1,6 @@
 # FlowDictate Release Guide
 
-FlowDictate 4.0.0 runs as a standalone macOS menu bar app. A release contains neither API keys nor speech models. Each installation chooses local transcription or supplies its own OpenAI key during onboarding.
+FlowDictate 4.0.1 runs as a standalone macOS menu bar app. A release contains neither API keys nor speech models. Each installation chooses local transcription or supplies its own OpenAI key during onboarding.
 
 ## Free Community release
 
@@ -12,8 +12,8 @@ The Community release is intended for personal Macs and a trusted circle. It doe
 
 The script performs an unsigned universal Release build, applies an ad hoc signature with the required sandbox entitlements, verifies that signature, and creates these files in `dist/`:
 
-- `FlowDictate-4.0.0-Community-macOS.zip`
-- `FlowDictate-4.0.0-Community-macOS.zip.sha256`
+- `FlowDictate-4.0.1-Community-macOS.zip`
+- `FlowDictate-4.0.1-Community-macOS.zip.sha256`
 
 The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, Screen & System Audio Recording or Keychain permission to be granted again.
 
@@ -21,7 +21,7 @@ Verify the generated archive before uploading it:
 
 ```sh
 cd dist
-shasum -a 256 -c FlowDictate-4.0.0-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-4.0.1-Community-macOS.zip.sha256
 ```
 
 ## GitHub release checklist
@@ -30,7 +30,7 @@ shasum -a 256 -c FlowDictate-4.0.0-Community-macOS.zip.sha256
 2. Run the automated tests and the manual Preview/recording smoke test.
 3. Run `./scripts/build-community-release.sh` on a clean checkout.
 4. Verify the SHA-256 checksum and test the ZIP on a second macOS account or Mac.
-5. Create the annotated tag `v4.0.0` from the reviewed commit.
+5. Create the annotated tag `v4.0.1` from the reviewed commit.
 6. Create a GitHub Release for that tag using the reviewed 4.0 release notes.
 7. Attach only the Community ZIP and its `.sha256` file. GitHub supplies source archives automatically.
 8. Keep the release marked as a prerelease until the downloaded asset has passed the installation test; then publish it as the latest stable release.
@@ -39,7 +39,7 @@ Do not commit the generated `dist/` or `build/` directories. They are intentiona
 
 ## Updating an existing installation
 
-The 4.0.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on OpenAI until changed deliberately. History creates a one-time `dictations-pre-4.0.json` backup before writing schema 6. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
+The 4.0.1 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on OpenAI until changed deliberately. History creates a one-time `dictations-pre-4.0.json` backup before writing schema 6. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
 
 The following sections describe the optional paid Developer ID workflow.
 

@@ -19,17 +19,20 @@ enum HotKeyRegistrationError: LocalizedError {
 
 @MainActor
 protocol HotKeyRegistering: AnyObject {
-    func register(_ configuration: HotKeyConfiguration, handler: @escaping @MainActor () -> Void) throws
+    func register(
+        _ configuration: HotKeyConfiguration,
+        pressed: @escaping @MainActor () -> Void,
+        released: @escaping @MainActor () -> Void
+    ) throws
     func unregister()
 }
 
 extension HotKeyRegistering {
     func register(
         _ configuration: HotKeyConfiguration,
-        pressed: @escaping @MainActor () -> Void,
-        released: @escaping @MainActor () -> Void
+        handler: @escaping @MainActor () -> Void
     ) throws {
-        try register(configuration, handler: pressed)
+        try register(configuration, pressed: handler, released: {})
     }
 }
 
@@ -37,7 +40,8 @@ extension HotKeyRegistering {
 final class DisabledHotKeyRegistrar: HotKeyRegistering {
     func register(
         _ configuration: HotKeyConfiguration,
-        handler: @escaping @MainActor () -> Void
+        pressed: @escaping @MainActor () -> Void,
+        released: @escaping @MainActor () -> Void
     ) throws {}
 
     func unregister() {}

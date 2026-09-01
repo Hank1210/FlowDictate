@@ -708,6 +708,30 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func pressAndHoldReleaseStopsTranscribesAndInserts() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.coordinator.settings.dictationActivationMode = .pressAndHold
+
+        harness.dictationHotKeyRegistrar.press()
+        for _ in 0..<40 where !harness.recorder.isRecording {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(harness.recorder.isRecording)
+        #expect(harness.recorder.startCount == 1)
+
+        harness.dictationHotKeyRegistrar.release()
+        for _ in 0..<80 where harness.inserter.insertCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(harness.recorder.stopCount == 1)
+        #expect(harness.provider.transcribeCount == 1)
+        #expect(harness.inserter.insertCount == 1)
+        #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
     @Test func emptyTranscriptionUnlocksRecordingSourceAfterFailure() async throws {
         let harness = makeCoordinatorHarness()
         harness.provider.error = TranscriptionProviderError.emptyTranscript
@@ -2043,9 +2067,10 @@ struct FlowDictateTests {
         settings.transcriptionProviderID = transcriptionProviderID
         settings.privacyMode = privacyMode
 
+        let dictationHotKeyRegistrar = MockHotKeyRegistrar()
         let coordinator = DictationCoordinator(
             settings: settings,
-            dictationHotKeyRegistrar: MockHotKeyRegistrar(),
+            dictationHotKeyRegistrar: dictationHotKeyRegistrar,
             cancelHotKeyRegistrar: MockHotKeyRegistrar(),
             restoreHotKeyRegistrar: MockHotKeyRegistrar(),
             permissionManager: MockPermissionManager(),
@@ -2083,7 +2108,8 @@ struct FlowDictateTests {
             inserter: inserter,
             overlay: overlay,
             focusTargetBox: focusTargetBox,
-            processActivityManager: processActivityManager
+            processActivityManager: processActivityManager,
+            dictationHotKeyRegistrar: dictationHotKeyRegistrar
         )
     }
 
@@ -2118,6 +2144,7 @@ private struct CoordinatorHarness {
     let overlay: MockRecordingOverlay
     let focusTargetBox: FocusTargetBox
     let processActivityManager: MockProcessActivityManager
+    let dictationHotKeyRegistrar: MockHotKeyRegistrar
 }
 
 @MainActor
@@ -2262,12 +2289,25 @@ private final class MockTextInserter: TextInserting {
 
 @MainActor
 private final class MockHotKeyRegistrar: HotKeyRegistering {
+    private var pressHandler: (@MainActor () -> Void)?
+    private var releaseHandler: (@MainActor () -> Void)?
+
     func register(
         _ configuration: HotKeyConfiguration,
-        handler: @escaping @MainActor () -> Void
-    ) throws {}
+        pressed: @escaping @MainActor () -> Void,
+        released: @escaping @MainActor () -> Void
+    ) throws {
+        pressHandler = pressed
+        releaseHandler = released
+    }
 
-    func unregister() {}
+    func press() { pressHandler?() }
+    func release() { releaseHandler?() }
+
+    func unregister() {
+        pressHandler = nil
+        releaseHandler = nil
+    }
 }
 
 @MainActor
