@@ -2,7 +2,7 @@
 
 **Phase:** 4.1 – Synchronized Meeting Capture
 **Status:** Zukunftsentwurf; Umsetzung erst nach Abschluss und Stabilisierung von 4.0
-**Stand:** 26. August 2026
+**Stand:** 2. September 2026
 **Ausgangsversion:** eine lokal freigegebene FlowDictate-4.0-Version
 **Zielversion:** FlowDictate 4.1.0; Buildnummer erst vor dem Release festlegen
 **Abhängigkeit:** `FlowDictate_PRD_Phase_4_0.md` und die Long-Form-/Recoveryverträge aus `FlowDictate_PRD_Phase_3_4.md`
@@ -12,6 +12,8 @@
 Phase 4.1 ergänzt eine echte kombinierte Aufnahme von Mikrofon und digitalem macOS-Systemaudio. Der Hauptanwendungsfall sind Meetings, Interviews, Schulungen und Gespräche, bei denen sowohl die eigene Stimme als auch die Wiedergabe anderer Anwendungen erhalten und transkribiert werden sollen.
 
 Die beiden Quellen werden nicht während der Aufnahme destruktiv zu einer einzigen Datei summiert. FlowDictate speichert synchronisierte Originalspuren, eine gemeinsame Zeitachse und daraus abgeleitete Transkripte. Clipping, Drift, Aussetzer oder der Ausfall einer Quelle dürfen die jeweils andere Quelle nicht zerstören.
+
+Ein externes Feature-Briefing vom 2. September 2026 hat zusätzlich Diktat-Übersetzung und Meeting-Transkription mit Diarization als mögliche Ausbaurichtungen vorgeschlagen. Da diese Bewertung nur auf dem öffentlichen README und nicht auf einer Codeprüfung basierte, wird sie in diesem PRD als Produktinput berücksichtigt, aber nicht als technische Implementierungsgrundlage übernommen. Die strategische Bewertung bestätigt den Schwerpunkt auf Meeting Capture; Übersetzung und Sprecher-Diarization bleiben bewusst von der 4.1-Pflichtumsetzung getrennt.
 
 ## 2. Produktziel
 
@@ -54,6 +56,8 @@ Ein hörbarer Gesamtmix ist ein optionales abgeleitetes Artefakt. Er ist nie die
 
 Der Mikrofontrack erhält die Rolle `You`. Der Systemaudiotrack erhält die Rolle `System Audio`. Phase 4.1 versucht nicht, mehrere Personen innerhalb des Systemaudiotracks voneinander zu unterscheiden.
 
+Diese Einschränkung ist produktseitig bewusst: Die erste 4.1-Version soll zuverlässig erfassen, synchronisieren, recovern und zeitlich zusammenführen. Session-lokale Sprechertrennung oder persistente Sprecheridentität sind keine Voraussetzung für den Erfolg von 4.1 und würden Datenschutz-, Consent-, Modell- und UX-Komplexität deutlich erhöhen.
+
 ### 3.4 Provider und persistierter Job aus 4.0
 
 Jede Meeting-Session friert Provider, Engine, Modell, Sprache, Privacy-Modus und relevante Profiloptionen ein. Die Transkription läuft als persistierter 4.0-Dictation-Job. Während der Meetingverarbeitung wird keine weitere Aufnahme angenommen; eine fortlaufende Diktierkette wäre eine spätere, separat zu validierende Erweiterung.
@@ -61,6 +65,30 @@ Jede Meeting-Session friert Provider, Engine, Modell, Sprache, Privacy-Modus und
 ### 3.5 Keine versteckte Aufnahme
 
 Eine kombinierte Aufnahme besitzt immer einen sichtbaren Aufnahmestatus. FlowDictate bietet keine Funktion zum heimlichen Start, zum Verbergen der Aufnahme oder zum Umgehen von macOS-Berechtigungen.
+
+### 3.6 Wettbewerbsabgrenzung
+
+OpenWhispr wird für 4.1 als wichtigster Vergleichspunkt behandelt. FlowDictate konkurriert in dieser Phase nicht primär über maximale Plattformbreite oder möglichst viele Modelloptionen, sondern über:
+
+- native macOS-Integration,
+- klare Privacy-Modi,
+- getrennte und recoverbare Originalspuren,
+- robuste Langform- und Restart-Sicherheit,
+- transparente History mit Zwischenständen,
+- verlässliche lokale Verarbeitung auf Apple Silicon.
+
+Der Release darf deshalb nicht nur funktional vorhanden sein, sondern muss besonders bei Stabilität, Recovery, Datenschutzverständlichkeit und Installation vertrauenswürdig wirken.
+
+### 3.7 Übersetzung bleibt separater Backlog-Kandidat
+
+Diktat-Übersetzung ist ein plausibles späteres Feature: Sprache X diktieren, Text in Zielsprache Y einfügen. Für 4.1 wird es nicht in den Scope aufgenommen.
+
+Produktentscheidung für diesen Stand:
+
+- Cloud-only-Übersetzung über OpenAI wäre technisch am naheliegendsten, passt aber nicht in den Fully-Offline-Modus.
+- Lokale Übersetzung würde eine zusätzliche Modell-/OS-Strategie benötigen und darf 4.1 nicht fragmentieren.
+- Wenn Übersetzung später umgesetzt wird, muss sie als eigener Privacy-gated Prompt-/Enhancement-Typ geplant werden.
+- App-Profile oder Hotkeys pro Zielsprache sind sinnvolle spätere UX-Optionen, aber kein Bestandteil von 4.1.
 
 ## 4. Umfang
 
@@ -103,8 +131,11 @@ Eine kombinierte Aufnahme besitzt immer einen sichtbaren Aufnahmestatus. FlowDic
 - Umgehung von Screen-&-System-Audio-Berechtigungen,
 - Aufnahme von Telefonaten oder geschützten Medien über nicht öffentliche APIs,
 - versteckte oder ferngesteuerte Aufnahme,
+- Sprechertrennung innerhalb des Systemaudiotracks,
 - Speaker-Diarization mehrerer Remoteteilnehmer,
 - Sprecheridentifikation anhand biometrischer Profile,
+- persistente Sprecheridentität über mehrere Sessions hinweg,
+- Diktat-Übersetzung in andere Zielsprachen,
 - Cloud-Live-Streaming während der Aufnahme,
 - Live-Finaltranskript für Systemaudio,
 - destruktive automatische Lautheitsänderung der Originaltracks,
@@ -480,8 +511,10 @@ Vor Aufnahme wird kein hartes Dauerlimit behauptet. Bei sehr wenig Speicher wird
 
 - FlowDictate speichert keine Videoframes oder Screenshots.
 - Systemaudiofilter schließen FlowDictates eigene Wiedergabe aus, soweit zuverlässig möglich.
+- Vor der finalen 4.1-Architekturentscheidung wird geprüft, ob Systemaudio über einen echten audio-only Capture-Pfad statt über einen ScreenCaptureKit-Displaystream aufgenommen werden kann. Ziel ist eine möglichst präzise macOS-Berechtigung wie `Nur Aufnahme von System Audio`, sofern dies mit öffentlichen APIs, Sandbox, Stabilität und macOS-Zielversionen vereinbar ist.
 - App-/Fensternamen, Meetingtitel und Teilnehmernamen werden nicht ohne eigene Produktfreigabe persistiert.
 - Nutzer ist für Einwilligung und rechtmäßige Aufnahme verantwortlich; Onboarding/Settings weisen verständlich darauf hin.
+- Vor Start einer kombinierten Meeting-Aufnahme muss FlowDictate klar darauf hinweisen, dass der Nutzer für Information beziehungsweise Einwilligung der Beteiligten verantwortlich ist.
 - Sichtbarer Recordingstatus darf nicht abschaltbar sein.
 - Offline-/Cloudkennzeichnung aus 4.0 gilt je Meeting.
 - Im Offline-Modus verlassen weder Tracks noch Texte das Gerät.
@@ -644,9 +677,11 @@ Phase 4.1 ist produktseitig abgeschlossen, wenn:
 | lokale Inferenz stört Capture | Queuepriorität für Recording, Belastungsgate, keine parallelen Jobs |
 | fehlende Providerzeitstempel | ehrliche TrackChunk-Präzision statt falscher Worttimeline |
 | Echo erscheint auf beiden Tracks | keine riskante Cross-Track-Deduplizierung in 4.1 |
-| Nutzer erwartet Remotesprechertrennung | klare Rollenbezeichnung und Diarization als späterer Scope |
+| Nutzer erwartet Remotesprechertrennung | klare Rollenbezeichnung `You`/`System Audio`; keine Diarization in 4.1 versprechen |
 | rechtlich unzulässige Aufnahme | sichtbarer Status, Einwilligungshinweis, keine Stealth-Funktion |
+| Systemaudio erfordert breitere Screen-&-System-Audio-Berechtigung als Wettbewerber | CoreAudio/System-Audio-Tap als audio-only Alternative prüfen; falls nicht tragfähig, ScreenCaptureKit-Einsatz in UI und Privacy-Doku transparent erklären |
 | Recoveryzustände explodieren in Komplexität | getrennte Trackstatus plus validierte Meetinginvarianten |
+| Wettbewerber wirkt funktionsreicher | 4.1 auf macOS-native Stabilität, Recovery, Privacy und nachvollziehbare Meetingartefakte fokussieren |
 
 ## 20. Technische Referenzen
 

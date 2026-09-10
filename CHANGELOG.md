@@ -4,6 +4,27 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-09-10
+
+### Fixed
+
+- Spoken Formatting now consumes automatic sentence punctuation after spoken formatting commands such as `Neue Zeile.`, `new line.`, `Doppelpunkt.` and `colon.` so punctuation no longer appears at the beginning of the next line or after inserted punctuation.
+- German `Absatz` is now accepted as an alias for `neuer Absatz`.
+- AI writing styles now protect user-requested line and paragraph breaks with explicit layout markers during enhancement and restore them before insertion. If an enhancement drops a protected layout marker, the result is rejected instead of silently flattening the dictated structure.
+- AI writing styles now explicitly treat dictated questions and requests as transcript content, not as instructions to answer. Assistant-like enhancement responses are rejected locally so FlowDictate can fall back to the local transcript instead of inserting an answer.
+- Smart Dictation validation errors now identify the missing protected number, URL, dictionary term or layout marker instead of returning only a generic rejection reason.
+- Very short recordings now fail during preflight with a clear "recording too short" message. This avoids starting local transcription for sub-300 ms press-and-hold captures and prevents the underlying FluidAudio `Invalid audio data` error from surfacing to users.
+- The Live Preview character slider is now labeled more clearly, hidden for the Compact overlay, explains its relationship to the overlay size and applies changes to active preview sessions without requiring a new recording.
+- The standard Live Preview overlay now keeps the newest preview text visible once the preview exceeds three lines, avoiding misleading end ellipses that made active recognition look stalled.
+- The standard Live Preview overlay now caps the configurable Preview character range at 200 characters while keeping the newest visible text in view once the preview exceeds three lines.
+- The Compact overlay no longer starts or displays Live Preview text; it remains a minimal recording/status indicator.
+- Live Preview now emits privacy-safe diagnostics for preview-event cadence, audio-buffer drops and stalled partial recognition without logging dictated text.
+- The Inserted overlay auto-hide now uses a dedicated deadline timer and logs late callbacks so success banners do not depend solely on a delayed Main Actor sleep.
+
+### Changed
+
+- Processing diagnostics now split the pre-transcription persistence span into manifest update, overlay update and History staging measurements to make intermittent slow-path analysis actionable.
+
 ## [4.0.1] - 2026-09-01
 
 ### Fixed

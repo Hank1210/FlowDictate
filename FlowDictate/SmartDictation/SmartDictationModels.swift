@@ -57,7 +57,7 @@ nonisolated enum BuiltInWritingStyles {
         WritingStyleProfile(
             id: cleanedID,
             name: "Cleaned Up",
-            instruction: "Remove filler words and obvious repetitions. Preserve the meaning, facts, names, numbers, URLs and tone.",
+            instruction: "Remove filler words and obvious repetitions. Preserve the meaning, facts, names, numbers, URLs, tone, and user-requested line breaks or paragraphs.",
             isBuiltIn: true,
             isEnabled: true,
             schemaVersion: 1

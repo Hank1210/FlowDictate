@@ -103,10 +103,10 @@ For a free build intended for personal use and a trusted circle, run:
 
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
-For version 4.0.1 the generated files are:
+For version 4.0.2 the generated files are:
 
-- `FlowDictate-4.0.1-Community-macOS.zip`
-- `FlowDictate-4.0.1-Community-macOS.zip.sha256`
+- `FlowDictate-4.0.2-Community-macOS.zip`
+- `FlowDictate-4.0.2-Community-macOS.zip.sha256`
 
 `scripts/build-release.sh` remains available for a future Developer ID signed and notarized release. Both workflows are documented in `RELEASE.md`.
 

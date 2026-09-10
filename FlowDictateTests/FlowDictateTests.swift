@@ -45,6 +45,14 @@ struct FlowDictateTests {
         #expect(microphone.showsActivityIndicator)
     }
 
+    @Test func standardOverlayUsesConfiguredPreviewWindow() {
+        let text = String(repeating: "a", count: 800)
+
+        #expect(OverlayPreviewPresentation.visibleText(text, for: .expanded).count == 800)
+        #expect(OverlayPreviewPresentation.visibleText(text, for: .standard).count == 800)
+        #expect(OverlayPreviewPresentation.visibleText(text, for: .compact).isEmpty)
+    }
+
     @Test func multipartBodyContainsFieldsFileAndClosingBoundary() throws {
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMultipartSource-\(UUID()).wav")
@@ -343,6 +351,12 @@ struct FlowDictateTests {
         #expect(newSettings.overlayPosition == .bottomTrailing)
         newSettings.livePreviewCharacterLimit = 5_000
         #expect(newSettings.livePreviewCharacterLimit == 800)
+        newSettings.overlaySize = .compact
+        #expect(newSettings.livePreviewCharacterLimit == 800)
+        #expect(!newSettings.overlaySize.showsLivePreviewText)
+        #expect(newSettings.overlaySize.livePreviewCharacterRange == nil)
+        newSettings.overlaySize = .standard
+        #expect(newSettings.overlaySize.clampedLivePreviewCharacterLimit(newSettings.livePreviewCharacterLimit) == 200)
 
         let existingSuite = "FlowDictateExistingPreviewSettings-\(UUID())"
         let existingDefaults = UserDefaults(suiteName: existingSuite)!
@@ -385,6 +399,44 @@ struct FlowDictateTests {
         )
         #expect(result.text == "Ja, guten Morgen\ndies ist eine Testzeile\n:\n1. bla bla\n2. Miau.")
         #expect(result.replacementCount == 5)
+    }
+
+    @Test func spokenFormattingConsumesTerminalPunctuationAfterCommands() {
+        let processor = SpokenFormattingProcessor()
+
+        let german = processor.process(
+            "Ein neuer Test Doppelpunkt. Neue Zeile. Guten Morgen Punkt. Neue Zeile.",
+            language: "de"
+        )
+        #expect(german.text == "Ein neuer Test:\nGuten Morgen.")
+
+        let germanCommandSequence = processor.process(
+            "Überschrift Doppelpunkt Neue Zeile erster Satz Punkt Neue Zeile zweiter Satz Punkt neuer Absatz Ende",
+            language: "de"
+        )
+        #expect(germanCommandSequence.text == "Überschrift:\nerster Satz.\nzweiter Satz.\n\nEnde")
+
+        let english = processor.process(
+            "First line colon. New line. Continue period. New paragraph. Done exclamation mark.",
+            language: "en"
+        )
+        #expect(english.text == "First line:\nContinue.\n\nDone!")
+
+        let englishCommandSequence = processor.process(
+            "Heading colon new line period new line new paragraph done period",
+            language: "en"
+        )
+        #expect(englishCommandSequence.text == "Heading:\n.\n\ndone.")
+    }
+
+    @Test func spokenFormattingSupportsAbsatzAlias() {
+        let processor = SpokenFormattingProcessor()
+        let result = processor.process(
+            "Erster Teil Absatz zweiter Teil",
+            language: "de"
+        )
+        #expect(result.text == "Erster Teil\n\nzweiter Teil")
+        #expect(result.replacementCount == 1)
     }
 
     @Test func personalDictionaryUsesWholeWordsLongestFirstAndDoesNotCascade() {
@@ -518,6 +570,53 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func smartPipelineRejectsAssistantAnswerAndFallsBackToLocalText() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartAssistantAnswer-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let pipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: fileURL))
+
+        let localText = """
+        Ich habe eine Gmail-Adresse, die heißt 123traudich@gmail.com, und diese möchte ich gerne nutzen für Arbeiten in n8n. Dazu brauche ich eine Registrierung auf der Google-Konsole und die entsprechenden API-Zugänge. Kannst du das bitte für mich übernehmen?
+        """
+        let assistantAnswer = """
+        Ich kann die Registrierung auf der Google-Konsole und die API-Zugänge nicht für dich übernehmen, aber ich kann dir erklären, wie du es selbst machen kannst.
+        """
+        let result = try await pipeline.run(
+            record: makeTranscribedRecord(text: localText),
+            spokenFormattingEnabled: false,
+            dictionaryEntries: [],
+            style: BuiltInWritingStyles.all[1],
+            enhancementModel: "test-model",
+            fallback: .useLocallyProcessed,
+            enhancer: MockTranscriptEnhancer(output: assistantAnswer)
+        )
+
+        #expect(result.finalText == localText)
+        #expect(result.processingStatus == .completed)
+        #expect(result.enhancementErrorCategory == .providerPermanent)
+        #expect(result.enhancementErrorMessage?.contains("answer the dictated text") == true)
+        #expect(result.enhancementFallback == .useLocallyProcessed)
+    }
+
+    @Test func enhancementValidatorRejectsAssistantStyleAnswerToDictatedRequest() throws {
+        let input = """
+        Kannst du bitte für mich die Registrierung auf der Google-Konsole und die API-Zugänge übernehmen?
+        """
+        let output = """
+        Ich kann die Registrierung auf der Google-Konsole und die API-Zugänge nicht für dich übernehmen, aber ich kann dir erklären, wie du es selbst machen kannst.
+        """
+
+        #expect(throws: TranscriptEnhancementError.self) {
+            _ = try EnhancementResponseValidator().validate(
+                output: output,
+                input: input,
+                protectedTerms: []
+            )
+        }
+    }
+
+    @MainActor
     @Test func queuedAIStyleStagesAllHistoryUntilOneFinalFlush() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateQueuedAIHistory-\(UUID())", isDirectory: true)
@@ -575,6 +674,54 @@ struct FlowDictateTests {
         #expect(result.enhancementAttemptCount == 0)
         #expect(result.enhancementFallback == .useLocallyProcessed)
         #expect(enhancer.callCount == 0)
+    }
+
+    @MainActor
+    @Test func smartPipelinePreservesFormattedLayoutThroughEnhancement() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartLayout-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let pipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: fileURL))
+        let enhancer = EchoingLayoutMarkerEnhancer(outputPrefix: "Bereinigter Anfang", outputSuffix: "bereinigtes Ende")
+
+        let result = try await pipeline.run(
+            record: makeTranscribedRecord(text: "Erster Teil Neue Zeile. zweiter Teil"),
+            spokenFormattingEnabled: true,
+            dictionaryEntries: [],
+            style: BuiltInWritingStyles.all[1],
+            enhancementModel: "test-model",
+            fallback: .ask,
+            enhancer: enhancer
+        )
+
+        #expect(enhancer.receivedTexts.first?.contains("[[FLOWDICTATE_LAYOUT_BREAK_") == true)
+        #expect(result.formattedTranscript == "Erster Teil\nzweiter Teil")
+        #expect(result.finalText == "Bereinigter Anfang\nbereinigtes Ende")
+        #expect(result.processingStatus == .completed)
+    }
+
+    @MainActor
+    @Test func smartPipelineRejectsEnhancementThatDropsLayoutMarkers() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSmartMissingLayout-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let pipeline = SmartDictationPipeline(historyStore: DictationHistoryStore(fileURL: fileURL))
+
+        await #expect(throws: SmartDictationRunFailure.self) {
+            _ = try await pipeline.run(
+                record: makeTranscribedRecord(text: "Erster Teil Neue Zeile zweiter Teil"),
+                spokenFormattingEnabled: true,
+                dictionaryEntries: [],
+                style: BuiltInWritingStyles.all[1],
+                enhancementModel: "test-model",
+                fallback: .ask,
+                enhancer: MockTranscriptEnhancer(output: "Bereinigter Anfang bereinigtes Ende")
+            )
+        }
+
+        let stored = try await DictationHistoryStore(fileURL: fileURL).all().first
+        #expect(stored?.processingStatus == .enhancementFailed)
+        #expect(stored?.enhancementErrorMessage?.contains("layout marker is missing") == true)
     }
 
     @MainActor
@@ -729,6 +876,34 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func tooShortRecordingFailsBeforeTranscriptionProvider() async throws {
+        let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
+        harness.coordinator.settings.dictationActivationMode = .pressAndHold
+        harness.recorder.resultDuration = 0.2
+
+        harness.dictationHotKeyRegistrar.press()
+        for _ in 0..<40 where !harness.recorder.isRecording {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        harness.dictationHotKeyRegistrar.release()
+        for _ in 0..<80 where harness.recorder.stopCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        #expect(harness.recorder.stopCount == 1)
+        #expect(harness.provider.transcribeCount == 0)
+        #expect(harness.inserter.insertCount == 0)
+        guard case let .failed(message, _) = harness.coordinator.state else {
+            Issue.record("Expected too-short recording to fail before transcription")
+            return
+        }
+        #expect(message.contains("too short"))
+        #expect(harness.coordinator.historyRecords.first?.status == .transcriptionFailed)
+        #expect(harness.coordinator.historyRecords.first?.errorCategory == .transcriptionPreflight)
     }
 
     @MainActor
@@ -947,6 +1122,39 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func livePreviewCharacterLimitUpdatesDuringActiveRecording() async throws {
+        let previewProvider = MockLivePreviewProvider()
+        let harness = makeCoordinatorHarness(
+            livePreviewProvider: previewProvider,
+            livePreviewEnabled: true
+        )
+        harness.coordinator.settings.livePreviewCharacterLimit = 50
+
+        await harness.coordinator.toggleDictation()
+        #expect(harness.recorder.previewBufferHandler != nil)
+
+        previewProvider.emit(.partial(String(repeating: "a", count: 80)))
+        let firstExpected = LivePreviewState.active(String(repeating: "a", count: 50))
+        for _ in 0..<40 where !harness.overlay.previewStates.contains(firstExpected) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.overlay.previewStates.contains(firstExpected))
+
+        harness.coordinator.settings.livePreviewCharacterLimit = 100
+        previewProvider.emit(.partial(String(repeating: "b", count: 120)))
+        let secondExpected = LivePreviewState.active(String(repeating: "b", count: 100))
+        for _ in 0..<40 where !harness.overlay.previewStates.contains(secondExpected) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(harness.overlay.previewStates.contains(secondExpected))
+        harness.coordinator.requestCancel()
+        for _ in 0..<40 where harness.recorder.stopCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     @MainActor
@@ -2181,6 +2389,7 @@ private final class MockAudioRecorder: AudioRecording {
     private(set) var stopCount = 0
     var startDelay: Duration?
     var stopDelay: Duration?
+    var resultDuration: TimeInterval = 1
     var sourceMetadata = AudioSourceMetadata.microphoneDefault
 
     func selectInputDevice(_ deviceID: AudioDeviceID?) {}
@@ -2199,7 +2408,7 @@ private final class MockAudioRecorder: AudioRecording {
             id: UUID(),
             url: FileManager.default.temporaryDirectory.appendingPathComponent("test.wav"),
             startedAt: Date(),
-            duration: 1,
+            duration: resultDuration,
             sourceMetadata: sourceMetadata
         )
     }
@@ -2426,6 +2635,35 @@ private final class MockTranscriptEnhancer: TranscriptEnhancing, @unchecked Send
         if let error { throw error }
         return TranscriptEnhancementResult(
             text: output ?? request.text,
+            provider: "Mock",
+            model: request.model
+        )
+    }
+}
+
+private final class EchoingLayoutMarkerEnhancer: TranscriptEnhancing, @unchecked Sendable {
+    private(set) var receivedTexts: [String] = []
+    private let outputPrefix: String
+    private let outputSuffix: String
+
+    init(outputPrefix: String, outputSuffix: String) {
+        self.outputPrefix = outputPrefix
+        self.outputSuffix = outputSuffix
+    }
+
+    func enhance(_ request: TranscriptEnhancementRequest) async throws -> TranscriptEnhancementResult {
+        receivedTexts.append(request.text)
+        let markerPattern = #"\[\[FLOWDICTATE_LAYOUT_BREAK_\d+\]\]"#
+        let expression = try NSRegularExpression(pattern: markerPattern)
+        let match = expression.firstMatch(
+            in: request.text,
+            range: NSRange(request.text.startIndex..., in: request.text)
+        )
+        let marker = match
+            .flatMap { Range($0.range, in: request.text) }
+            .map { String(request.text[$0]) } ?? ""
+        return TranscriptEnhancementResult(
+            text: "\(outputPrefix) \(marker) \(outputSuffix)",
             provider: "Mock",
             model: request.model
         )

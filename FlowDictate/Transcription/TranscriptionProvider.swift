@@ -25,6 +25,7 @@ nonisolated protocol TranscriptionProvider: Sendable {
 nonisolated enum TranscriptionProviderError: LocalizedError {
     case missingAPIKey
     case audioFileContainsNoSamples
+    case audioTooShort(minimumDuration: TimeInterval)
     case audioFileTooLarge(actualBytes: Int64, maximumBytes: Int64)
     case invalidResponse
     case emptyTranscript
@@ -42,6 +43,8 @@ nonisolated enum TranscriptionProviderError: LocalizedError {
             "No OpenAI API key is configured. Add one in FlowDictate Settings → Transcription."
         case .audioFileContainsNoSamples:
             "The microphone produced no audio samples. The recording was kept; check the selected input device and try again."
+        case let .audioTooShort(minimumDuration):
+            "The recording was too short to transcribe. Hold the shortcut for at least \(Self.milliseconds(minimumDuration)) ms and try again."
         case let .audioFileTooLarge(actualBytes, maximumBytes):
             "The recording is too large to upload (\(Self.megabytes(actualBytes)) MB). The limit is \(Self.megabytes(maximumBytes)) MB. The original recording was kept."
         case .invalidResponse:
@@ -67,5 +70,9 @@ nonisolated enum TranscriptionProviderError: LocalizedError {
 
     private static func megabytes(_ bytes: Int64) -> String {
         String(format: "%.1f", Double(bytes) / 1_000_000)
+    }
+
+    private static func milliseconds(_ duration: TimeInterval) -> Int {
+        Int((duration * 1_000).rounded())
     }
 }

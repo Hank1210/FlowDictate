@@ -15,6 +15,13 @@ private nonisolated struct LocalSmartProcessingResult: Sendable {
     var dictionaryDuration: TimeInterval
 }
 
+private nonisolated struct EnhancementLayoutProtection: Sendable {
+    var text: String
+    var styleInstruction: String
+    var protectedTerms: [String]
+    var markers: [String: String]
+}
+
 @MainActor
 final class SmartDictationPipeline {
     private let historyStore: DictationHistoryStore
@@ -254,6 +261,7 @@ final class SmartDictationPipeline {
         guard let input = record.dictionaryTranscript ?? record.formattedTranscript ?? record.originalTranscript else {
             throw TranscriptEnhancementError.emptyInput
         }
+        let layoutProtection = Self.protectLayoutForEnhancement(input: input, styleInstruction: style.instruction)
         var updated = record
         updated.processingStatus = .enhancing
         updated.enhancementAttemptCount += 1
@@ -266,14 +274,23 @@ final class SmartDictationPipeline {
         do {
             let result = try await enhancer.enhance(
                 TranscriptEnhancementRequest(
-                    text: input,
-                    styleInstruction: style.instruction,
+                    text: layoutProtection.text,
+                    styleInstruction: layoutProtection.styleInstruction,
                     language: updated.language,
                     model: model,
                     protectedTerms: dictionaryEntries.filter(\.isEnabled).map(\.replacement)
+                        + layoutProtection.protectedTerms
                 )
             )
-            updated.finalText = result.text
+            let restoredText = try Self.restoreProtectedLayoutMarkers(
+                in: result.text,
+                markers: layoutProtection.markers
+            )
+            updated.finalText = try EnhancementResponseValidator().validate(
+                output: restoredText,
+                input: input,
+                protectedTerms: dictionaryEntries.filter(\.isEnabled).map(\.replacement)
+            )
             updated.processingStatus = .enhanced
             updated.enhancementProviderID = result.provider
             updated.enhancementModelID = result.model
@@ -328,6 +345,79 @@ final class SmartDictationPipeline {
 
     private nonisolated static func formattedSeconds(_ interval: TimeInterval) -> String {
         String(format: "%.3f", interval)
+    }
+
+    private nonisolated static func protectLayoutForEnhancement(
+        input: String,
+        styleInstruction: String
+    ) -> EnhancementLayoutProtection {
+        guard input.contains("\n") else {
+            return EnhancementLayoutProtection(
+                text: input,
+                styleInstruction: styleInstruction,
+                protectedTerms: [],
+                markers: [:]
+            )
+        }
+
+        var text = input
+        var markers: [String: String] = [:]
+        guard let expression = try? NSRegularExpression(pattern: #"\n+"#) else {
+            return EnhancementLayoutProtection(
+                text: input,
+                styleInstruction: styleInstruction,
+                protectedTerms: [],
+                markers: [:]
+            )
+        }
+
+        let matches = expression.matches(in: input, range: NSRange(input.startIndex..., in: input)).reversed()
+        for (index, match) in matches.enumerated() {
+            guard let range = Range(match.range, in: text) else { continue }
+            let marker = "[[FLOWDICTATE_LAYOUT_BREAK_\(index + 1)]]"
+            markers[marker] = String(text[range])
+            text.replaceSubrange(range, with: " \(marker) ")
+        }
+
+        let instruction = """
+        \(styleInstruction)
+
+        Preserve every token that looks like [[FLOWDICTATE_LAYOUT_BREAK_N]] exactly as written. These tokens mark user-requested line or paragraph breaks and must remain in their original order. Do not remove, rename, translate or add them.
+        """
+
+        return EnhancementLayoutProtection(
+            text: text,
+            styleInstruction: instruction,
+            protectedTerms: Array(markers.keys),
+            markers: markers
+        )
+    }
+
+    private nonisolated static func restoreProtectedLayoutMarkers(
+        in text: String,
+        markers: [String: String]
+    ) throws -> String {
+        guard !markers.isEmpty else { return text }
+        var result = text
+        for marker in markers.keys.sorted(by: { $0.count > $1.count }) {
+            guard let replacement = markers[marker] else { continue }
+            guard result.localizedCaseInsensitiveContains(marker) else {
+                throw TranscriptEnhancementError.implausibleResult(
+                    "a protected layout marker is missing: \(marker)"
+                )
+            }
+            let pattern = #"[ \t]*"# + NSRegularExpression.escapedPattern(for: marker) + #"[ \t]*"#
+            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                result = result.replacingOccurrences(of: marker, with: replacement)
+                continue
+            }
+            result = expression.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: NSRegularExpression.escapedTemplate(for: replacement)
+            )
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func enhancementCategory(for error: Error) -> DictationErrorCategory {

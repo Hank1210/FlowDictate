@@ -315,19 +315,30 @@ struct FlowDictateSettingsView: View {
                         Text(position.title).tag(position)
                     }
                 }
-                HStack {
-                    Text("Preview characters")
-                    Slider(
-                        value: Binding(
-                            get: { Double(settings.livePreviewCharacterLimit) },
-                            set: { settings.livePreviewCharacterLimit = Int($0.rounded()) }
-                        ),
-                        in: 50...800,
-                        step: 25
-                    )
-                    Text("\(settings.livePreviewCharacterLimit)")
-                        .monospacedDigit()
-                        .frame(width: 36, alignment: .trailing)
+                if let previewCharacterRange = settings.overlaySize.livePreviewCharacterRange {
+                    HStack {
+                        Text("Max preview characters")
+                        Slider(
+                            value: Binding(
+                                get: {
+                                    Double(settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit))
+                                },
+                                set: { settings.livePreviewCharacterLimit = Int($0.rounded()) }
+                            ),
+                            in: Double(previewCharacterRange.lowerBound)...Double(previewCharacterRange.upperBound),
+                            step: 25
+                        )
+                        Text("\(settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit))")
+                            .monospacedDigit()
+                            .frame(width: 36, alignment: .trailing)
+                    }
+                    Text("Limits the live transcript shown in the overlay. Standard allows up to 200 and Expanded up to 800 characters.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Compact overlay does not show Live Preview text, so no Preview character limit is needed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Button("Test Preview for 5 Seconds…") {
                     coordinator.testLivePreview()

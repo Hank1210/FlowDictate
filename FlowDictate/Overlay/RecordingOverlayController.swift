@@ -75,6 +75,17 @@ nonisolated struct OverlayPreviewPresentation: Equatable, Sendable {
             )
         }
     }
+
+    static func visibleText(_ text: String, for size: OverlaySize) -> String {
+        switch size {
+        case .compact:
+            ""
+        case .standard:
+            text
+        case .expanded:
+            text
+        }
+    }
 }
 
 @MainActor
@@ -125,16 +136,21 @@ private final class RecordingOverlayModel: ObservableObject {
 final class RecordingOverlayController: RecordingOverlayPresenting {
     private let model = RecordingOverlayModel()
     private var panel: NonActivatingPanel?
-    private var successHideWorkItem: DispatchWorkItem?
+    private var successHideTimer: DispatchSourceTimer?
+    private var successHideDeadline: Date?
     private var presentationGeneration: UInt64 = 0
     private var overlayPosition: OverlayPosition = .bottomTrailing
     private var currentScreen: NSScreen?
+    private static let successHideQueue = DispatchQueue(
+        label: "de.euler.FlowDictate.success-overlay-hide",
+        qos: .userInitiated
+    )
 
     func show(status: OverlayStatus, level: Float = 0, reposition: Bool = false) {
+        expireOverdueSuccessOverlayIfNeeded()
         presentationGeneration &+= 1
         let generation = presentationGeneration
-        successHideWorkItem?.cancel()
-        successHideWorkItem = nil
+        cancelSuccessHideTimer()
         model.status = status
         model.level = level
         let panel = panel ?? makePanel()
@@ -146,34 +162,28 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         }
         panel.orderFrontRegardless()
         if case .success = status {
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self,
-                      self.presentationGeneration == generation,
-                      case .success = self.model.status else { return }
-                self.hide()
-                FlowLogger.app.notice("Inserted overlay auto-hidden")
-            }
-            successHideWorkItem = workItem
-            // This controller-owned timeout is independent of queue persistence and
-            // remains the final safeguard if the coordinator's dismissal is delayed.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+            scheduleSuccessHide(generation: generation, after: 0.35)
             FlowLogger.app.notice("Inserted overlay shown; auto-hide scheduled")
         }
     }
 
     func updateLevel(_ level: Float) {
+        expireOverdueSuccessOverlayIfNeeded()
         model.level = level
     }
 
     func updatePreview(_ state: LivePreviewState) {
+        expireOverdueSuccessOverlayIfNeeded()
         model.previewState = state
     }
 
     func updateSource(_ source: RecordingAudioSource) {
+        expireOverdueSuccessOverlayIfNeeded()
         model.source = source
     }
 
     func configure(size: OverlaySize, position: OverlayPosition) {
+        expireOverdueSuccessOverlayIfNeeded()
         model.size = size
         overlayPosition = position
         guard let panel else { return }
@@ -183,11 +193,52 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
 
     func hide() {
         presentationGeneration &+= 1
-        successHideWorkItem?.cancel()
-        successHideWorkItem = nil
+        cancelSuccessHideTimer()
         panel?.orderOut(nil)
         model.level = 0
         model.previewState = .disabled
+    }
+
+    private func scheduleSuccessHide(generation: UInt64, after delay: TimeInterval) {
+        let deadline = Date().addingTimeInterval(delay)
+        successHideDeadline = deadline
+        let timer = DispatchSource.makeTimerSource(queue: Self.successHideQueue)
+        timer.schedule(deadline: .now() + delay, leeway: .milliseconds(20))
+        timer.setEventHandler { [weak self] in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.presentationGeneration == generation,
+                      case .success = self.model.status else { return }
+                self.logSuccessHideLateness(deadline: deadline)
+                self.hide()
+                FlowLogger.app.notice("Inserted overlay auto-hidden")
+            }
+        }
+        successHideTimer = timer
+        timer.resume()
+    }
+
+    private func cancelSuccessHideTimer() {
+        successHideTimer?.cancel()
+        successHideTimer = nil
+        successHideDeadline = nil
+    }
+
+    private func expireOverdueSuccessOverlayIfNeeded(now: Date = Date()) {
+        guard case .success = model.status,
+              let deadline = successHideDeadline,
+              now >= deadline else { return }
+        logSuccessHideLateness(deadline: deadline, now: now)
+        hide()
+        FlowLogger.app.notice("Inserted overlay auto-hidden")
+    }
+
+    private func logSuccessHideLateness(deadline: Date, now: Date = Date()) {
+        let lateness = now.timeIntervalSince(deadline)
+        guard lateness > 0.5 else { return }
+        FlowLogger.app.notice(
+            "Inserted overlay auto-hide fired late by \(lateness, format: .fixed(precision: 3), privacy: .public)s"
+        )
     }
 
     private func makePanel() -> NonActivatingPanel {
@@ -432,17 +483,18 @@ private struct RecordingOverlayView: View {
                     }
                     .foregroundStyle(Color.white.opacity(0.72))
                 case let .active(text):
+                    let visibleText = OverlayPreviewPresentation.visibleText(text, for: model.size)
                     if model.size == .expanded {
                         ScrollViewReader { proxy in
                             ScrollView {
-                                Text(text)
+                                Text(visibleText)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.disabled)
                                     .foregroundStyle(previewTextColor)
                                 Color.clear.frame(height: 1).id("preview-end")
                             }
-                            .onChange(of: text) {
-                                let lineCount = text.reduce(into: 1) { count, character in
+                            .onChange(of: visibleText) {
+                                let lineCount = visibleText.reduce(into: 1) { count, character in
                                     if character == "\n" { count += 1 }
                                 }
                                 defer { previousPreviewLineCount = lineCount }
@@ -451,8 +503,10 @@ private struct RecordingOverlayView: View {
                             }
                         }
                     } else {
-                        Text(text)
+                        Text(visibleText)
                             .lineLimit(3)
+                            .truncationMode(.head)
+                            .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .foregroundStyle(previewTextColor)
                     }

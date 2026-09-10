@@ -26,6 +26,7 @@ enum DictationFailureClassifier {
         if let error = error as? TranscriptionProviderError {
             switch error {
             case .missingAPIKey: return .credentialMissing
+            case .audioTooShort: return .transcriptionPreflight
             case .audioFileContainsNoSamples, .audioFileTooLarge: return .providerPermanent
             case let .server(statusCode, _):
                 switch statusCode {

@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 
 nonisolated struct LivePreviewAudioBuffer: Sendable {
     let sampleRate: Double
@@ -65,6 +66,7 @@ nonisolated final class LivePreviewBufferChannel: @unchecked Sendable {
     private let continuation: AsyncStream<LivePreviewAudioBuffer>.Continuation
     private let lock = NSLock()
     private var droppedBufferCountStorage = 0
+    private var didLogDroppedBufferStorage = false
 
     init(limit: Int = 8) {
         var capturedContinuation: AsyncStream<LivePreviewAudioBuffer>.Continuation!
@@ -80,7 +82,15 @@ nonisolated final class LivePreviewBufferChannel: @unchecked Sendable {
 
     nonisolated func yield(_ buffer: LivePreviewAudioBuffer) {
         if case .dropped = continuation.yield(buffer) {
-            lock.withLock { droppedBufferCountStorage += 1 }
+            let shouldLog = lock.withLock {
+                droppedBufferCountStorage += 1
+                if didLogDroppedBufferStorage { return false }
+                didLogDroppedBufferStorage = true
+                return true
+            }
+            if shouldLog {
+                FlowLogger.audio.notice("Live Preview audio buffer dropped; keeping newest buffered audio")
+            }
         }
     }
 

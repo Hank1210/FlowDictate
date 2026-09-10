@@ -30,6 +30,23 @@ nonisolated enum OverlaySize: String, CaseIterable, Codable, Identifiable, Senda
         case .expanded: "Expanded"
         }
     }
+
+    var showsLivePreviewText: Bool {
+        self != .compact
+    }
+
+    var livePreviewCharacterRange: ClosedRange<Int>? {
+        switch self {
+        case .compact: nil
+        case .standard: 50...200
+        case .expanded: 50...800
+        }
+    }
+
+    func clampedLivePreviewCharacterLimit(_ limit: Int) -> Int {
+        guard let livePreviewCharacterRange else { return limit }
+        return min(max(limit, livePreviewCharacterRange.lowerBound), livePreviewCharacterRange.upperBound)
+    }
 }
 
 nonisolated enum OverlayPosition: String, CaseIterable, Codable, Identifiable, Sendable {

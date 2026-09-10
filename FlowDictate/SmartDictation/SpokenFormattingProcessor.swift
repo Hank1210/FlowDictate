@@ -24,7 +24,7 @@ nonisolated struct SpokenFormattingProcessor: Sendable {
                 // Consume those separator commas together with the command so that a
                 // phrase such as `Hallo, neue Zeile, weiter` does not produce dangling
                 // commas at either side of the line break.
-                let pattern = "(?:,[ \\t]*|(?<![\\p{L}\\p{N}_]))[ \\t]*\(NSRegularExpression.escapedPattern(for: phrase))(?![\\p{L}\\p{N}_])[ \\t]*,?[ \\t]*"
+                let pattern = "(?:,[ \\t]*|(?<![\\p{L}\\p{N}_]))[ \\t]*\(NSRegularExpression.escapedPattern(for: phrase))(?![\\p{L}\\p{N}_])[ \\t]*(?:[,]|[.!?]+)?[ \\t]*"
                 guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
                 let range = NSRange(working.startIndex..., in: working)
                 let matches = expression.matches(in: working, range: range)
@@ -57,7 +57,7 @@ nonisolated struct SpokenFormattingProcessor: Sendable {
             return [de, en]
         }
         return [
-            Command(phrases: phrases("neuer Absatz", "new paragraph"), output: "\n\n"),
+            Command(phrases: language == "en" ? ["new paragraph"] : language == "de" ? ["neuer Absatz", "Absatz"] : ["neuer Absatz", "Absatz", "new paragraph"], output: "\n\n"),
             Command(phrases: phrases("neue Zeile", "new line"), output: "\n"),
             Command(phrases: phrases("Aufzählung", "bullet point"), output: "\n• "),
             Command(phrases: phrases("Klammer auf", "open parenthesis"), output: "("),

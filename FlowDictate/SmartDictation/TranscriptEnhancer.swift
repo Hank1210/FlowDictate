@@ -48,6 +48,11 @@ nonisolated struct EnhancementResponseValidator: Sendable {
         guard result.count <= maximumCharacters else {
             throw TranscriptEnhancementError.implausibleResult("the response is unexpectedly long")
         }
+        guard !looksLikeAssistantAnswer(output: result, input: input) else {
+            throw TranscriptEnhancementError.implausibleResult(
+                "the response appears to answer the dictated text instead of rewriting it"
+            )
+        }
 
         let presentProtectedTerms = protectedTerms.filter {
             !$0.isEmpty && input.localizedCaseInsensitiveContains($0)
@@ -55,11 +60,60 @@ nonisolated struct EnhancementResponseValidator: Sendable {
         let required = Set(extractProtectedTokens(from: input) + presentProtectedTerms)
         let missing = required.filter { !result.localizedCaseInsensitiveContains($0) }
         guard missing.isEmpty else {
+            let listed = missing.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+                .prefix(5)
+                .joined(separator: ", ")
             throw TranscriptEnhancementError.implausibleResult(
-                "a number, URL or protected dictionary term is missing"
+                "a number, URL, protected dictionary term or layout marker is missing: \(listed)"
             )
         }
         return result
+    }
+
+    private func looksLikeAssistantAnswer(output: String, input: String) -> Bool {
+        let normalizedOutput = normalizeForAssistantCheck(output)
+        let normalizedInput = normalizeForAssistantCheck(input)
+        guard !normalizedOutput.isEmpty else { return false }
+
+        let assistantPrefixes = [
+            "ich kann dir",
+            "ich kann ihnen",
+            "ich kann die",
+            "ich kann das",
+            "ich kann diese",
+            "ich kann nicht",
+            "ich kann es nicht",
+            "ich kann dir erklaren",
+            "ich kann ihnen erklaren",
+            "gerne helfe ich",
+            "naturlich helfe ich",
+            "naturlich kann ich",
+            "hier ist",
+            "hier sind",
+            "als ki",
+            "als ai",
+            "i can help",
+            "i can explain",
+            "i can do",
+            "i can't",
+            "i cannot",
+            "sure,",
+            "of course,",
+            "here is",
+            "here are",
+            "as an ai"
+        ]
+
+        return assistantPrefixes.contains { prefix in
+            normalizedOutput.hasPrefix(prefix) && !normalizedInput.hasPrefix(prefix)
+        }
+    }
+
+    private func normalizeForAssistantCheck(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
     }
 
     private func extractProtectedTokens(from text: String) -> [String] {

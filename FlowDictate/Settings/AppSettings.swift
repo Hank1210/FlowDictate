@@ -306,9 +306,10 @@ final class AppSettings: ObservableObject {
         } else {
             livePreviewEnabled = !existingInstallation
         }
-        overlaySize = OverlaySize(
+        let restoredOverlaySize = OverlaySize(
             rawValue: defaults.string(forKey: Key.overlaySize) ?? ""
         ) ?? .standard
+        overlaySize = restoredOverlaySize
         let storedPreviewLimit = defaults.object(forKey: Key.livePreviewCharacterLimit) as? Int
         livePreviewCharacterLimit = min(max(storedPreviewLimit ?? 150, 50), 800)
         overlayPosition = OverlayPosition(

@@ -26,6 +26,7 @@ final class SystemProcessActivityManager: ProcessActivityManaging {
 @MainActor
 final class DictationCoordinator: ObservableObject {
     static let currentOnboardingVersion = FlowDictateVersion.onboardingSchema
+    private static let minimumTranscribableRecordingDuration: TimeInterval = 0.300
 
     @Published private(set) var state: DictationState = .idle
     @Published private(set) var inputDevices: [AudioInputDevice] = []
@@ -723,6 +724,35 @@ final class DictationCoordinator: ObservableObject {
         .dropFirst(3)
         .sink { [weak self] _ in
             self?.requireRestartForTranscriptionChange()
+        }
+        .store(in: &settingsCancellables)
+
+        settings.$livePreviewCharacterLimit
+            .removeDuplicates()
+            .sink { [weak self] limit in
+                guard let self else { return }
+                livePreviewCoordinator.updateCharacterLimit(
+                    settings.overlaySize.clampedLivePreviewCharacterLimit(limit)
+                )
+            }
+            .store(in: &settingsCancellables)
+
+        Publishers.Merge(
+            settings.$overlaySize.map { _ in () },
+            settings.$overlayPosition.map { _ in () }
+        )
+        .sink { [weak self] _ in
+            guard let self else { return }
+            overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
+            if !settings.overlaySize.showsLivePreviewText {
+                recorder.previewBufferHandler = nil
+                livePreviewCoordinator.cancel()
+                overlay.updatePreview(.disabled)
+                return
+            }
+            livePreviewCoordinator.updateCharacterLimit(
+                settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
+            )
         }
         .store(in: &settingsCancellables)
     }
@@ -1910,6 +1940,10 @@ final class DictationCoordinator: ObservableObject {
         sessionRecorder = nil
         livePreviewCoordinator.finish()
         latestOutputURL = recording.url
+        if recording.duration < Self.minimumTranscribableRecordingDuration {
+            await rejectTooShortRecording(recording)
+            return
+        }
         guard let target = focusTarget else {
             await releaseQueueReservation()
             fail(TextInsertionError.targetUnavailable, retainedAudioURL: recording.url)
@@ -1965,6 +1999,27 @@ final class DictationCoordinator: ObservableObject {
             fail(error, retainedAudioURL: recording.url)
         }
         Task { [weak self] in await self?.refreshHistory() }
+    }
+
+    private func rejectTooShortRecording(_ recording: AudioRecordingResult) async {
+        let error = TranscriptionProviderError.audioTooShort(
+            minimumDuration: Self.minimumTranscribableRecordingDuration
+        )
+        let target = focusTarget
+        var record = makeRecord(from: recording, target: target, status: .transcriptionFailed)
+        record.errorCategory = DictationFailureClassifier.category(for: error)
+        record.errorMessage = error.localizedDescription
+        record.updatedAt = Date()
+        do {
+            try await historyStore.upsert(record)
+            await refreshHistory()
+        } catch {
+            FlowLogger.app.error(
+                "Too-short recording history entry could not be written: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+        await releaseQueueReservation()
+        fail(error, retainedAudioURL: recording.url)
     }
 
     private func makeJob(record: DictationRecord) async throws -> DictationJob {
@@ -2178,16 +2233,28 @@ final class DictationCoordinator: ObservableObject {
             let statePersistenceStartedAt = Date()
             job.status = .transcribing
             job.updatedAt = Date()
+            let jobUpdateStartedAt = Date()
             try await jobStore.update(job)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) transcribing manifest update completed in \(Self.elapsedSeconds(since: jobUpdateStartedAt), privacy: .public)s"
+            )
             if !isRecording {
+                let overlayStateStartedAt = Date()
                 state = .transcribing
                 overlay.show(status: .processing)
+                FlowLogger.transcription.info(
+                    "Job \(job.id, privacy: .public) transcribing overlay update completed in \(Self.elapsedSeconds(since: overlayStateStartedAt), privacy: .public)s"
+                )
             }
             currentRecord.jobID = job.id
             currentRecord.jobStatus = job.status
             currentRecord.queueSequence = job.queueSequence
             currentRecord.updatedAt = Date()
+            let historyStageStartedAt = Date()
             try await historyStore.stage(currentRecord)
+            FlowLogger.transcription.info(
+                "Job \(job.id, privacy: .public) pre-transcription History stage completed in \(Self.elapsedSeconds(since: historyStageStartedAt), privacy: .public)s"
+            )
             FlowLogger.transcription.info(
                 "Job \(job.id, privacy: .public) pre-transcription state persistence completed in \(Self.elapsedSeconds(since: statePersistenceStartedAt), privacy: .public)s"
             )
@@ -2519,6 +2586,11 @@ final class DictationCoordinator: ObservableObject {
         FlowLogger.audio.info(
             "Preparing Live Preview: enabled=\(self.settings.livePreviewEnabled, privacy: .public), speechPermission=\(self.speechPermissionState.rawValue, privacy: .public)"
         )
+        guard settings.overlaySize.showsLivePreviewText else {
+            overlay.updatePreview(.disabled)
+            FlowLogger.audio.info("Live Preview skipped for Compact overlay")
+            return
+        }
         guard settings.livePreviewEnabled else {
             overlay.updatePreview(.disabled)
             FlowLogger.audio.info("Live Preview is disabled in Settings")
@@ -2542,7 +2614,7 @@ final class DictationCoordinator: ObservableObject {
             recorder.previewBufferHandler = try livePreviewCoordinator.start(
                 configuration: LivePreviewConfiguration(
                     localeIdentifier: localeIdentifier,
-                    characterLimit: settings.livePreviewCharacterLimit
+                    characterLimit: settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
                 )
             )
         } catch {
