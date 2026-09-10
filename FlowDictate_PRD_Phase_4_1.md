@@ -1,9 +1,9 @@
 # Product Requirements Document: FlowDictate Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Zukunftsentwurf; Umsetzung erst nach Abschluss und Stabilisierung von 4.0
-**Stand:** 2. September 2026
-**Ausgangsversion:** eine lokal freigegebene FlowDictate-4.0-Version
+**Status:** Vorbereitungsentwurf nach Abschluss von 4.0.2; Implementierung erst nach finaler Scope-Freigabe
+**Stand:** 10. September 2026
+**Ausgangsversion:** FlowDictate 4.0.2
 **Zielversion:** FlowDictate 4.1.0; Buildnummer erst vor dem Release festlegen
 **Abhängigkeit:** `FlowDictate_PRD_Phase_4_0.md` und die Long-Form-/Recoveryverträge aus `FlowDictate_PRD_Phase_3_4.md`
 
@@ -35,6 +35,7 @@ Nach Abschluss von Phase 4.1 gilt:
 8. Überlappende Sprache wird erhalten statt willkürlich zu einem Satz vermischt.
 9. Aufnahme, Stop, globale Hotkeys und UI bleiben auch bei langen Meetings responsiv.
 10. Teilfehler, Crash und Neustart bewahren jede vorhandene Spur und jedes erfolgreiche Teiltranskript.
+11. Vor kombinierten Aufnahmen bestätigt der Nutzer aktiv, dass er für Information und erforderliche Einwilligungen der Beteiligten verantwortlich ist.
 
 ## 3. Produktentscheidungen
 
@@ -66,7 +67,21 @@ Jede Meeting-Session friert Provider, Engine, Modell, Sprache, Privacy-Modus und
 
 Eine kombinierte Aufnahme besitzt immer einen sichtbaren Aufnahmestatus. FlowDictate bietet keine Funktion zum heimlichen Start, zum Verbergen der Aufnahme oder zum Umgehen von macOS-Berechtigungen.
 
-### 3.6 Wettbewerbsabgrenzung
+### 3.6 Explizites Consent-Gate für Meetingaufnahmen
+
+Bei `Microphone + System Audio` muss FlowDictate vor dem ersten Start eine klare, nicht versteckte Bestätigung verlangen. Der Nutzer bestätigt aktiv, dass er andere Beteiligte informiert hat beziehungsweise die erforderlichen Einwilligungen für die Aufnahme besitzt. Diese Bestätigung ist kein Ersatz für Rechtsberatung und macht keine pauschale Aussage zur Zulässigkeit in allen Ländern, Bundesstaaten, Unternehmen oder Meetingkontexten.
+
+Produktentscheidung für 4.1:
+
+- Das Consent-Gate erscheint spätestens beim ersten Start einer kombinierten Aufnahme.
+- Der Hinweis ist kurz, verständlich und handlungsbezogen formuliert.
+- Ohne aktive Bestätigung startet keine kombinierte Aufnahme.
+- Die Bestätigung kann optional gemerkt werden, muss aber in Settings jederzeit zurückgesetzt werden können.
+- Bei wesentlichen Änderungen am Aufnahmeumfang, zum Beispiel neu aktivierter Systemaudioaufnahme, darf FlowDictate erneut bestätigen lassen.
+- FlowDictate bleibt sichtbar im Recordingstatus; das Pop-up darf nicht als einzige Transparenzmaßnahme verstanden werden.
+- Der konkrete Text wird vor Release geprüft, damit er nicht wie eine Rechtsgarantie klingt.
+
+### 3.7 Wettbewerbsabgrenzung
 
 OpenWhispr wird für 4.1 als wichtigster Vergleichspunkt behandelt. FlowDictate konkurriert in dieser Phase nicht primär über maximale Plattformbreite oder möglichst viele Modelloptionen, sondern über:
 
@@ -79,7 +94,7 @@ OpenWhispr wird für 4.1 als wichtigster Vergleichspunkt behandelt. FlowDictate 
 
 Der Release darf deshalb nicht nur funktional vorhanden sein, sondern muss besonders bei Stabilität, Recovery, Datenschutzverständlichkeit und Installation vertrauenswürdig wirken.
 
-### 3.7 Übersetzung bleibt separater Backlog-Kandidat
+### 3.8 Übersetzung bleibt separater Backlog-Kandidat
 
 Diktat-Übersetzung ist ein plausibles späteres Feature: Sprache X diktieren, Text in Zielsprache Y einfügen. Für 4.1 wird es nicht in den Scope aufgenommen.
 
@@ -95,6 +110,7 @@ Produktentscheidung für diesen Stand:
 ### 4.1 Pflichtumfang
 
 - neue, echte Quelle `Microphone + System Audio`,
+- explizites Consent-Gate vor kombinierter Aufnahme,
 - gemeinsame Start-/Stop-Orchestrierung,
 - getrennte lokale Originalspuren,
 - monotone gemeinsame Timeline,
@@ -150,10 +166,12 @@ Produktentscheidung für diesen Stand:
 
 1. Nutzer wählt `Microphone + System Audio`.
 2. FlowDictate zeigt ausgewähltes Mikrofon, Systemaudioerlaubnis, Provider/Privacy-Modus und geschätzten Speicherbedarf pro Stunde.
-3. Beide Berechtigungen werden vor Aufnahmebeginn geprüft.
-4. Eine gemeinsame Session wird angelegt und atomar in Status `preparing` gespeichert.
-5. Beide Recorder werden über eine Startbarriere gestartet.
-6. Erst wenn mindestens eine Quelle valide Samples liefert, wechselt die Session zu `recording`; ein Ausfall der zweiten Quelle wird sofort sichtbar.
+3. FlowDictate zeigt vor dem ersten Start beziehungsweise nach zurückgesetzter Bestätigung ein Consent-Pop-up für Meetingaufnahmen.
+4. Der Nutzer muss aktiv bestätigen, dass er für Information und erforderliche Einwilligungen der Beteiligten verantwortlich ist; ohne Bestätigung startet keine kombinierte Aufnahme.
+5. Beide Berechtigungen werden vor Aufnahmebeginn geprüft.
+6. Eine gemeinsame Session wird angelegt und atomar in Status `preparing` gespeichert.
+7. Beide Recorder werden über eine Startbarriere gestartet.
+8. Erst wenn mindestens eine Quelle valide Samples liefert, wechselt die Session zu `recording`; ein Ausfall der zweiten Quelle wird sofort sichtbar.
 
 ### 5.2 Aufnahme
 
@@ -514,7 +532,10 @@ Vor Aufnahme wird kein hartes Dauerlimit behauptet. Bei sehr wenig Speicher wird
 - Vor der finalen 4.1-Architekturentscheidung wird geprüft, ob Systemaudio über einen echten audio-only Capture-Pfad statt über einen ScreenCaptureKit-Displaystream aufgenommen werden kann. Ziel ist eine möglichst präzise macOS-Berechtigung wie `Nur Aufnahme von System Audio`, sofern dies mit öffentlichen APIs, Sandbox, Stabilität und macOS-Zielversionen vereinbar ist.
 - App-/Fensternamen, Meetingtitel und Teilnehmernamen werden nicht ohne eigene Produktfreigabe persistiert.
 - Nutzer ist für Einwilligung und rechtmäßige Aufnahme verantwortlich; Onboarding/Settings weisen verständlich darauf hin.
-- Vor Start einer kombinierten Meeting-Aufnahme muss FlowDictate klar darauf hinweisen, dass der Nutzer für Information beziehungsweise Einwilligung der Beteiligten verantwortlich ist.
+- Vor Start einer kombinierten Meeting-Aufnahme muss FlowDictate ein explizites Consent-Pop-up anzeigen, sofern die Bestätigung noch nicht erteilt oder zurückgesetzt wurde.
+- Ohne aktive Consent-Bestätigung startet `Microphone + System Audio` nicht.
+- Die Consent-Bestätigung wird lokal gespeichert, enthält keine Meetinginhalte und kann in Settings zurückgesetzt werden.
+- Der Hinweistext darf keine Rechtsberatung simulieren, sondern muss Verantwortung, Einwilligungspflicht und regionale/organisatorische Unterschiede klar benennen.
 - Sichtbarer Recordingstatus darf nicht abschaltbar sein.
 - Offline-/Cloudkennzeichnung aus 4.0 gilt je Meeting.
 - Im Offline-Modus verlassen weder Tracks noch Texte das Gerät.
@@ -678,7 +699,7 @@ Phase 4.1 ist produktseitig abgeschlossen, wenn:
 | fehlende Providerzeitstempel | ehrliche TrackChunk-Präzision statt falscher Worttimeline |
 | Echo erscheint auf beiden Tracks | keine riskante Cross-Track-Deduplizierung in 4.1 |
 | Nutzer erwartet Remotesprechertrennung | klare Rollenbezeichnung `You`/`System Audio`; keine Diarization in 4.1 versprechen |
-| rechtlich unzulässige Aufnahme | sichtbarer Status, Einwilligungshinweis, keine Stealth-Funktion |
+| rechtlich unzulässige Aufnahme | sichtbarer Status, explizites Consent-Gate, lokal zurücksetzbare Bestätigung, keine Stealth-Funktion |
 | Systemaudio erfordert breitere Screen-&-System-Audio-Berechtigung als Wettbewerber | CoreAudio/System-Audio-Tap als audio-only Alternative prüfen; falls nicht tragfähig, ScreenCaptureKit-Einsatz in UI und Privacy-Doku transparent erklären |
 | Recoveryzustände explodieren in Komplexität | getrennte Trackstatus plus validierte Meetinginvarianten |
 | Wettbewerber wirkt funktionsreicher | 4.1 auf macOS-native Stabilität, Recovery, Privacy und nachvollziehbare Meetingartefakte fokussieren |
