@@ -60,6 +60,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var isLocalTranscriptionTestRunning = false
     @Published private(set) var localTranscriptionTestMessage: String?
     @Published private(set) var transcriptionRestartRequired = false
+    @Published private(set) var isMeetingRecordingConsentPresented = false
     @Published private(set) var queueSnapshot = DictationQueueSnapshot(
         processingCount: 0,
         queuedCount: 0,
@@ -108,6 +109,7 @@ final class DictationCoordinator: ObservableObject {
     private let jobStore: DictationJobStore
     private let processingQueue: DictationProcessingQueue
     private let processActivityManager: ProcessActivityManaging
+    private let meetingRecordingConsentPresenter: any MeetingRecordingConsentPresenting
 
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
@@ -138,6 +140,7 @@ final class DictationCoordinator: ObservableObject {
     private var completionPersistenceTask: Task<Void, Never>?
     private var inMemoryJobTargets: [UUID: FocusTarget] = [:]
     private var settingsCancellables: Set<AnyCancellable> = []
+    private var hasSessionMeetingRecordingConsent = false
     private var hasResolvedLivePreviewAvailability = false
     private var criticalInteractionActivity: NSObjectProtocol?
     private lazy var pasteboardInserter = PasteboardTextInserter(
@@ -212,6 +215,7 @@ final class DictationCoordinator: ObservableObject {
         localModelManager: LocalModelManager? = nil,
         jobStore: DictationJobStore? = nil,
         processActivityManager: ProcessActivityManaging? = nil,
+        meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil,
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         automaticallyPresentOnboarding: Bool = false
@@ -248,6 +252,8 @@ final class DictationCoordinator: ObservableObject {
         self.jobStore = resolvedJobStore
         processingQueue = DictationProcessingQueue(store: resolvedJobStore)
         self.processActivityManager = processActivityManager ?? SystemProcessActivityManager()
+        self.meetingRecordingConsentPresenter = meetingRecordingConsentPresenter
+            ?? MeetingRecordingConsentWindowController()
         livePreviewCoordinator = LivePreviewCoordinator(
             provider: livePreviewProvider ?? AppleSpeechLivePreviewProvider()
         )
@@ -358,6 +364,10 @@ final class DictationCoordinator: ObservableObject {
     }
     var canPerformPrimaryAction: Bool {
         recorder.isRecording ? state == .recording : canStartNewRecording
+    }
+    var hasCurrentMeetingRecordingConsent: Bool {
+        settings.hasAcceptedCurrentMeetingRecordingConsent
+            || hasSessionMeetingRecordingConsent
     }
     var latestEnhancementFailure: DictationRecord? {
         historyRecords.first { $0.processingStatus == .enhancementFailed }
@@ -1203,12 +1213,60 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func selectRecordingAudioSource(_ source: RecordingAudioSource) {
-        guard !recorder.isRecording, !isProcessing, source != .mixed else { return }
+        guard !recorder.isRecording, !isProcessing else { return }
         guard settings.recordingAudioSource != source else { return }
+        if MixedRecordingConsentGate.requirement(
+            for: source,
+            hasCurrentConsent: hasCurrentMeetingRecordingConsent
+        ) == .confirmationRequired {
+            presentMeetingRecordingConsent { [weak self] in
+                self?.applyRecordingAudioSource(source)
+            }
+            return
+        }
+        applyRecordingAudioSource(source)
+    }
+
+    func resetMeetingRecordingConsent() {
+        settings.resetMeetingRecordingConsent()
+        hasSessionMeetingRecordingConsent = false
+        setupMessage = "Mixed recording confirmation was reset."
+    }
+
+    func requestMeetingRecordingConsent() {
+        presentMeetingRecordingConsent()
+    }
+
+    private func applyRecordingAudioSource(_ source: RecordingAudioSource) {
         microphoneRecorder.previewBufferHandler = nil
         livePreviewCoordinator.cancel()
         settings.recordingAudioSource = source
         refreshPermissionStatus()
+    }
+
+    private func presentMeetingRecordingConsent(
+        afterConfirmation: @escaping @MainActor () -> Void = {}
+    ) {
+        guard !isMeetingRecordingConsentPresented else { return }
+        isMeetingRecordingConsentPresented = true
+        meetingRecordingConsentPresenter.present(
+            onConfirm: { [weak self] rememberConfirmation in
+                guard let self else { return }
+                if rememberConfirmation {
+                    self.settings.acceptCurrentMeetingRecordingConsent()
+                } else {
+                    self.hasSessionMeetingRecordingConsent = true
+                }
+                self.isMeetingRecordingConsentPresented = false
+                self.setupMessage = self.settings.dictationActivationMode == .pressAndHold
+                    ? "Confirmation saved. Hold the dictation shortcut again to start recording."
+                    : "Mixed recording confirmation saved. Start recording when you are ready."
+                afterConfirmation()
+            },
+            onCancel: { [weak self] in
+                self?.isMeetingRecordingConsentPresented = false
+            }
+        )
     }
 
     func openSystemAudioSettings() {
@@ -1796,6 +1854,18 @@ final class DictationCoordinator: ObservableObject {
         latestOutputURL = nil
         guard !transcriptionRestartRequired else {
             setupMessage = "Transcription settings changed. Use Quit & Restart before starting another dictation."
+            return
+        }
+        if settings.recordingAudioSource == .mixed {
+            guard hasCurrentMeetingRecordingConsent else {
+                presentMeetingRecordingConsent()
+                return
+            }
+            fail(
+                MixedRecordingError.captureNotAvailable,
+                retainedAudioURL: nil,
+                message: "Synchronized Microphone + System Audio capture is not available yet in this 4.1 development build."
+            )
             return
         }
         refreshConfigurationStatus()

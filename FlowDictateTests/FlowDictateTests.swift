@@ -257,6 +257,274 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func meetingRecordingConsentIsExplicitPersistentAndResettable() {
+        let suiteName = "FlowDictateMeetingConsent-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var settings = AppSettings(defaults: defaults)
+        #expect(!settings.hasAcceptedCurrentMeetingRecordingConsent)
+        #expect(
+            MixedRecordingConsentGate.requirement(
+                for: .mixed,
+                hasCurrentConsent: settings.hasAcceptedCurrentMeetingRecordingConsent
+            ) == .confirmationRequired
+        )
+        #expect(
+            MixedRecordingConsentGate.requirement(
+                for: .microphone,
+                hasCurrentConsent: false
+            ).allowsRecording
+        )
+
+        settings.acceptCurrentMeetingRecordingConsent()
+        settings = AppSettings(defaults: defaults)
+        #expect(settings.hasAcceptedCurrentMeetingRecordingConsent)
+        #expect(
+            MixedRecordingConsentGate.requirement(
+                for: .mixed,
+                hasCurrentConsent: settings.hasAcceptedCurrentMeetingRecordingConsent
+            ) == .satisfied
+        )
+
+        settings.resetMeetingRecordingConsent()
+        #expect(!AppSettings(defaults: defaults).hasAcceptedCurrentMeetingRecordingConsent)
+    }
+
+    @MainActor
+    @Test func selectingMixedSourceRequiresConfirmationBeforeChangingSetting() {
+        let presenter = MockMeetingRecordingConsentPresenter()
+        let harness = makeCoordinatorHarness(
+            meetingRecordingConsentPresenter: presenter
+        )
+
+        harness.coordinator.selectRecordingAudioSource(.mixed)
+
+        #expect(presenter.presentationCount == 1)
+        #expect(harness.coordinator.isMeetingRecordingConsentPresented)
+        #expect(harness.coordinator.settings.recordingAudioSource == .microphone)
+
+        presenter.cancel()
+        #expect(!harness.coordinator.isMeetingRecordingConsentPresented)
+        #expect(harness.coordinator.settings.recordingAudioSource == .microphone)
+
+        harness.coordinator.selectRecordingAudioSource(.mixed)
+        presenter.confirm(remember: true)
+        #expect(harness.coordinator.settings.recordingAudioSource == .mixed)
+        #expect(harness.coordinator.hasCurrentMeetingRecordingConsent)
+        #expect(harness.coordinator.settings.hasAcceptedCurrentMeetingRecordingConsent)
+    }
+
+    @MainActor
+    @Test func sessionOnlyMeetingConsentIsNotPersisted() {
+        let presenter = MockMeetingRecordingConsentPresenter()
+        let harness = makeCoordinatorHarness(
+            meetingRecordingConsentPresenter: presenter
+        )
+        harness.coordinator.selectRecordingAudioSource(.mixed)
+
+        presenter.confirm(remember: false)
+
+        #expect(harness.coordinator.hasCurrentMeetingRecordingConsent)
+        #expect(!harness.coordinator.settings.hasAcceptedCurrentMeetingRecordingConsent)
+        harness.coordinator.resetMeetingRecordingConsent()
+        #expect(!harness.coordinator.hasCurrentMeetingRecordingConsent)
+    }
+
+    @Test func mixedRecordingSessionRoundTripsAndValidates() throws {
+        let session = makeValidMixedRecordingSession()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let restored = try decoder.decode(
+            MixedRecordingSession.self,
+            from: encoder.encode(session)
+        )
+
+        #expect(try restored.validated() == session)
+        #expect(restored.tracks.map(\.role) == [.localSpeaker, .systemAudio])
+    }
+
+    @Test func mixedRecordingSessionRequiresExactlyOneTrackPerRole() {
+        var session = makeValidMixedRecordingSession()
+        session.tracks[1].role = .localSpeaker
+
+        #expect(throws: MixedRecordingSessionValidationError.invalidTrackRoles) {
+            try session.validated()
+        }
+    }
+
+    @Test func mixedRecordingSessionRejectsBackwardTimestampsAndUnsafePaths() {
+        var session = makeValidMixedRecordingSession()
+        session.tracks[0].timestampAnchors.swapAt(0, 1)
+        #expect(
+            throws: MixedRecordingSessionValidationError.nonMonotonicTimeline(.localSpeaker)
+        ) {
+            try session.validated()
+        }
+
+        session = makeValidMixedRecordingSession()
+        session.tracks[1].audioRelativePath = "../escaped.m4a"
+        #expect(throws: MixedRecordingSessionValidationError.unsafeRelativePath("../escaped.m4a")) {
+            try session.validated()
+        }
+    }
+
+    @Test func completedMixedSessionRequiresExplicitValidCompletionMode() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.finalTranscript = "[You] Hello\n[System Audio] Hi"
+        session.completionMode = .allTracks
+        session.tracks[0].status = .transcribed
+        session.tracks[1].status = .failed
+
+        #expect(throws: MixedRecordingSessionValidationError.invalidCompletion) {
+            try session.validated()
+        }
+
+        session.completionMode = .acceptedSingleTrack(.localSpeaker)
+        #expect(try session.validated() == session)
+    }
+
+    @Test func meetingSessionStoreCreatesLayoutAndRoundTripsManifest() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingStore-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+
+        let paths = try await store.prepareSession(id: session.id)
+        #expect(FileManager.default.fileExists(atPath: paths.tracksDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: paths.derivedDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: paths.transcriptionDirectory.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.manifestURL.path))
+
+        try await store.create(session)
+        #expect(try await store.load(sessionID: session.id) == session)
+
+        session.status = .queued
+        session.updatedAt = session.updatedAt.addingTimeInterval(1)
+        try await store.save(session)
+        #expect(try await store.all() == [session])
+    }
+
+    @Test func meetingSessionStoreCreateDoesNotOverwriteExistingManifest() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingCreate-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let session = makeValidMixedRecordingSession()
+        try await store.create(session)
+
+        do {
+            try await store.create(session)
+            Issue.record("Creating the same meeting twice must not overwrite its manifest")
+        } catch let error as MeetingSessionStoreError {
+            #expect(error == .sessionAlreadyExists(session.id))
+        }
+        #expect(try await store.load(sessionID: session.id) == session)
+    }
+
+    @Test func meetingSessionRestartRecoveryPreservesOriginalTracks() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingRecovery-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.status = .recording
+        session.tracks[0].status = .recording
+        session.tracks[1].status = .recording
+        let paths = try await store.prepareSession(id: session.id)
+        let microphoneURL = paths.sessionDirectory.appendingPathComponent(
+            session.tracks[0].audioRelativePath!
+        )
+        let systemAudioURL = paths.sessionDirectory.appendingPathComponent(
+            session.tracks[1].audioRelativePath!
+        )
+        try Data("microphone-original".utf8).write(to: microphoneURL)
+        try Data("system-audio-original".utf8).write(to: systemAudioURL)
+        try await store.create(session)
+        let recoveryDate = session.updatedAt.addingTimeInterval(30)
+
+        let normalized = try await store.normalizeInterruptedSessions(now: recoveryDate)
+        let recovered = try #require(try await store.load(sessionID: session.id))
+
+        #expect(normalized == [recovered])
+        #expect(recovered.status == .paused)
+        #expect(recovered.tracks.allSatisfy { $0.status == .interrupted })
+        #expect(recovered.lastErrorCategory == .interrupted)
+        #expect(recovered.updatedAt == recoveryDate)
+        #expect(try Data(contentsOf: microphoneURL) == Data("microphone-original".utf8))
+        #expect(try Data(contentsOf: systemAudioURL) == Data("system-audio-original".utf8))
+    }
+
+    @Test func meetingSessionStoreRejectsFutureSchemaWithoutRewritingIt() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingFuture-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.schemaVersion = 999
+        let paths = try await store.prepareSession(id: session.id)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let futureData = try encoder.encode(session)
+        try futureData.write(to: paths.manifestURL)
+
+        do {
+            _ = try await store.load(sessionID: session.id)
+            Issue.record("A future meeting schema must not be accepted")
+        } catch let error as MixedRecordingSessionValidationError {
+            #expect(error == .unsupportedSchema(999))
+        }
+        #expect(try Data(contentsOf: paths.manifestURL) == futureData)
+    }
+
+    @Test func cancellingMeetingManifestDoesNotDeleteOriginalTracks() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingCancel-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        let paths = try await store.prepareSession(id: session.id)
+        let originalURLs = session.tracks.map {
+            paths.sessionDirectory.appendingPathComponent($0.audioRelativePath!)
+        }
+        for (index, url) in originalURLs.enumerated() {
+            try Data("original-\(index)".utf8).write(to: url)
+        }
+        try await store.create(session)
+
+        session.status = .cancelled
+        session.updatedAt = session.updatedAt.addingTimeInterval(1)
+        try await store.save(session)
+
+        #expect(try await store.load(sessionID: session.id)?.status == .cancelled)
+        #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    @Test func meetingSessionStoreSurfacesCorruptManifestWithoutReplacingIt() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingCorrupt-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let sessionID = UUID()
+        let paths = try await store.prepareSession(id: sessionID)
+        let corruptData = Data("not-json".utf8)
+        try corruptData.write(to: paths.manifestURL)
+
+        do {
+            _ = try await store.load(sessionID: sessionID)
+            Issue.record("A corrupt meeting manifest must not be silently accepted")
+        } catch is DecodingError {
+            // Expected: recovery UI can surface the damaged manifest explicitly.
+        }
+        #expect(try Data(contentsOf: paths.manifestURL) == corruptData)
+    }
+
+    @MainActor
     @Test func privacyModeAndProviderRemainCompatible() {
         let suiteName = "FlowDictateProviderPrivacy-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -876,6 +1144,30 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func pressAndHoldConsentConsumesFirstShortcutCycleWithoutRecording() async throws {
+        let presenter = MockMeetingRecordingConsentPresenter()
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            meetingRecordingConsentPresenter: presenter
+        )
+        harness.coordinator.settings.dictationActivationMode = .pressAndHold
+
+        harness.dictationHotKeyRegistrar.press()
+        for _ in 0..<40 where presenter.presentationCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        harness.dictationHotKeyRegistrar.release()
+
+        #expect(presenter.presentationCount == 1)
+        #expect(harness.recorder.startCount == 0)
+        presenter.confirm(remember: true)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(harness.recorder.startCount == 0)
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.coordinator.setupMessage?.contains("again") == true)
     }
 
     @MainActor
@@ -2243,7 +2535,8 @@ struct FlowDictateTests {
         livePreviewEnabled: Bool = false,
         recordingSource: RecordingAudioSource = .microphone,
         transcriptionProviderID: TranscriptionProviderID = .openAI,
-        privacyMode: PrivacyMode = .cloudTranscription
+        privacyMode: PrivacyMode = .cloudTranscription,
+        meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -2304,6 +2597,7 @@ struct FlowDictateTests {
                     .appendingPathComponent("FlowDictateJobs-\(UUID())", isDirectory: true)
             ),
             processActivityManager: processActivityManager,
+            meetingRecordingConsentPresenter: meetingRecordingConsentPresenter,
             livePreviewAvailabilityProvider: livePreviewAvailabilityProvider ?? { _, _ in
                 .available(localeIdentifier: "de-DE")
             }
@@ -2327,6 +2621,109 @@ struct FlowDictateTests {
             .appendingPathComponent("FlowDictateRecordings-\(UUID())", isDirectory: true)
         try? store.configure(directory: directory)
         return store
+    }
+
+    private func makeValidMixedRecordingSession() -> MixedRecordingSession {
+        let createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let baseQuality = TrackQualityMetrics(
+            peakLevel: 0.75,
+            clippedFrameCount: 0,
+            silentDurationMilliseconds: 250,
+            droppedBufferCount: 0
+        )
+        let microphone = MeetingAudioTrack(
+            id: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!,
+            role: .localSpeaker,
+            status: .finalized,
+            audioRelativePath: "tracks/microphone.caf",
+            formatIdentifier: "lpcm",
+            sampleRate: 48_000,
+            channelCount: 1,
+            firstHostTime: 1_000,
+            lastHostTime: 11_000,
+            durationMilliseconds: 10_000,
+            byteCount: 960_000,
+            timestampAnchors: [
+                TrackTimestampAnchor(
+                    hostTime: 1_000,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: 0
+                ),
+                TrackTimestampAnchor(
+                    hostTime: 11_000,
+                    trackFramePosition: 480_000,
+                    sessionTimeMilliseconds: 10_000
+                )
+            ],
+            gaps: [],
+            quality: baseQuality,
+            transcriptionSessionID: nil,
+            errorCategory: nil,
+            errorMessage: nil
+        )
+        let systemAudio = MeetingAudioTrack(
+            id: UUID(uuidString: "20000000-0000-0000-0000-000000000002")!,
+            role: .systemAudio,
+            status: .finalized,
+            audioRelativePath: "tracks/system-audio.m4a",
+            formatIdentifier: "aac",
+            sampleRate: 48_000,
+            channelCount: 2,
+            firstHostTime: 1_010,
+            lastHostTime: 11_010,
+            durationMilliseconds: 10_000,
+            byteCount: 180_000,
+            timestampAnchors: [
+                TrackTimestampAnchor(
+                    hostTime: 1_010,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: 10
+                ),
+                TrackTimestampAnchor(
+                    hostTime: 11_010,
+                    trackFramePosition: 480_000,
+                    sessionTimeMilliseconds: 10_010
+                )
+            ],
+            gaps: [],
+            quality: baseQuality,
+            transcriptionSessionID: nil,
+            errorCategory: nil,
+            errorMessage: nil
+        )
+        return MixedRecordingSession(
+            schemaVersion: MixedRecordingSession.currentSchemaVersion,
+            id: UUID(uuidString: "30000000-0000-0000-0000-000000000003")!,
+            recordID: UUID(uuidString: "40000000-0000-0000-0000-000000000004")!,
+            dictationJobID: nil,
+            status: .finalizing,
+            createdAt: createdAt,
+            updatedAt: createdAt.addingTimeInterval(10),
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "parakeet-tdt-0.6b-v3-coreml",
+            language: "en",
+            tracks: [microphone, systemAudio],
+            synchronization: SynchronizationReport(
+                quality: .good,
+                initialOffsetMilliseconds: 10,
+                estimatedDriftPartsPerMillion: 0,
+                residualDriftMilliseconds: 0,
+                analyzedAnchorCount: 4
+            ),
+            qualityReport: MeetingQualityReport(
+                synchronizationQuality: .good,
+                completeTrackRoles: [.localSpeaker, .systemAudio],
+                totalGapCount: 0,
+                totalGapDurationMilliseconds: 0,
+                totalClippedFrameCount: 0
+            ),
+            completionMode: nil,
+            mergedTimelineRelativePath: nil,
+            finalTranscript: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
     }
 
     private func makeTranscribedRecord(text: String) -> DictationRecord {
@@ -2516,6 +2913,39 @@ private final class MockHotKeyRegistrar: HotKeyRegistering {
     func unregister() {
         pressHandler = nil
         releaseHandler = nil
+    }
+}
+
+@MainActor
+private final class MockMeetingRecordingConsentPresenter: MeetingRecordingConsentPresenting {
+    private(set) var presentationCount = 0
+    private var onConfirm: ((Bool) -> Void)?
+    private var onCancel: (() -> Void)?
+
+    func present(
+        onConfirm: @escaping @MainActor (Bool) -> Void,
+        onCancel: @escaping @MainActor () -> Void
+    ) {
+        presentationCount += 1
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+    }
+
+    func confirm(remember: Bool) {
+        let action = onConfirm
+        clear()
+        action?(remember)
+    }
+
+    func cancel() {
+        let action = onCancel
+        clear()
+        action?()
+    }
+
+    private func clear() {
+        onConfirm = nil
+        onCancel = nil
     }
 }
 

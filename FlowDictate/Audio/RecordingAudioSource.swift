@@ -1,5 +1,13 @@
 import Foundation
 
+nonisolated enum MixedRecordingError: LocalizedError {
+    case captureNotAvailable
+
+    var errorDescription: String? {
+        "Synchronized Microphone + System Audio capture is not available yet."
+    }
+}
+
 nonisolated enum RecordingAudioSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case microphone
     case systemAudio
@@ -44,7 +52,7 @@ nonisolated enum RecordingAudioSource: String, Codable, CaseIterable, Identifiab
         case .systemAudio:
             "Records the digital audio played by apps on this Mac. No video is saved. \(Self.systemAudioDurationGuidance)"
         case .mixed:
-            "Records microphone and system audio together. This mode is still experimental."
+            "Records microphone and system audio as separate, recoverable tracks on one timeline."
         }
     }
 }

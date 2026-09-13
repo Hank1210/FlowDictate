@@ -31,6 +31,8 @@ nonisolated enum DictationActivationMode: String, Codable, CaseIterable, Identif
 
 @MainActor
 final class AppSettings: ObservableObject {
+    nonisolated static let currentMeetingRecordingConsentVersion = 1
+
     private enum Key {
         static let dictationHotKey = "dictationHotKey"
         static let cancelHotKey = "cancelHotKey"
@@ -66,6 +68,7 @@ final class AppSettings: ObservableObject {
         static let updateCheckEnabled = "updateCheckEnabled"
         static let lastUpdateCheck = "lastUpdateCheck"
         static let dictationActivationMode = "dictationActivationMode"
+        static let meetingRecordingConsentVersion = "meetingRecordingConsentVersion"
     }
 
     private let defaults: UserDefaults
@@ -234,6 +237,19 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(dictationActivationMode.rawValue, forKey: Key.dictationActivationMode) }
     }
 
+    @Published private(set) var meetingRecordingConsentVersion: Int {
+        didSet {
+            defaults.set(
+                meetingRecordingConsentVersion,
+                forKey: Key.meetingRecordingConsentVersion
+            )
+        }
+    }
+
+    var hasAcceptedCurrentMeetingRecordingConsent: Bool {
+        meetingRecordingConsentVersion == Self.currentMeetingRecordingConsentVersion
+    }
+
     var lastUpdateCheck: Date? {
         didSet { defaults.set(lastUpdateCheck, forKey: Key.lastUpdateCheck) }
     }
@@ -331,6 +347,17 @@ final class AppSettings: ObservableObject {
         dictationActivationMode = DictationActivationMode(
             rawValue: defaults.string(forKey: Key.dictationActivationMode) ?? ""
         ) ?? .toggle
+        meetingRecordingConsentVersion = defaults.integer(
+            forKey: Key.meetingRecordingConsentVersion
+        )
+    }
+
+    func acceptCurrentMeetingRecordingConsent() {
+        meetingRecordingConsentVersion = Self.currentMeetingRecordingConsentVersion
+    }
+
+    func resetMeetingRecordingConsent() {
+        meetingRecordingConsentVersion = 0
     }
 
     /// Changes the two coupled settings as one normalized operation. Individual

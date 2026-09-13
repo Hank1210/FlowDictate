@@ -67,7 +67,7 @@ struct FlowDictateMenu: View {
         Divider()
 
         Menu("Recording Source") {
-            ForEach(RecordingAudioSource.allCases.filter { $0 != .mixed }) { source in
+            ForEach(RecordingAudioSource.allCases) { source in
                 Button {
                     coordinator.selectRecordingAudioSource(source)
                 } label: {
@@ -364,6 +364,7 @@ struct FlowDictateSettingsView: View {
                 ) {
                     Text(RecordingAudioSource.microphone.title).tag(RecordingAudioSource.microphone)
                     Text(RecordingAudioSource.systemAudio.title).tag(RecordingAudioSource.systemAudio)
+                    Text(RecordingAudioSource.mixed.title).tag(RecordingAudioSource.mixed)
                 }
                 .disabled(coordinator.isRecording || coordinator.isProcessing)
 
@@ -371,7 +372,7 @@ struct FlowDictateSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if settings.recordingAudioSource == .systemAudio {
+                if settings.recordingAudioSource != .microphone {
                     HStack {
                         Label(
                             coordinator.systemAudioPermissionGranted ? "Allowed" : "Permission required",
@@ -397,6 +398,36 @@ struct FlowDictateSettingsView: View {
                 }
             }
 
+            if settings.recordingAudioSource == .mixed {
+                Section("Meeting Recording") {
+                    Label(
+                        coordinator.hasCurrentMeetingRecordingConsent
+                            ? "Responsibility confirmed"
+                            : "Confirmation required",
+                        systemImage: coordinator.hasCurrentMeetingRecordingConsent
+                            ? "checkmark.shield.fill"
+                            : "person.crop.circle.badge.exclamationmark"
+                    )
+                    .foregroundStyle(
+                        coordinator.hasCurrentMeetingRecordingConsent ? .green : .orange
+                    )
+
+                    Text("Before recording, inform everyone involved and obtain any consent required for your location, organization, and meeting.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if coordinator.hasCurrentMeetingRecordingConsent {
+                        Button("Reset Meeting Recording Confirmation") {
+                            coordinator.resetMeetingRecordingConsent()
+                        }
+                    } else {
+                        Button("Review and Confirm…") {
+                            coordinator.requestMeetingRecordingConsent()
+                        }
+                    }
+                }
+            }
+
             Section("Input") {
                 Picker(
                     "Microphone",
@@ -411,7 +442,7 @@ struct FlowDictateSettingsView: View {
                             .tag(Optional(device.uid))
                     }
                 }
-                .disabled(coordinator.isRecording || settings.recordingAudioSource != .microphone)
+                .disabled(coordinator.isRecording || settings.recordingAudioSource == .systemAudio)
 
                 HStack {
                     Text("Input level")
@@ -424,7 +455,7 @@ struct FlowDictateSettingsView: View {
                 Button("Refresh Devices") {
                     coordinator.refreshInputDevices()
                 }
-                .disabled(coordinator.isRecording || settings.recordingAudioSource != .microphone)
+                .disabled(coordinator.isRecording || settings.recordingAudioSource == .systemAudio)
 
                 if coordinator.isRecording {
                     Text("Microphone controls are paused while a recording is running.")

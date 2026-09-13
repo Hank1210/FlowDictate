@@ -21,7 +21,7 @@ enum RecordingLocationError: LocalizedError {
     }
 }
 
-final class RecordingLocationStore: @unchecked Sendable {
+nonisolated final class RecordingLocationStore: @unchecked Sendable {
     private enum Key {
         static let bookmark = "recordingDirectoryBookmark"
         static let displayPath = "recordingDirectoryDisplayPath"
