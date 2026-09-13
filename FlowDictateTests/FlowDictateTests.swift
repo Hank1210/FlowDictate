@@ -291,6 +291,42 @@ struct FlowDictateTests {
         #expect(!AppSettings(defaults: defaults).hasAcceptedCurrentMeetingRecordingConsent)
     }
 
+    @Test func systemAudioCaptureStrategyUsesCoreAudioTapFromMacOS14_2() {
+        let macOS14_1 = SystemAudioCaptureStrategy.candidate(
+            for: OperatingSystemVersion(majorVersion: 14, minorVersion: 1, patchVersion: 9)
+        )
+        #expect(macOS14_1.preferredBackend == .screenCaptureKit)
+        #expect(!macOS14_1.requiresAudioCaptureUsageDescription)
+        #expect(macOS14_1.permissionSettingsLabel == "Screen & System Audio Recording")
+
+        for version in [
+            OperatingSystemVersion(majorVersion: 14, minorVersion: 2, patchVersion: 0),
+            OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0),
+            OperatingSystemVersion(majorVersion: 26, minorVersion: 6, patchVersion: 2)
+        ] {
+            let strategy = SystemAudioCaptureStrategy.candidate(for: version)
+            #expect(strategy.preferredBackend == .coreAudioTap)
+            #expect(strategy.requiresAudioCaptureUsageDescription)
+            #expect(strategy.permissionSettingsLabel == "System Audio Recording")
+            #expect(strategy.minimumOperatingSystem.majorVersion == 14)
+            #expect(strategy.minimumOperatingSystem.minorVersion == 2)
+        }
+    }
+
+    @Test func coreAudioTapProbeReportDerivesCapturedDurationFromFrames() {
+        let report = CoreAudioTapProbeReport(
+            callbackCount: 100,
+            nonSilentCallbackCount: 80,
+            frameCount: 240_000,
+            sampleRate: 48_000,
+            channelCount: 1,
+            firstHostTime: 1_000,
+            lastHostTime: 6_000
+        )
+
+        #expect(report.capturedDuration == 5)
+    }
+
     @MainActor
     @Test func selectingMixedSourceRequiresConfirmationBeforeChangingSetting() {
         let presenter = MockMeetingRecordingConsentPresenter()

@@ -149,7 +149,7 @@ Recording Source / Consent / Permission Preflight
 | Schritt | Status | Voraussetzung | Entsperrt |
 |---|---|---|---|
 | 4.1.0 Grundlagen und Consent | `ERLEDIGT` | 4.0.2 | stabiler Sessionvertrag |
-| 4.1.1 Capture-Spike | `GATE` | Grundlagen | verbindliche Captureentscheidung |
+| 4.1.1 Capture-Spike | `IN ARBEIT` | Grundlagen | verbindliche Captureentscheidung |
 | 4.1.2 Dual-Capture-Coordinator | `OFFEN` | Spike-Go | echte Mixed-Aufnahme |
 | 4.1.3 Timeline, Sync und Qualität | `OFFEN` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `OFFEN` | finale Trackverträge | recoverbare Transkripte |
@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `GATE` – nächster Arbeitsschritt
+**Status:** `IN ARBEIT` – API-/Build- und Kurzzeit-Signalgate einschließlich sandboxed Community-Paket bestanden; Erstberechtigungs-, Wiederholungs- und Langzeitnachweis ausstehend
 
 ### 7.1 Ziel
 

@@ -61,6 +61,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var localTranscriptionTestMessage: String?
     @Published private(set) var transcriptionRestartRequired = false
     @Published private(set) var isMeetingRecordingConsentPresented = false
+    @Published private(set) var isCoreAudioTapProbeRunning = false
     @Published private(set) var queueSnapshot = DictationQueueSnapshot(
         processingCount: 0,
         queuedCount: 0,
@@ -110,6 +111,7 @@ final class DictationCoordinator: ObservableObject {
     private let processingQueue: DictationProcessingQueue
     private let processActivityManager: ProcessActivityManaging
     private let meetingRecordingConsentPresenter: any MeetingRecordingConsentPresenting
+    private let coreAudioTapCaptureProbe = CoreAudioTapCaptureProbe()
 
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
@@ -1235,6 +1237,35 @@ final class DictationCoordinator: ObservableObject {
 
     func requestMeetingRecordingConsent() {
         presentMeetingRecordingConsent()
+    }
+
+    func runCoreAudioTapCaptureProbe() {
+        guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
+        isCoreAudioTapProbeRunning = true
+        setupMessage = "Audio-only capture probe is running. Play System Audio for 5 seconds…"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isCoreAudioTapProbeRunning = false }
+            do {
+                let report = try await coreAudioTapCaptureProbe.run()
+                setupMessage = String(
+                    format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %.0f Hz, %d channel.",
+                    report.capturedDuration,
+                    report.callbackCount,
+                    report.nonSilentCallbackCount,
+                    report.sampleRate,
+                    report.channelCount
+                )
+                FlowLogger.audio.notice(
+                    "Core Audio tap probe succeeded: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public)"
+                )
+            } catch {
+                setupMessage = "Audio-only capture probe failed: \(error.localizedDescription)"
+                FlowLogger.audio.error(
+                    "Core Audio tap probe failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     private func applyRecordingAudioSource(_ source: RecordingAudioSource) {

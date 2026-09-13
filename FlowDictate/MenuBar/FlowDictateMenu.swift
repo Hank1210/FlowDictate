@@ -425,6 +425,25 @@ struct FlowDictateSettingsView: View {
                             coordinator.requestMeetingRecordingConsent()
                         }
                     }
+
+                    if #available(macOS 14.2, *) {
+                        Divider()
+                        Button("Run Audio-Only Capture Probe for 5 Seconds…") {
+                            coordinator.runCoreAudioTapCaptureProbe()
+                        }
+                        .disabled(
+                            coordinator.isCoreAudioTapProbeRunning
+                                || coordinator.isRecording
+                                || coordinator.isProcessing
+                        )
+                        Text("Development diagnostic: measures Core Audio tap callbacks and timing without saving audio or creating a History entry.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("The audio-only Core Audio tap requires macOS 14.2 or later. ScreenCaptureKit remains the compatibility candidate on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
