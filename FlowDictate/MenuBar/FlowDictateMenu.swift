@@ -375,26 +375,38 @@ struct FlowDictateSettingsView: View {
                 if settings.recordingAudioSource != .microphone {
                     HStack {
                         Label(
-                            coordinator.systemAudioPermissionGranted ? "Allowed" : "Permission required",
-                            systemImage: coordinator.systemAudioPermissionGranted
-                                ? "checkmark.circle.fill" : "exclamationmark.circle"
+                            coordinator.systemAudioPermissionStatus.readiness.title,
+                            systemImage: coordinator.systemAudioPermissionStatus.readiness.symbolName
                         )
-                        .foregroundStyle(coordinator.systemAudioPermissionGranted ? .green : .orange)
+                        .foregroundStyle(
+                            coordinator.systemAudioPermissionStatus.readiness == .authorized
+                                ? Color.green
+                                : coordinator.systemAudioPermissionStatus.readiness == .requestRequired
+                                    ? Color.orange
+                                    : Color.secondary
+                        )
                         Spacer()
-                        Button("Check Again") { coordinator.refreshPermissionStatuses() }
+                        if coordinator.systemAudioPermissionStatus.backend == .screenCaptureKit {
+                            Button("Check Again") { coordinator.refreshPermissionStatuses() }
+                        }
                         Button("Open System Settings") { coordinator.openSystemAudioSettings() }
                     }
-                    Button("Test System Audio for 5 Seconds…") {
-                        coordinator.testSystemAudio()
-                    }
-                    .disabled(
-                        coordinator.isSystemAudioTestRunning
-                            || coordinator.isRecording
-                            || coordinator.isProcessing
-                    )
-                    Text("The test stays on this Mac, creates no History entry and sends nothing to OpenAI.")
+                    Text(coordinator.systemAudioPermissionStatus.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if settings.recordingAudioSource == .systemAudio {
+                        Button("Test System Audio for 5 Seconds…") {
+                            coordinator.testSystemAudio()
+                        }
+                        .disabled(
+                            coordinator.isSystemAudioTestRunning
+                                || coordinator.isRecording
+                                || coordinator.isProcessing
+                        )
+                        Text("The test stays on this Mac, creates no History entry and sends nothing to OpenAI.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 

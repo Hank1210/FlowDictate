@@ -24,7 +24,7 @@ nonisolated struct SystemAudioCaptureStrategy: Sendable {
                     patchVersion: 0
                 ),
                 requiresAudioCaptureUsageDescription: true,
-                permissionSettingsLabel: "System Audio Recording"
+                permissionSettingsLabel: "Screen & System Audio Recording"
             )
         }
         return Self(

@@ -307,10 +307,60 @@ struct FlowDictateTests {
             let strategy = SystemAudioCaptureStrategy.candidate(for: version)
             #expect(strategy.preferredBackend == .coreAudioTap)
             #expect(strategy.requiresAudioCaptureUsageDescription)
-            #expect(strategy.permissionSettingsLabel == "System Audio Recording")
+            #expect(strategy.permissionSettingsLabel == "Screen & System Audio Recording")
             #expect(strategy.minimumOperatingSystem.majorVersion == 14)
             #expect(strategy.minimumOperatingSystem.minorVersion == 2)
         }
+    }
+
+    @Test func systemAudioPermissionStatusMatchesTheSelectedCaptureBackend() {
+        let macOS14_1 = OperatingSystemVersion(
+            majorVersion: 14,
+            minorVersion: 1,
+            patchVersion: 9
+        )
+        let macOS14_2 = OperatingSystemVersion(
+            majorVersion: 14,
+            minorVersion: 2,
+            patchVersion: 0
+        )
+
+        let deniedScreenCapture = SystemAudioPermissionStatus.resolve(
+            for: .systemAudio,
+            version: macOS14_2,
+            screenCaptureAuthorized: false,
+            coreAudioTapSucceededThisSession: true
+        )
+        #expect(deniedScreenCapture.backend == .screenCaptureKit)
+        #expect(deniedScreenCapture.readiness == .requestRequired)
+        #expect(deniedScreenCapture.settingsLabel == "Screen & System Audio Recording")
+
+        let allowedScreenCapture = SystemAudioPermissionStatus.resolve(
+            for: .mixed,
+            version: macOS14_1,
+            screenCaptureAuthorized: true,
+            coreAudioTapSucceededThisSession: false
+        )
+        #expect(allowedScreenCapture.backend == .screenCaptureKit)
+        #expect(allowedScreenCapture.readiness == .authorized)
+
+        let uncheckedCoreAudioTap = SystemAudioPermissionStatus.resolve(
+            for: .mixed,
+            version: macOS14_2,
+            screenCaptureAuthorized: true,
+            coreAudioTapSucceededThisSession: false
+        )
+        #expect(uncheckedCoreAudioTap.backend == .coreAudioTap)
+        #expect(uncheckedCoreAudioTap.readiness == .verifiedWhenCaptureStarts)
+        #expect(uncheckedCoreAudioTap.settingsLabel == "Screen & System Audio Recording")
+
+        let verifiedCoreAudioTap = SystemAudioPermissionStatus.resolve(
+            for: .mixed,
+            version: macOS14_2,
+            screenCaptureAuthorized: false,
+            coreAudioTapSucceededThisSession: true
+        )
+        #expect(verifiedCoreAudioTap.readiness == .authorized)
     }
 
     @Test func coreAudioTapProbeReportDerivesCapturedDurationFromFrames() {

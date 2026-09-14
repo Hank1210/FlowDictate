@@ -38,6 +38,11 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var livePreviewAvailability: LivePreviewAvailability =
         .unavailable(reason: "Checking local Live Preview availability…")
     @Published private(set) var systemAudioPermissionGranted = false
+    @Published private(set) var systemAudioPermissionStatus = SystemAudioPermissionStatus.resolve(
+        for: .microphone,
+        screenCaptureAuthorized: false,
+        coreAudioTapSucceededThisSession: false
+    )
     @Published private(set) var recordingLocationConfigured = false
     @Published private(set) var recordingLocationPath: String?
     @Published private(set) var historyRecords: [DictationRecord] = []
@@ -143,6 +148,7 @@ final class DictationCoordinator: ObservableObject {
     private var inMemoryJobTargets: [UUID: FocusTarget] = [:]
     private var settingsCancellables: Set<AnyCancellable> = []
     private var hasSessionMeetingRecordingConsent = false
+    private var hasVerifiedCoreAudioTapAccess = false
     private var hasResolvedLivePreviewAvailability = false
     private var criticalInteractionActivity: NSObjectProtocol?
     private lazy var pasteboardInserter = PasteboardTextInserter(
@@ -704,7 +710,13 @@ final class DictationCoordinator: ObservableObject {
         microphonePermissionGranted = permissionManager.hasMicrophoneAccess
         accessibilityPermissionGranted = permissionManager.hasEventPostingAccess
         speechPermissionState = permissionManager.speechRecognitionStatus
-        systemAudioPermissionGranted = SystemAudioPermissionService().isAuthorized
+        let screenCaptureAuthorized = SystemAudioPermissionService().isAuthorized
+        systemAudioPermissionStatus = SystemAudioPermissionStatus.resolve(
+            for: settings.recordingAudioSource,
+            screenCaptureAuthorized: screenCaptureAuthorized,
+            coreAudioTapSucceededThisSession: hasVerifiedCoreAudioTapAccess
+        )
+        systemAudioPermissionGranted = systemAudioPermissionStatus.readiness == .authorized
         if !hasResolvedLivePreviewAvailability
             || previousSpeechPermission != speechPermissionState {
             refreshLivePreviewAvailability()
@@ -1248,6 +1260,8 @@ final class DictationCoordinator: ObservableObject {
             defer { isCoreAudioTapProbeRunning = false }
             do {
                 let report = try await coreAudioTapCaptureProbe.run()
+                hasVerifiedCoreAudioTapAccess = true
+                refreshPermissionStatus()
                 setupMessage = String(
                     format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %d gap(s), cleanup %@.",
                     report.capturedDuration,
@@ -1277,6 +1291,8 @@ final class DictationCoordinator: ObservableObject {
             defer { isCoreAudioTapProbeRunning = false }
             do {
                 let report = try await coreAudioTapCaptureProbe.runRepeated()
+                hasVerifiedCoreAudioTapAccess = true
+                refreshPermissionStatus()
                 let healthy = report.allCleanupSucceeded
                     && report.allTimelinesMonotonic
                     && report.sampleDiscontinuityCount == 0

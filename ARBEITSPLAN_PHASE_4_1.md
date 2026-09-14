@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal- und Zehn-Zyklen-Gate einschließlich sandboxed Community-Paket bestanden; Erstberechtigungs-, Vergleichs- und Langzeitnachweis ausstehend
+**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal- und Zehn-Zyklen-Gate einschließlich sandboxed Community-Paket bestanden; backendabhängiger Berechtigungsvertrag und ehrliche Preflight-UX umgesetzt; realer Erstberechtigungs-, Vergleichs- und Langzeitnachweis ausstehend
 
 ### 7.1 Ziel
 

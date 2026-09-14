@@ -15,6 +15,8 @@ Für `Microphone + System Audio` wird ein öffentlicher, audio-only Systemaudiop
 - `AudioHardwareCreateProcessTap` ist laut installiertem Apple-SDK ab macOS 14.2 verfügbar.
 - Apple beschreibt einen Tap als Quelle ausgehenden Prozessaudios, die über ein HAL Aggregate Device wie ein Audioeingang gelesen wird.
 - Für die erste Aufnahme von einem Aggregate Device mit Tap verlangt Apple `NSAudioCaptureUsageDescription`; macOS zeigt dabei eine Systemaudio-Aufnahmefreigabe.
+- Apple dokumentiert keine öffentliche Core-Audio-API, mit der FlowDictate diese Freigabe vorab abfragen oder separat anfordern kann. Der Systemdialog entsteht erst beim ersten Aufnahmestart vom Tap-Aggregate-Device.
+- Die Berechtigung wird in macOS unter `Privacy & Security → Screen & System Audio Recording` verwaltet. Dort kann macOS reinen Systemaudiozugriff getrennt vom Bildschirmzugriff ausweisen.
 - Ein Tap kann privat, ungemutet, mono oder stereo und als globaler Tap mit ausgeschlossenen Prozessen konfiguriert werden.
 - Das Aggregate Device kann ebenfalls privat sein und eine Tapliste mit Driftkompensation führen.
 - Der IOProc liefert `AudioTimeStamp` und `AudioBufferList` ohne Screen- oder Videostream.
@@ -24,6 +26,7 @@ Primärquellen:
 - [Capturing system audio with Core Audio taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps)
 - [NSAudioCaptureUsageDescription](https://developer.apple.com/documentation/bundleresources/information-property-list/nsaudiocaptureusagedescription)
 - [AudioHardwareCreateProcessTap](https://developer.apple.com/documentation/coreaudio/audiohardwarecreateprocesstap(_:_:))
+- [Allow apps to record your system audio](https://support.apple.com/guide/mac-help/mchl2844ecab/mac)
 
 ### ScreenCaptureKit
 
@@ -55,12 +58,20 @@ Primärquelle:
 
 Die Probe ist in Settings nur bei ausgewähltem `Microphone + System Audio` sichtbar. Sie ersetzt keinen Recorder und entfernt die bestehende `captureNotAvailable`-Sperre nicht.
 
+Die Berechtigungsanzeige folgt dem tatsächlich ausgewählten Backend:
+
+- `System Audio` nutzt weiterhin ScreenCaptureKit und zeigt dessen öffentlich abfragbaren Preflightstatus.
+- `Microphone + System Audio` zeigt auf macOS 14.2+ vor dem ersten erfolgreichen Tap-Lauf `Checked when recording starts` statt einer nicht belegbaren Freigabe.
+- Nach einem erfolgreichen Audio-only-Lauf zeigt FlowDictate `Allowed` nur für die laufende App-Sitzung. Nach einem Neustart wird erneut kein persistenter Status behauptet.
+- Der alte ScreenCaptureKit-Test wird in der Mixed-Ansicht nicht angeboten, damit er nicht unbeabsichtigt die breitere Capturefreigabe anfragt.
+
 Debug-Builds unterstützen zusätzlich die Startschalter `--run-core-audio-tap-probe` und `--run-core-audio-tap-cycle-probe`. Sie rufen exakt dieselben Einzel- beziehungsweise Zehn-Zyklen-Proben einmalig beim App-Start auf und schreiben nur den Messbericht ins lokale Diagnoseprotokoll. Release-Builds enthalten diese Startpfade nicht.
 
 ## Automatischer Nachweis
 
-- vollständige Unit-Testsuite mit 114 von 114 erfolgreichen Tests grün,
+- vollständige Unit-Testsuite mit 115 von 115 erfolgreichen Tests grün,
 - Strategiegrenze macOS 14.1 → ScreenCaptureKit und macOS 14.2+ → Core Audio Tap getestet,
+- backendabhängige Berechtigungsanzeige einschließlich des nicht vorab abfragbaren Tap-Zustands getestet,
 - Probe kompiliert bei Deployment Target macOS 14.0 hinter Availability-Gate,
 - Universal-Release-Build erfolgreich für `x86_64 arm64`,
 - Release-`Info.plist` enthält `NSAudioCaptureUsageDescription`,
