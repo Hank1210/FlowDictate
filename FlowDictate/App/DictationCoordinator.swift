@@ -1249,20 +1249,51 @@ final class DictationCoordinator: ObservableObject {
             do {
                 let report = try await coreAudioTapCaptureProbe.run()
                 setupMessage = String(
-                    format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %.0f Hz, %d channel.",
+                    format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %d gap(s), cleanup %@.",
                     report.capturedDuration,
                     report.callbackCount,
                     report.nonSilentCallbackCount,
-                    report.sampleRate,
-                    report.channelCount
+                    report.sampleDiscontinuityCount,
+                    report.cleanup.succeeded ? "passed" : "failed"
                 )
                 FlowLogger.audio.notice(
-                    "Core Audio tap probe succeeded: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public)"
+                    "Core Audio tap probe succeeded: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.cleanup.succeeded, privacy: .public)"
                 )
             } catch {
                 setupMessage = "Audio-only capture probe failed: \(error.localizedDescription)"
                 FlowLogger.audio.error(
                     "Core Audio tap probe failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    func runCoreAudioTapRepeatedCaptureProbe() {
+        guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
+        isCoreAudioTapProbeRunning = true
+        setupMessage = "Audio-only capture probe is running 10 start/stop cycles…"
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isCoreAudioTapProbeRunning = false }
+            do {
+                let report = try await coreAudioTapCaptureProbe.runRepeated()
+                let healthy = report.allCleanupSucceeded
+                    && report.allTimelinesMonotonic
+                    && report.sampleDiscontinuityCount == 0
+                setupMessage = String(
+                    format: "Audio-only cycle probe completed: %d/10 cycles, %d callbacks, %d gap(s), cleanup %@.",
+                    report.completedCycleCount,
+                    report.totalCallbackCount,
+                    report.sampleDiscontinuityCount,
+                    report.allCleanupSucceeded ? "passed" : "failed"
+                )
+                FlowLogger.audio.notice(
+                    "Core Audio tap cycle probe completed: cycles=\(report.completedCycleCount, privacy: .public) callbacks=\(report.totalCallbackCount, privacy: .public) signalCallbacks=\(report.totalNonSilentCallbackCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.allCleanupSucceeded, privacy: .public) healthy=\(healthy, privacy: .public)"
+                )
+            } catch {
+                setupMessage = "Audio-only cycle probe failed: \(error.localizedDescription)"
+                FlowLogger.audio.error(
+                    "Core Audio tap cycle probe failed: \(error.localizedDescription, privacy: .public)"
                 )
             }
         }

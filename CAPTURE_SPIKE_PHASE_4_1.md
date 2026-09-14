@@ -1,7 +1,7 @@
 # FlowDictate 4.1 – Capture- und Berechtigungs-Spike
 
-**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal- und Community-Packaging-Gate bestanden
-**Stand:** 13. September 2026
+**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen- und Community-Packaging-Gate bestanden
+**Stand:** 14. September 2026
 **Bezug:** Schritt 4.1.1 aus `ARBEITSPLAN_PHASE_4_1.md`
 
 ## Fragestellung
@@ -46,17 +46,20 @@ Primärquelle:
 3. erstellt einen privaten, ungemuteten Mono-Global-Tap unter Ausschluss des eigenen Prozesses,
 4. erstellt ein privates Aggregate Device mit aktivierter Subtap-Driftkompensation,
 5. installiert einen IOProc auf einer eigenen Dispatch Queue,
-6. misst Callbackanzahl, nichtleere Signalbuffer, Frames, Format sowie erste/letzte Hosttime,
-7. stoppt IO und entfernt IOProc, Aggregate Device und Tap in jedem Erfolgs- und Fehlerpfad,
-8. speichert weder PCM-Daten noch History- oder Meetingdateien.
+6. misst Callbackanzahl, nichtleere Signalbuffer, Frames, Format, Host- und Sample-Time jedes Callbacks,
+7. zählt fehlende oder rückwärts laufende Timestamps sowie Sample-Diskontinuitäten und die größte positive Lücke,
+8. stoppt IO und entfernt IOProc, Aggregate Device und Tap in jedem Erfolgs- und Fehlerpfad,
+9. prüft alle Cleanup-Statuswerte und wartet danach begrenzt auf die UID-Abmeldung aus dem HAL,
+10. kann zehn vollständig getrennte Start-/Stop-Zyklen automatisiert ausführen,
+11. speichert weder PCM-Daten noch History- oder Meetingdateien.
 
 Die Probe ist in Settings nur bei ausgewähltem `Microphone + System Audio` sichtbar. Sie ersetzt keinen Recorder und entfernt die bestehende `captureNotAvailable`-Sperre nicht.
 
-Debug-Builds unterstützen zusätzlich den Startschalter `--run-core-audio-tap-probe`. Er ruft exakt dieselbe Probe einmalig beim App-Start auf und schreibt nur den Messbericht ins lokale Diagnoseprotokoll. Release-Builds enthalten diesen Startpfad nicht.
+Debug-Builds unterstützen zusätzlich die Startschalter `--run-core-audio-tap-probe` und `--run-core-audio-tap-cycle-probe`. Sie rufen exakt dieselben Einzel- beziehungsweise Zehn-Zyklen-Proben einmalig beim App-Start auf und schreiben nur den Messbericht ins lokale Diagnoseprotokoll. Release-Builds enthalten diese Startpfade nicht.
 
 ## Automatischer Nachweis
 
-- vollständige Unit-Testsuite mit 113 von 113 erfolgreichen Tests grün,
+- vollständige Unit-Testsuite mit 114 von 114 erfolgreichen Tests grün,
 - Strategiegrenze macOS 14.1 → ScreenCaptureKit und macOS 14.2+ → Core Audio Tap getestet,
 - Probe kompiliert bei Deployment Target macOS 14.0 hinter Availability-Gate,
 - Universal-Release-Build erfolgreich für `x86_64 arm64`,
@@ -77,6 +80,18 @@ Getestet am 13. September 2026 auf macOS 26.6.2, Apple Silicon:
 
 Alle vier Läufe verwendeten neue private Tap-/Aggregate-IDs und konnten direkt nacheinander gestartet und beendet werden. Es wurden keine Audio-, Bildschirm-, History- oder Meetingdateien erzeugt. Die regulär installierte FlowDictate-App blieb während des Tests unverändert aktiv.
 
+Am 14. September 2026 bestand zusätzlich ein ad-hoc signierter, sandboxed Community-Build zehn automatisierte Start-/Stop-Zyklen hintereinander:
+
+- 10 von 10 Zyklen abgeschlossen,
+- 968 Audio-Callbacks, davon 750 mit Systemaudiosignal,
+- 0 Hosttime-Regressionen,
+- 0 Sample-Time-Regressionen,
+- 0 Sample-Diskontinuitäten und 0 positive Gap-Frames,
+- Stop, IOProc-Entfernung, Aggregate-Device- und Tap-Destroy jeweils erfolgreich,
+- Tap- und Aggregate-UID nach jedem Zyklus nicht mehr im HAL registriert.
+
+Die UID-Abmeldung kann nach einem erfolgreichen Destroy-Aufruf kurz verzögert sichtbar werden. Die Probe wartet deshalb asynchron höchstens eine Sekunde auf die HAL-Konsistenz und meldet danach einen echten Cleanup-Fehler.
+
 Der macOS-Berechtigungsdialog erschien bei diesen Läufen nicht erneut. Die bestehende FlowDictate-Bundle-ID war auf dem Test-Mac bereits für Systemaudio freigegeben. Ein sauberer Erststart nach nicht erteilter, abgelehnter und widerrufener Berechtigung bleibt daher ausdrücklich offen.
 
 ## Vorläufige Entscheidung
@@ -86,7 +101,6 @@ Core Audio Tap ist der bevorzugte 4.1-Kandidat für macOS 14.2 und neuer. Screen
 Diese Entscheidung ist noch nicht final. Vor `GO` fehlen:
 
 - sauberer Erststart mit dem macOS-Berechtigungsdialog sowie Ablehnungs-/Widerrufstest,
-- zehn statt bisher vier kurze Start-/Stop-Zyklen,
 - Vergleich der Timestampkontinuität mit ScreenCaptureKit,
 - 5-, 30- und 60-Minuten-Messungen,
 - Prüfung von Bluetooth-, AirPlay- und Ausgaberoutenwechseln.

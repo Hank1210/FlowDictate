@@ -436,6 +436,14 @@ struct FlowDictateSettingsView: View {
                                 || coordinator.isRecording
                                 || coordinator.isProcessing
                         )
+                        Button("Run 10 Start/Stop Probe Cycles…") {
+                            coordinator.runCoreAudioTapRepeatedCaptureProbe()
+                        }
+                        .disabled(
+                            coordinator.isCoreAudioTapProbeRunning
+                                || coordinator.isRecording
+                                || coordinator.isProcessing
+                        )
                         Text("Development diagnostic: measures Core Audio tap callbacks and timing without saving audio or creating a History entry.")
                             .font(.caption)
                             .foregroundStyle(.secondary)

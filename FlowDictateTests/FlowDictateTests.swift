@@ -314,6 +314,14 @@ struct FlowDictateTests {
     }
 
     @Test func coreAudioTapProbeReportDerivesCapturedDurationFromFrames() {
+        let cleanup = CoreAudioTapCleanupReport(
+            stopStatus: noErr,
+            destroyIOProcStatus: noErr,
+            destroyAggregateDeviceStatus: noErr,
+            destroyTapStatus: noErr,
+            aggregateDeviceRemoved: true,
+            tapRemoved: true
+        )
         let report = CoreAudioTapProbeReport(
             callbackCount: 100,
             nonSilentCallbackCount: 80,
@@ -321,10 +329,63 @@ struct FlowDictateTests {
             sampleRate: 48_000,
             channelCount: 1,
             firstHostTime: 1_000,
-            lastHostTime: 6_000
+            lastHostTime: 6_000,
+            firstSampleTime: 0,
+            lastSampleTime: 239_000,
+            missingHostTimeCount: 0,
+            missingSampleTimeCount: 0,
+            hostTimeRegressionCount: 0,
+            sampleTimeRegressionCount: 0,
+            sampleDiscontinuityCount: 0,
+            largestPositiveSampleGapFrames: 0,
+            largestHostTimeDeltaNanoseconds: 50_000_000,
+            cleanup: cleanup
         )
 
         #expect(report.capturedDuration == 5)
+        #expect(report.hasMonotonicTimeline)
+        #expect(report.hasContinuousSampleTimeline)
+        #expect(report.cleanup.succeeded)
+        let repeated = CoreAudioTapRepeatedProbeReport(cycles: [report, report])
+        #expect(repeated.completedCycleCount == 2)
+        #expect(repeated.totalCallbackCount == 200)
+        #expect(repeated.allCleanupSucceeded)
+        #expect(repeated.allTimelinesMonotonic)
+
+        let incompleteCleanup = CoreAudioTapCleanupReport(
+            stopStatus: noErr,
+            destroyIOProcStatus: nil,
+            destroyAggregateDeviceStatus: noErr,
+            destroyTapStatus: noErr,
+            aggregateDeviceRemoved: true,
+            tapRemoved: true
+        )
+        #expect(!incompleteCleanup.succeeded)
+        #expect(incompleteCleanup.firstFailure != nil)
+    }
+
+    @Test func coreAudioTapTimelineAnalyzerDetectsGapsAndRegressions() {
+        var continuous = CoreAudioTapTimelineAnalyzer()
+        continuous.record(hostTime: 1_000, sampleTime: 0, frameCount: 480)
+        continuous.record(hostTime: 2_000, sampleTime: 480, frameCount: 480)
+        continuous.record(hostTime: 3_000, sampleTime: 960, frameCount: 480)
+        #expect(continuous.hostTimeRegressionCount == 0)
+        #expect(continuous.sampleTimeRegressionCount == 0)
+        #expect(continuous.sampleDiscontinuityCount == 0)
+
+        var discontinuous = continuous
+        discontinuous.record(hostTime: 2_999, sampleTime: 1_920, frameCount: 480)
+        #expect(discontinuous.hostTimeRegressionCount == 1)
+        #expect(discontinuous.sampleTimeRegressionCount == 0)
+        #expect(discontinuous.sampleDiscontinuityCount == 1)
+        #expect(discontinuous.largestPositiveSampleGapFrames == 480)
+
+        discontinuous.record(hostTime: nil, sampleTime: nil, frameCount: 480)
+        #expect(discontinuous.missingHostTimeCount == 1)
+        #expect(discontinuous.missingSampleTimeCount == 1)
+
+        discontinuous.record(hostTime: 4_000, sampleTime: 1_000, frameCount: 480)
+        #expect(discontinuous.sampleTimeRegressionCount == 1)
     }
 
     @MainActor

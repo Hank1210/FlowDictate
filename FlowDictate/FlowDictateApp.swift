@@ -21,10 +21,16 @@ struct FlowDictateApp: App {
             Image(systemName: coordinator.state.symbolName)
                 #if DEBUG
                 .onAppear {
-                    guard !didRunCoreAudioTapLaunchProbe,
-                          CommandLine.arguments.contains("--run-core-audio-tap-probe") else { return }
+                    guard !didRunCoreAudioTapLaunchProbe else { return }
+                    let arguments = CommandLine.arguments
+                    guard arguments.contains("--run-core-audio-tap-probe")
+                            || arguments.contains("--run-core-audio-tap-cycle-probe") else { return }
                     didRunCoreAudioTapLaunchProbe = true
-                    coordinator.runCoreAudioTapCaptureProbe()
+                    if arguments.contains("--run-core-audio-tap-cycle-probe") {
+                        coordinator.runCoreAudioTapRepeatedCaptureProbe()
+                    } else {
+                        coordinator.runCoreAudioTapCaptureProbe()
+                    }
                 }
                 #endif
         }

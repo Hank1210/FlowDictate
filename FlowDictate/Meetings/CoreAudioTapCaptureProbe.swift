@@ -53,11 +53,95 @@ nonisolated struct CoreAudioTapProbeReport: Sendable, Equatable {
     let channelCount: Int
     let firstHostTime: UInt64?
     let lastHostTime: UInt64?
+    let firstSampleTime: Double?
+    let lastSampleTime: Double?
+    let missingHostTimeCount: Int
+    let missingSampleTimeCount: Int
+    let hostTimeRegressionCount: Int
+    let sampleTimeRegressionCount: Int
+    let sampleDiscontinuityCount: Int
+    let largestPositiveSampleGapFrames: Int64
+    let largestHostTimeDeltaNanoseconds: UInt64
+    let cleanup: CoreAudioTapCleanupReport
 
     var capturedDuration: TimeInterval {
         guard sampleRate > 0 else { return 0 }
         return TimeInterval(frameCount) / sampleRate
     }
+
+    var hasMonotonicTimeline: Bool {
+        missingHostTimeCount == 0
+            && missingSampleTimeCount == 0
+            && hostTimeRegressionCount == 0
+            && sampleTimeRegressionCount == 0
+    }
+
+    var hasContinuousSampleTimeline: Bool {
+        hasMonotonicTimeline && sampleDiscontinuityCount == 0
+    }
+}
+
+nonisolated struct CoreAudioTapCleanupReport: Sendable, Equatable {
+    let stopStatus: OSStatus?
+    let destroyIOProcStatus: OSStatus?
+    let destroyAggregateDeviceStatus: OSStatus?
+    let destroyTapStatus: OSStatus?
+    let aggregateDeviceRemoved: Bool
+    let tapRemoved: Bool
+
+    var succeeded: Bool {
+        stopStatus == noErr
+            && destroyIOProcStatus == noErr
+            && destroyAggregateDeviceStatus == noErr
+            && destroyTapStatus == noErr
+            && aggregateDeviceRemoved
+            && tapRemoved
+    }
+
+    var firstFailure: (operation: String, status: OSStatus)? {
+        for (operation, status) in [
+            ("stop the aggregate device", stopStatus),
+            ("remove the aggregate-device IO callback", destroyIOProcStatus),
+            ("destroy the private aggregate device", destroyAggregateDeviceStatus),
+            ("destroy the process tap", destroyTapStatus)
+        ] {
+            guard let status else {
+                return ("confirm that cleanup did \(operation)", kAudioHardwareUnspecifiedError)
+            }
+            if status != noErr { return (operation, status) }
+        }
+        if !aggregateDeviceRemoved {
+            return ("verify aggregate-device removal", kAudioHardwareUnspecifiedError)
+        }
+        if !tapRemoved {
+            return ("verify process-tap removal", kAudioHardwareUnspecifiedError)
+        }
+        return nil
+    }
+}
+
+nonisolated struct CoreAudioTapRepeatedProbeReport: Sendable, Equatable {
+    let cycles: [CoreAudioTapProbeReport]
+
+    var completedCycleCount: Int { cycles.count }
+    var totalCallbackCount: Int { cycles.reduce(0) { $0 + $1.callbackCount } }
+    var totalNonSilentCallbackCount: Int {
+        cycles.reduce(0) { $0 + $1.nonSilentCallbackCount }
+    }
+    var hostTimeRegressionCount: Int {
+        cycles.reduce(0) { $0 + $1.hostTimeRegressionCount }
+    }
+    var sampleTimeRegressionCount: Int {
+        cycles.reduce(0) { $0 + $1.sampleTimeRegressionCount }
+    }
+    var sampleDiscontinuityCount: Int {
+        cycles.reduce(0) { $0 + $1.sampleDiscontinuityCount }
+    }
+    var largestPositiveSampleGapFrames: Int64 {
+        cycles.map(\.largestPositiveSampleGapFrames).max() ?? 0
+    }
+    var allCleanupSucceeded: Bool { cycles.allSatisfy { $0.cleanup.succeeded } }
+    var allTimelinesMonotonic: Bool { cycles.allSatisfy(\.hasMonotonicTimeline) }
 }
 
 nonisolated enum CoreAudioTapProbeError: LocalizedError, Equatable {
@@ -67,6 +151,7 @@ nonisolated enum CoreAudioTapProbeError: LocalizedError, Equatable {
     case invalidTapIdentifier
     case invalidTapFormat
     case noAudioCallbacks
+    case invalidCycleCount
 
     var errorDescription: String? {
         switch self {
@@ -82,6 +167,8 @@ nonisolated enum CoreAudioTapProbeError: LocalizedError, Equatable {
             "Core Audio created a tap without a usable audio format."
         case .noAudioCallbacks:
             "The Core Audio tap started but delivered no audio callbacks."
+        case .invalidCycleCount:
+            "The Core Audio tap repetition count must be between 1 and 100."
         }
     }
 
@@ -118,6 +205,8 @@ actor CoreAudioTapCaptureProbe {
         var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
         var ioProcID: AudioDeviceIOProcID?
         var deviceStarted = false
+        var createdTapUID: String?
+        var createdAggregateUID: String?
 
         do {
             let excludedProcessIDs = try currentProcessObjectID().map { [$0] } ?? []
@@ -133,9 +222,11 @@ actor CoreAudioTapCaptureProbe {
                 operation: "create the process tap"
             )
             let tapUID = try tapUID(for: tapID)
+            createdTapUID = tapUID
             let tapFormat = try tapFormat(for: tapID)
 
             let aggregateUID = "de.euler.FlowDictate.capture-probe.\(UUID().uuidString)"
+            createdAggregateUID = aggregateUID
             let aggregateDescription: [String: Any] = [
                 kAudioAggregateDeviceNameKey: "FlowDictate 4.1 Capture Probe",
                 kAudioAggregateDeviceUIDKey: aggregateUID,
@@ -186,22 +277,55 @@ actor CoreAudioTapCaptureProbe {
                 tapID: tapID,
                 aggregateDeviceID: aggregateDeviceID,
                 ioProcID: ioProcID,
-                deviceStarted: deviceStarted
+                deviceStarted: deviceStarted,
+                tapUID: createdTapUID,
+                aggregateUID: createdAggregateUID
             )
             throw error
         }
 
-        cleanup(
+        let initialCleanupReport = cleanup(
             tapID: tapID,
             aggregateDeviceID: aggregateDeviceID,
             ioProcID: ioProcID,
-            deviceStarted: deviceStarted
+            deviceStarted: deviceStarted,
+            tapUID: createdTapUID,
+            aggregateUID: createdAggregateUID
         )
-        let report = metrics.report()
+        let cleanupReport = await waitForCleanupRegistrationRemoval(
+            initialCleanupReport,
+            tapUID: createdTapUID,
+            aggregateUID: createdAggregateUID
+        )
+        if let failure = cleanupReport.firstFailure {
+            throw CoreAudioTapProbeError.operationFailed(
+                operation: failure.operation,
+                status: failure.status
+            )
+        }
+        let report = metrics.report(cleanup: cleanupReport)
         guard report.callbackCount > 0 else {
             throw CoreAudioTapProbeError.noAudioCallbacks
         }
         return report
+    }
+
+    func runRepeated(
+        cycles: Int = 10,
+        cycleDuration: Duration = .seconds(1),
+        pause: Duration = .milliseconds(100)
+    ) async throws -> CoreAudioTapRepeatedProbeReport {
+        guard (1...100).contains(cycles) else {
+            throw CoreAudioTapProbeError.invalidCycleCount
+        }
+        var reports: [CoreAudioTapProbeReport] = []
+        reports.reserveCapacity(cycles)
+        for cycleIndex in 0..<cycles {
+            try Task.checkCancellation()
+            reports.append(try await run(for: cycleDuration))
+            if cycleIndex < cycles - 1 { try await Task.sleep(for: pause) }
+        }
+        return CoreAudioTapRepeatedProbeReport(cycles: reports)
     }
 
     @available(macOS 14.2, *)
@@ -272,18 +396,155 @@ actor CoreAudioTapCaptureProbe {
     }
 
     @available(macOS 14.2, *)
+    @discardableResult
     private func cleanup(
         tapID: AudioObjectID,
         aggregateDeviceID: AudioObjectID,
         ioProcID: AudioDeviceIOProcID?,
-        deviceStarted: Bool
-    ) {
+        deviceStarted: Bool,
+        tapUID: String?,
+        aggregateUID: String?
+    ) -> CoreAudioTapCleanupReport {
+        var stopStatus: OSStatus?
+        var destroyIOProcStatus: OSStatus?
+        var destroyAggregateDeviceStatus: OSStatus?
+        var destroyTapStatus: OSStatus?
         if aggregateDeviceID != kAudioObjectUnknown {
-            if deviceStarted { AudioDeviceStop(aggregateDeviceID, ioProcID) }
-            if let ioProcID { AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID) }
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            if deviceStarted { stopStatus = AudioDeviceStop(aggregateDeviceID, ioProcID) }
+            if let ioProcID {
+                destroyIOProcStatus = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            }
+            destroyAggregateDeviceStatus = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
         }
-        if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
+        if tapID != kAudioObjectUnknown {
+            destroyTapStatus = AudioHardwareDestroyProcessTap(tapID)
+        }
+        return CoreAudioTapCleanupReport(
+            stopStatus: stopStatus,
+            destroyIOProcStatus: destroyIOProcStatus,
+            destroyAggregateDeviceStatus: destroyAggregateDeviceStatus,
+            destroyTapStatus: destroyTapStatus,
+            aggregateDeviceRemoved: isUIDUnregistered(
+                aggregateUID,
+                selector: kAudioHardwarePropertyTranslateUIDToDevice
+            ),
+            tapRemoved: isUIDUnregistered(
+                tapUID,
+                selector: kAudioHardwarePropertyTranslateUIDToTap
+            )
+        )
+    }
+
+    private func isUIDUnregistered(
+        _ uid: String?,
+        selector: AudioObjectPropertySelector
+    ) -> Bool {
+        guard let uid else { return false }
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var qualifier = uid as CFString
+        var objectID = AudioObjectID(kAudioObjectUnknown)
+        var outputSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafePointer(to: &qualifier) { pointer in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                UInt32(MemoryLayout<CFString>.size),
+                pointer,
+                &outputSize,
+                &objectID
+            )
+        }
+        return status == noErr && objectID == kAudioObjectUnknown
+    }
+
+    private func waitForCleanupRegistrationRemoval(
+        _ initialReport: CoreAudioTapCleanupReport,
+        tapUID: String?,
+        aggregateUID: String?
+    ) async -> CoreAudioTapCleanupReport {
+        var aggregateDeviceRemoved = initialReport.aggregateDeviceRemoved
+        var tapRemoved = initialReport.tapRemoved
+        for _ in 0..<20 where !aggregateDeviceRemoved || !tapRemoved {
+            try? await Task.sleep(for: .milliseconds(50))
+            aggregateDeviceRemoved = isUIDUnregistered(
+                aggregateUID,
+                selector: kAudioHardwarePropertyTranslateUIDToDevice
+            )
+            tapRemoved = isUIDUnregistered(
+                tapUID,
+                selector: kAudioHardwarePropertyTranslateUIDToTap
+            )
+        }
+        return CoreAudioTapCleanupReport(
+            stopStatus: initialReport.stopStatus,
+            destroyIOProcStatus: initialReport.destroyIOProcStatus,
+            destroyAggregateDeviceStatus: initialReport.destroyAggregateDeviceStatus,
+            destroyTapStatus: initialReport.destroyTapStatus,
+            aggregateDeviceRemoved: aggregateDeviceRemoved,
+            tapRemoved: tapRemoved
+        )
+    }
+}
+
+nonisolated struct CoreAudioTapTimelineAnalyzer: Sendable, Equatable {
+    private(set) var firstHostTime: UInt64?
+    private(set) var lastHostTime: UInt64?
+    private(set) var firstSampleTime: Double?
+    private(set) var lastSampleTime: Double?
+    private(set) var missingHostTimeCount = 0
+    private(set) var missingSampleTimeCount = 0
+    private(set) var hostTimeRegressionCount = 0
+    private(set) var sampleTimeRegressionCount = 0
+    private(set) var sampleDiscontinuityCount = 0
+    private(set) var largestPositiveSampleGapFrames: Int64 = 0
+    private(set) var largestHostTimeDeltaNanoseconds: UInt64 = 0
+
+    private var previousFrameCount: Int64?
+
+    mutating func record(hostTime: UInt64?, sampleTime: Double?, frameCount: Int64) {
+        if let hostTime {
+            firstHostTime = firstHostTime ?? hostTime
+            if let previousHostTime = lastHostTime {
+                if hostTime <= previousHostTime {
+                    hostTimeRegressionCount += 1
+                } else {
+                    largestHostTimeDeltaNanoseconds = max(
+                        largestHostTimeDeltaNanoseconds,
+                        AudioConvertHostTimeToNanos(hostTime - previousHostTime)
+                    )
+                }
+            }
+            lastHostTime = hostTime
+        } else {
+            missingHostTimeCount += 1
+        }
+
+        if let sampleTime {
+            firstSampleTime = firstSampleTime ?? sampleTime
+            if let previousSampleTime = lastSampleTime,
+               let previousFrameCount {
+                if sampleTime < previousSampleTime { sampleTimeRegressionCount += 1 }
+                let expectedSampleTime = previousSampleTime + Double(previousFrameCount)
+                let delta = sampleTime - expectedSampleTime
+                if abs(delta) > 0.5 {
+                    sampleDiscontinuityCount += 1
+                    if delta > 0.5 {
+                        largestPositiveSampleGapFrames = max(
+                            largestPositiveSampleGapFrames,
+                            Int64(delta.rounded())
+                        )
+                    }
+                }
+            }
+            lastSampleTime = sampleTime
+            previousFrameCount = frameCount
+        } else {
+            missingSampleTimeCount += 1
+        }
     }
 }
 
@@ -292,10 +553,9 @@ nonisolated private final class CoreAudioTapProbeMetrics: @unchecked Sendable {
     private var callbackCount = 0
     private var nonSilentCallbackCount = 0
     private var frameCount: Int64 = 0
-    private var firstHostTime: UInt64?
-    private var lastHostTime: UInt64?
     private var sampleRate: Double = 0
     private var channelCount = 0
+    private var timeline = CoreAudioTapTimelineAnalyzer()
 
     func record(
         inputData: UnsafePointer<AudioBufferList>,
@@ -320,19 +580,25 @@ nonisolated private final class CoreAudioTapProbeMetrics: @unchecked Sendable {
         let hostTime = inputTime.pointee.mFlags.contains(.hostTimeValid)
             ? inputTime.pointee.mHostTime
             : nil
+        let sampleTime = inputTime.pointee.mFlags.contains(.sampleTimeValid)
+            ? inputTime.pointee.mSampleTime
+            : nil
 
         lock.lock()
         callbackCount += 1
         if containsNonZeroByte { nonSilentCallbackCount += 1 }
         frameCount += observedFrames
-        firstHostTime = firstHostTime ?? hostTime
-        if let hostTime { lastHostTime = hostTime }
+        timeline.record(
+            hostTime: hostTime,
+            sampleTime: sampleTime,
+            frameCount: observedFrames
+        )
         sampleRate = format.mSampleRate
         channelCount = Int(format.mChannelsPerFrame)
         lock.unlock()
     }
 
-    func report() -> CoreAudioTapProbeReport {
+    func report(cleanup: CoreAudioTapCleanupReport) -> CoreAudioTapProbeReport {
         lock.lock()
         defer { lock.unlock() }
         return CoreAudioTapProbeReport(
@@ -341,8 +607,18 @@ nonisolated private final class CoreAudioTapProbeMetrics: @unchecked Sendable {
             frameCount: frameCount,
             sampleRate: sampleRate,
             channelCount: channelCount,
-            firstHostTime: firstHostTime,
-            lastHostTime: lastHostTime
+            firstHostTime: timeline.firstHostTime,
+            lastHostTime: timeline.lastHostTime,
+            firstSampleTime: timeline.firstSampleTime,
+            lastSampleTime: timeline.lastSampleTime,
+            missingHostTimeCount: timeline.missingHostTimeCount,
+            missingSampleTimeCount: timeline.missingSampleTimeCount,
+            hostTimeRegressionCount: timeline.hostTimeRegressionCount,
+            sampleTimeRegressionCount: timeline.sampleTimeRegressionCount,
+            sampleDiscontinuityCount: timeline.sampleDiscontinuityCount,
+            largestPositiveSampleGapFrames: timeline.largestPositiveSampleGapFrames,
+            largestHostTimeDeltaNanoseconds: timeline.largestHostTimeDeltaNanoseconds,
+            cleanup: cleanup
         )
     }
 }
