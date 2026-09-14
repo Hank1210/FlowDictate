@@ -67,6 +67,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var transcriptionRestartRequired = false
     @Published private(set) var isMeetingRecordingConsentPresented = false
     @Published private(set) var isCoreAudioTapProbeRunning = false
+    @Published private(set) var coreAudioTapProbeMessage: String?
     @Published private(set) var queueSnapshot = DictationQueueSnapshot(
         processingCount: 0,
         queuedCount: 0,
@@ -1254,27 +1255,39 @@ final class DictationCoordinator: ObservableObject {
     func runCoreAudioTapCaptureProbe() {
         guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
-        setupMessage = "Audio-only capture probe is running. Play System Audio for 5 seconds…"
+        let runningMessage = "Audio-only capture probe is running. Play System Audio for 5 seconds…"
+        setupMessage = runningMessage
+        coreAudioTapProbeMessage = runningMessage
         Task { [weak self] in
             guard let self else { return }
             defer { isCoreAudioTapProbeRunning = false }
             do {
                 let report = try await coreAudioTapCaptureProbe.run()
-                hasVerifiedCoreAudioTapAccess = true
-                refreshPermissionStatus()
-                setupMessage = String(
-                    format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %d gap(s), cleanup %@.",
-                    report.capturedDuration,
-                    report.callbackCount,
-                    report.nonSilentCallbackCount,
-                    report.sampleDiscontinuityCount,
-                    report.cleanup.succeeded ? "passed" : "failed"
-                )
+                if report.hasCapturedSignal {
+                    hasVerifiedCoreAudioTapAccess = true
+                    refreshPermissionStatus()
+                    let message = String(
+                        format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %d gap(s), cleanup %@.",
+                        report.capturedDuration,
+                        report.callbackCount,
+                        report.nonSilentCallbackCount,
+                        report.sampleDiscontinuityCount,
+                        report.cleanup.succeeded ? "passed" : "failed"
+                    )
+                    setupMessage = message
+                    coreAudioTapProbeMessage = message
+                } else {
+                    let message = "Audio-only probe was inconclusive: no System Audio signal was received. Play audio and retry, or review access in System Settings."
+                    setupMessage = message
+                    coreAudioTapProbeMessage = message
+                }
                 FlowLogger.audio.notice(
-                    "Core Audio tap probe succeeded: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.cleanup.succeeded, privacy: .public)"
+                    "Core Audio tap probe completed: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) signalVerified=\(report.hasCapturedSignal, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.cleanup.succeeded, privacy: .public)"
                 )
             } catch {
-                setupMessage = "Audio-only capture probe failed: \(error.localizedDescription)"
+                let message = "Audio-only capture probe failed: \(error.localizedDescription)"
+                setupMessage = message
+                coreAudioTapProbeMessage = message
                 FlowLogger.audio.error(
                     "Core Audio tap probe failed: \(error.localizedDescription, privacy: .public)"
                 )
@@ -1285,29 +1298,43 @@ final class DictationCoordinator: ObservableObject {
     func runCoreAudioTapRepeatedCaptureProbe() {
         guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
-        setupMessage = "Audio-only capture probe is running 10 start/stop cycles…"
+        let runningMessage = "Audio-only capture probe is running 10 start/stop cycles…"
+        setupMessage = runningMessage
+        coreAudioTapProbeMessage = runningMessage
         Task { [weak self] in
             guard let self else { return }
             defer { isCoreAudioTapProbeRunning = false }
             do {
                 let report = try await coreAudioTapCaptureProbe.runRepeated()
-                hasVerifiedCoreAudioTapAccess = true
-                refreshPermissionStatus()
+                if report.hasCapturedSignal {
+                    hasVerifiedCoreAudioTapAccess = true
+                    refreshPermissionStatus()
+                }
                 let healthy = report.allCleanupSucceeded
                     && report.allTimelinesMonotonic
                     && report.sampleDiscontinuityCount == 0
-                setupMessage = String(
-                    format: "Audio-only cycle probe completed: %d/10 cycles, %d callbacks, %d gap(s), cleanup %@.",
-                    report.completedCycleCount,
-                    report.totalCallbackCount,
-                    report.sampleDiscontinuityCount,
-                    report.allCleanupSucceeded ? "passed" : "failed"
-                )
+                if report.hasCapturedSignal {
+                    let message = String(
+                        format: "Audio-only cycle probe completed: %d/10 cycles, %d callbacks, %d gap(s), cleanup %@.",
+                        report.completedCycleCount,
+                        report.totalCallbackCount,
+                        report.sampleDiscontinuityCount,
+                        report.allCleanupSucceeded ? "passed" : "failed"
+                    )
+                    setupMessage = message
+                    coreAudioTapProbeMessage = message
+                } else {
+                    let message = "Audio-only cycle probe was inconclusive: no System Audio signal was received. Play audio and retry, or review access in System Settings."
+                    setupMessage = message
+                    coreAudioTapProbeMessage = message
+                }
                 FlowLogger.audio.notice(
                     "Core Audio tap cycle probe completed: cycles=\(report.completedCycleCount, privacy: .public) callbacks=\(report.totalCallbackCount, privacy: .public) signalCallbacks=\(report.totalNonSilentCallbackCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.allCleanupSucceeded, privacy: .public) healthy=\(healthy, privacy: .public)"
                 )
             } catch {
-                setupMessage = "Audio-only cycle probe failed: \(error.localizedDescription)"
+                let message = "Audio-only cycle probe failed: \(error.localizedDescription)"
+                setupMessage = message
+                coreAudioTapProbeMessage = message
                 FlowLogger.audio.error(
                     "Core Audio tap cycle probe failed: \(error.localizedDescription, privacy: .public)"
                 )

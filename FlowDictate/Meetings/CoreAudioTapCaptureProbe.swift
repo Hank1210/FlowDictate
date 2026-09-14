@@ -69,6 +69,10 @@ nonisolated struct CoreAudioTapProbeReport: Sendable, Equatable {
         return TimeInterval(frameCount) / sampleRate
     }
 
+    var hasCapturedSignal: Bool {
+        nonSilentCallbackCount > 0
+    }
+
     var hasMonotonicTimeline: Bool {
         missingHostTimeCount == 0
             && missingSampleTimeCount == 0
@@ -140,6 +144,7 @@ nonisolated struct CoreAudioTapRepeatedProbeReport: Sendable, Equatable {
     var largestPositiveSampleGapFrames: Int64 {
         cycles.map(\.largestPositiveSampleGapFrames).max() ?? 0
     }
+    var hasCapturedSignal: Bool { totalNonSilentCallbackCount > 0 }
     var allCleanupSucceeded: Bool { cycles.allSatisfy { $0.cleanup.succeeded } }
     var allTimelinesMonotonic: Bool { cycles.allSatisfy(\.hasMonotonicTimeline) }
 }
@@ -151,6 +156,7 @@ nonisolated enum CoreAudioTapProbeError: LocalizedError, Equatable {
     case invalidTapIdentifier
     case invalidTapFormat
     case noAudioCallbacks
+    case cleanupTimedOut
     case invalidCycleCount
 
     var errorDescription: String? {
@@ -167,6 +173,8 @@ nonisolated enum CoreAudioTapProbeError: LocalizedError, Equatable {
             "Core Audio created a tap without a usable audio format."
         case .noAudioCallbacks:
             "The Core Audio tap started but delivered no audio callbacks."
+        case .cleanupTimedOut:
+            "Core Audio did not finish releasing the audio-only capture. Restart FlowDictate before trying again."
         case .invalidCycleCount:
             "The Core Audio tap repetition count must be between 1 and 100."
         }
@@ -273,7 +281,7 @@ actor CoreAudioTapCaptureProbe {
 
             try await Task.sleep(for: duration)
         } catch {
-            cleanup(
+            let cleanupReport = await cleanupWithTimeout(
                 tapID: tapID,
                 aggregateDeviceID: aggregateDeviceID,
                 ioProcID: ioProcID,
@@ -281,17 +289,22 @@ actor CoreAudioTapCaptureProbe {
                 tapUID: createdTapUID,
                 aggregateUID: createdAggregateUID
             )
+            guard cleanupReport != nil else {
+                throw CoreAudioTapProbeError.cleanupTimedOut
+            }
             throw error
         }
 
-        let initialCleanupReport = cleanup(
+        guard let initialCleanupReport = await cleanupWithTimeout(
             tapID: tapID,
             aggregateDeviceID: aggregateDeviceID,
             ioProcID: ioProcID,
             deviceStarted: deviceStarted,
             tapUID: createdTapUID,
             aggregateUID: createdAggregateUID
-        )
+        ) else {
+            throw CoreAudioTapProbeError.cleanupTimedOut
+        }
         let cleanupReport = await waitForCleanupRegistrationRemoval(
             initialCleanupReport,
             tapUID: createdTapUID,
@@ -396,8 +409,36 @@ actor CoreAudioTapCaptureProbe {
     }
 
     @available(macOS 14.2, *)
-    @discardableResult
-    private func cleanup(
+    private func cleanupWithTimeout(
+        tapID: AudioObjectID,
+        aggregateDeviceID: AudioObjectID,
+        ioProcID: AudioDeviceIOProcID?,
+        deviceStarted: Bool,
+        tapUID: String?,
+        aggregateUID: String?
+    ) async -> CoreAudioTapCleanupReport? {
+        await withCheckedContinuation { continuation in
+            let completion = CoreAudioTapCleanupCompletion(continuation: continuation)
+            DispatchQueue.global(qos: .userInitiated).async {
+                completion.resume(
+                    with: Self.cleanup(
+                        tapID: tapID,
+                        aggregateDeviceID: aggregateDeviceID,
+                        ioProcID: ioProcID,
+                        deviceStarted: deviceStarted,
+                        tapUID: tapUID,
+                        aggregateUID: aggregateUID
+                    )
+                )
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) {
+                completion.resume(with: nil)
+            }
+        }
+    }
+
+    @available(macOS 14.2, *)
+    nonisolated private static func cleanup(
         tapID: AudioObjectID,
         aggregateDeviceID: AudioObjectID,
         ioProcID: AudioDeviceIOProcID?,
@@ -435,7 +476,7 @@ actor CoreAudioTapCaptureProbe {
         )
     }
 
-    private func isUIDUnregistered(
+    nonisolated private static func isUIDUnregistered(
         _ uid: String?,
         selector: AudioObjectPropertySelector
     ) -> Bool {
@@ -470,11 +511,11 @@ actor CoreAudioTapCaptureProbe {
         var tapRemoved = initialReport.tapRemoved
         for _ in 0..<20 where !aggregateDeviceRemoved || !tapRemoved {
             try? await Task.sleep(for: .milliseconds(50))
-            aggregateDeviceRemoved = isUIDUnregistered(
+            aggregateDeviceRemoved = Self.isUIDUnregistered(
                 aggregateUID,
                 selector: kAudioHardwarePropertyTranslateUIDToDevice
             )
-            tapRemoved = isUIDUnregistered(
+            tapRemoved = Self.isUIDUnregistered(
                 tapUID,
                 selector: kAudioHardwarePropertyTranslateUIDToTap
             )
@@ -487,6 +528,23 @@ actor CoreAudioTapCaptureProbe {
             aggregateDeviceRemoved: aggregateDeviceRemoved,
             tapRemoved: tapRemoved
         )
+    }
+}
+
+nonisolated private final class CoreAudioTapCleanupCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CoreAudioTapCleanupReport?, Never>?
+
+    init(continuation: CheckedContinuation<CoreAudioTapCleanupReport?, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(with report: CoreAudioTapCleanupReport?) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: report)
     }
 }
 

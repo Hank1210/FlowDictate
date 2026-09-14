@@ -2,7 +2,7 @@
 
 **Phase:** 4.1 – Synchronized Meeting Capture
 **Status:** Aktiver Umsetzungsplan; Grundlagen abgeschlossen, Capture noch nicht implementiert
-**Stand:** 13. September 2026
+**Stand:** 15. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
 **Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal- und Zehn-Zyklen-Gate einschließlich sandboxed Community-Paket bestanden; backendabhängiger Berechtigungsvertrag und ehrliche Preflight-UX umgesetzt; realer Erstberechtigungs-, Vergleichs- und Langzeitnachweis ausstehend
+**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging- und Erstberechtigungs-Gate bestanden; Vergleichs- und Langzeitnachweis ausstehend
 
 ### 7.1 Ziel
 
@@ -232,6 +232,8 @@ Zu vergleichen sind mindestens:
 2. der bestehende audio-only konfigurierte ScreenCaptureKit-Pfad.
 
 Der Spike muss nicht die spätere UI oder Verarbeitung enthalten. Er muss belastbare Antworten zu Berechtigung, Format, Timestamps, Recovery, Stabilität und Packaging liefern.
+
+Am 15. September 2026 wurde der echte Core-Audio-Erstberechtigungsdialog manuell in beiden Richtungen geprüft. Ablehnung liefert stumme Callbacks und darf deshalb weder als `Allowed` noch als sichere technische Diagnose `Denied` ausgegeben werden. Nur tatsächlich empfangenes Systemaudiosignal verifiziert den Zugriff für die laufende App-Sitzung. Ein während eines Wiederholungsversuchs beobachteter blockierender Core-Audio-Cleanup-Aufruf wird durch einen begrenzten, vom UI isolierten Cleanup-Pfad abgefangen; Langzeit- und Wiederholungsnachweise bleiben Teil des Spike-Gates.
 
 ### 7.2 Prüfmatrix
 

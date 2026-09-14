@@ -1,7 +1,7 @@
 # FlowDictate 4.1 – Capture- und Berechtigungs-Spike
 
-**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen- und Community-Packaging-Gate bestanden
-**Stand:** 14. September 2026
+**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging- und Erstberechtigungs-Gate bestanden
+**Stand:** 15. September 2026
 **Bezug:** Schritt 4.1.1 aus `ARBEITSPLAN_PHASE_4_1.md`
 
 ## Fragestellung
@@ -52,7 +52,7 @@ Primärquelle:
 6. misst Callbackanzahl, nichtleere Signalbuffer, Frames, Format, Host- und Sample-Time jedes Callbacks,
 7. zählt fehlende oder rückwärts laufende Timestamps sowie Sample-Diskontinuitäten und die größte positive Lücke,
 8. stoppt IO und entfernt IOProc, Aggregate Device und Tap in jedem Erfolgs- und Fehlerpfad,
-9. prüft alle Cleanup-Statuswerte und wartet danach begrenzt auf die UID-Abmeldung aus dem HAL,
+9. prüft alle Cleanup-Statuswerte, begrenzt blockierende Core-Audio-Cleanup-Aufrufe und wartet danach begrenzt auf die UID-Abmeldung aus dem HAL,
 10. kann zehn vollständig getrennte Start-/Stop-Zyklen automatisiert ausführen,
 11. speichert weder PCM-Daten noch History- oder Meetingdateien.
 
@@ -63,6 +63,7 @@ Die Berechtigungsanzeige folgt dem tatsächlich ausgewählten Backend:
 - `System Audio` nutzt weiterhin ScreenCaptureKit und zeigt dessen öffentlich abfragbaren Preflightstatus.
 - `Microphone + System Audio` zeigt auf macOS 14.2+ vor dem ersten erfolgreichen Tap-Lauf `Checked when recording starts` statt einer nicht belegbaren Freigabe.
 - Nach einem erfolgreichen Audio-only-Lauf zeigt FlowDictate `Allowed` nur für die laufende App-Sitzung. Nach einem Neustart wird erneut kein persistenter Status behauptet.
+- Nur ein Lauf mit tatsächlich empfangenem Systemaudiosignal gilt als erfolgreicher Berechtigungsnachweis. Stumme Callbacks bleiben `inconclusive`, weil Apple keine öffentliche API zur Unterscheidung zwischen Ablehnung und legitimer digitaler Stille bereitstellt.
 - Der alte ScreenCaptureKit-Test wird in der Mixed-Ansicht nicht angeboten, damit er nicht unbeabsichtigt die breitere Capturefreigabe anfragt.
 
 Debug-Builds unterstützen zusätzlich die Startschalter `--run-core-audio-tap-probe` und `--run-core-audio-tap-cycle-probe`. Sie rufen exakt dieselben Einzel- beziehungsweise Zehn-Zyklen-Proben einmalig beim App-Start auf und schreiben nur den Messbericht ins lokale Diagnoseprotokoll. Release-Builds enthalten diese Startpfade nicht.
@@ -103,7 +104,18 @@ Am 14. September 2026 bestand zusätzlich ein ad-hoc signierter, sandboxed Commu
 
 Die UID-Abmeldung kann nach einem erfolgreichen Destroy-Aufruf kurz verzögert sichtbar werden. Die Probe wartet deshalb asynchron höchstens eine Sekunde auf die HAL-Konsistenz und meldet danach einen echten Cleanup-Fehler.
 
-Der macOS-Berechtigungsdialog erschien bei diesen Läufen nicht erneut. Die bestehende FlowDictate-Bundle-ID war auf dem Test-Mac bereits für Systemaudio freigegeben. Ein sauberer Erststart nach nicht erteilter, abgelehnter und widerrufener Berechtigung bleibt daher ausdrücklich offen.
+## Reale Berechtigungsmatrix
+
+Am 15. September 2026 wurde die `AudioCapture`-Freigabe für die FlowDictate-Bundle-ID gezielt zurückgesetzt und der native macOS-Erstdialog im sichtbaren Debug-Testfenster geprüft:
+
+| Entscheidung | Ergebnis | UI-Status | Cleanup |
+|---|---|---|---|
+| Nicht erlauben | 5,216 s, 489 Callbacks, 0 mit Signal | `inconclusive`; weiterhin `Checked when recording starts` | bestanden |
+| Erlauben bei laufendem Systemton | 5,2 s, 489 Callbacks, 489 mit Signal, 0 Gaps | Probe erfolgreich; `Allowed` für die App-Sitzung | bestanden |
+
+Die Ablehnung darf nicht aus stummen Callbacks allein abgeleitet werden. Der Nutzer erhält deshalb einen sichtbaren, direkt bei den Probe-Buttons angezeigten Hinweis, dass kein Systemaudiosignal empfangen wurde und Zugriff beziehungsweise Wiedergabe geprüft werden sollen.
+
+Bei einem zusätzlichen Wiederholungsversuch mit verweigertem Zugriff blockierte macOS synchron in `AudioDeviceDestroyIOProcID`. Ein Prozess-Sample bestätigte, dass die fünfsekündige Aufnahme bereits beendet war und ausschließlich das Cleanup wartete. Der Spike führt die synchronen Destroy-Aufrufe deshalb auf einem isolierten Hintergrundpfad aus und gibt die UI nach einem Drei-Sekunden-Limit mit einem Neustarthinweis frei. Der normale Ablehnungs- und der anschließende Erlauben-Lauf räumten vollständig auf. Berechtigungstests werden künftig nicht parallel mit einer zweiten FlowDictate-Instanz derselben Bundle-ID ausgeführt.
 
 ## Vorläufige Entscheidung
 
@@ -111,7 +123,7 @@ Core Audio Tap ist der bevorzugte 4.1-Kandidat für macOS 14.2 und neuer. Screen
 
 Diese Entscheidung ist noch nicht final. Vor `GO` fehlen:
 
-- sauberer Erststart mit dem macOS-Berechtigungsdialog sowie Ablehnungs-/Widerrufstest,
+- nachträglicher Widerruf über Systemeinstellungen einschließlich Neustartverhalten,
 - Vergleich der Timestampkontinuität mit ScreenCaptureKit,
 - 5-, 30- und 60-Minuten-Messungen,
 - Prüfung von Bluetooth-, AirPlay- und Ausgaberoutenwechseln.

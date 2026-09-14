@@ -459,6 +459,12 @@ struct FlowDictateSettingsView: View {
                         Text("Development diagnostic: measures Core Audio tap callbacks and timing without saving audio or creating a History entry.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let message = coordinator.coreAudioTapProbeMessage {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                     } else {
                         Text("The audio-only Core Audio tap requires macOS 14.2 or later. ScreenCaptureKit remains the compatibility candidate on this Mac.")
                             .font(.caption)

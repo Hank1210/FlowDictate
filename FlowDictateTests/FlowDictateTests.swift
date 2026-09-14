@@ -393,14 +393,38 @@ struct FlowDictateTests {
         )
 
         #expect(report.capturedDuration == 5)
+        #expect(report.hasCapturedSignal)
         #expect(report.hasMonotonicTimeline)
         #expect(report.hasContinuousSampleTimeline)
         #expect(report.cleanup.succeeded)
         let repeated = CoreAudioTapRepeatedProbeReport(cycles: [report, report])
         #expect(repeated.completedCycleCount == 2)
         #expect(repeated.totalCallbackCount == 200)
+        #expect(repeated.hasCapturedSignal)
         #expect(repeated.allCleanupSucceeded)
         #expect(repeated.allTimelinesMonotonic)
+
+        let silentReport = CoreAudioTapProbeReport(
+            callbackCount: 100,
+            nonSilentCallbackCount: 0,
+            frameCount: 240_000,
+            sampleRate: 48_000,
+            channelCount: 1,
+            firstHostTime: 1_000,
+            lastHostTime: 6_000,
+            firstSampleTime: 0,
+            lastSampleTime: 239_000,
+            missingHostTimeCount: 0,
+            missingSampleTimeCount: 0,
+            hostTimeRegressionCount: 0,
+            sampleTimeRegressionCount: 0,
+            sampleDiscontinuityCount: 0,
+            largestPositiveSampleGapFrames: 0,
+            largestHostTimeDeltaNanoseconds: 50_000_000,
+            cleanup: cleanup
+        )
+        #expect(!silentReport.hasCapturedSignal)
+        #expect(!CoreAudioTapRepeatedProbeReport(cycles: [silentReport]).hasCapturedSignal)
 
         let incompleteCleanup = CoreAudioTapCleanupReport(
             stopStatus: noErr,
