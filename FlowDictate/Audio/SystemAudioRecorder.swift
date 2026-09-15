@@ -28,6 +28,78 @@ enum SystemAudioRecorderError: LocalizedError {
     }
 }
 
+nonisolated struct ScreenCaptureTimelineReport: Sendable, Equatable {
+    let callbackCount: Int
+    let missingPresentationTimeCount: Int
+    let presentationTimeRegressionCount: Int
+    let discontinuityCount: Int
+    let largestPositiveGapFrames: Int64
+
+    var hasMonotonicTimeline: Bool {
+        callbackCount > 0
+            && missingPresentationTimeCount == 0
+            && presentationTimeRegressionCount == 0
+    }
+}
+
+nonisolated struct ScreenCaptureTimelineAnalyzer: Sendable, Equatable {
+    private(set) var callbackCount = 0
+    private(set) var missingPresentationTimeCount = 0
+    private(set) var presentationTimeRegressionCount = 0
+    private(set) var discontinuityCount = 0
+    private(set) var largestPositiveGapFrames: Int64 = 0
+
+    private var lastPresentationTimeSeconds: Double?
+    private var expectedNextPresentationTimeSeconds: Double?
+
+    mutating func record(
+        presentationTimeSeconds: Double?,
+        frameCount: Int64,
+        sampleRate: Double
+    ) {
+        callbackCount += 1
+        guard let presentationTimeSeconds,
+              presentationTimeSeconds.isFinite,
+              frameCount > 0,
+              sampleRate > 0 else {
+            missingPresentationTimeCount += 1
+            return
+        }
+
+        if let lastPresentationTimeSeconds,
+           presentationTimeSeconds < lastPresentationTimeSeconds {
+            presentationTimeRegressionCount += 1
+        }
+        if let expectedNextPresentationTimeSeconds {
+            let deltaSeconds = presentationTimeSeconds - expectedNextPresentationTimeSeconds
+            let deltaFrames = deltaSeconds * sampleRate
+            if abs(deltaFrames) > 0.5 {
+                discontinuityCount += 1
+                if deltaFrames > 0.5 {
+                    largestPositiveGapFrames = max(
+                        largestPositiveGapFrames,
+                        Int64(deltaFrames.rounded())
+                    )
+                }
+            }
+        }
+
+        lastPresentationTimeSeconds = presentationTimeSeconds
+        expectedNextPresentationTimeSeconds = presentationTimeSeconds
+            + Double(frameCount) / sampleRate
+    }
+
+    var report: ScreenCaptureTimelineReport {
+        ScreenCaptureTimelineReport(
+            callbackCount: callbackCount,
+            missingPresentationTimeCount: missingPresentationTimeCount,
+            presentationTimeRegressionCount: presentationTimeRegressionCount,
+            discontinuityCount: discontinuityCount,
+            largestPositiveGapFrames: largestPositiveGapFrames
+        )
+    }
+}
+
 nonisolated struct SystemAudioPermissionService: Sendable {
     var isAuthorized: Bool { CGPreflightScreenCaptureAccess() }
 
@@ -64,6 +136,7 @@ final class SystemAudioRecorder: NSObject, AudioRecording {
     private var startedAt: Date?
 
     private(set) var isRecording = false
+    private(set) var lastTimelineReport: ScreenCaptureTimelineReport?
     var levelHandler: (@MainActor (Float) -> Void)?
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
 
@@ -80,6 +153,7 @@ final class SystemAudioRecorder: NSObject, AudioRecording {
 
     func start() async throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
+        lastTimelineReport = nil
         guard permissionService.isAuthorized || permissionService.requestAccess() else {
             throw SystemAudioRecorderError.permissionDenied
         }
@@ -149,6 +223,7 @@ final class SystemAudioRecorder: NSObject, AudioRecording {
         // blocking the MainActor so the app and global shortcuts stay responsive.
         await drainCaptureQueue()
         let writerResult = await captureWriter?.finish()
+        lastTimelineReport = writerResult?.timelineReport
         let duration = Date().timeIntervalSince(startedAt)
         let receivedAudio = writerResult?.didReceiveAudio == true
         let metadata = writerResult?.sourceMetadata ?? AudioSourceMetadata(
@@ -251,6 +326,7 @@ nonisolated final class SystemAudioFileWriter: @unchecked Sendable {
     struct Result: Sendable {
         var didReceiveAudio: Bool
         var sourceMetadata: AudioSourceMetadata
+        var timelineReport: ScreenCaptureTimelineReport
         var error: Error?
     }
 
@@ -261,6 +337,7 @@ nonisolated final class SystemAudioFileWriter: @unchecked Sendable {
     private var failure: Error?
     private var lastLevelUpdate = ContinuousClock.now
     private var sourceMetadata: AudioSourceMetadata
+    private var timelineAnalyzer = ScreenCaptureTimelineAnalyzer()
 
     init(url: URL, defaultSampleRate: Double, defaultChannelCount: Int) {
         self.url = url
@@ -274,6 +351,16 @@ nonisolated final class SystemAudioFileWriter: @unchecked Sendable {
     func append(_ sampleBuffer: CMSampleBuffer) throws -> Float? {
         if writer == nil { try configure(for: sampleBuffer) }
         guard let writer, let writerInput else { return nil }
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let presentationTimeSeconds = presentationTime.isValid
+            && !presentationTime.isIndefinite
+            ? CMTimeGetSeconds(presentationTime)
+            : nil
+        timelineAnalyzer.record(
+            presentationTimeSeconds: presentationTimeSeconds,
+            frameCount: Int64(CMSampleBufferGetNumSamples(sampleBuffer)),
+            sampleRate: sourceMetadata.sampleRate
+        )
         if writer.status == .unknown {
             guard writer.startWriting() else {
                 throw writer.error ?? SystemAudioRecorderError.writerFailed("Could not start writer")
@@ -305,6 +392,7 @@ nonisolated final class SystemAudioFileWriter: @unchecked Sendable {
         return Result(
             didReceiveAudio: didReceiveAudio,
             sourceMetadata: sourceMetadata,
+            timelineReport: timelineAnalyzer.report,
             error: failure ?? writer?.error
         )
     }

@@ -1,6 +1,6 @@
 # FlowDictate 4.1 – Capture- und Berechtigungs-Spike
 
-**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging- und Erstberechtigungs-Gate bestanden
+**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging-, Erstberechtigungs- und ScreenCaptureKit-Kurzvergleichs-Gate bestanden
 **Stand:** 15. September 2026
 **Bezug:** Schritt 4.1.1 aus `ARBEITSPLAN_PHASE_4_1.md`
 
@@ -122,13 +122,17 @@ Bei einem zusätzlichen Wiederholungsversuch mit verweigertem Zugriff blockierte
 
 Der manuelle Widerrufstest zeigte außerdem, dass ScreenCaptureKit und Core Audio Tap getrennte TCC-Dienste besitzen. `Privacy_ScreenCapture` widerruft nicht den Tap-Zugriff. Mixed Recording muss deshalb die Untersektion `Privacy_AudioCapture` (`System Audio Recording Only`) ansteuern; Single System Audio bleibt bei `Privacy_ScreenCapture`. macOS 26.6.2 (Build 25G83) zeigt beide Schaltergruppen gemeinsam in der Ansicht `Screen & System Audio Recording`, deshalb benennt die FlowDictate-UX ausdrücklich den unteren Bereich `System Audio Recording Only`. Ein Widerruf des richtigen Schalters wirkt beim bereits laufenden Prozess nicht rückwirkend, nach Prozessneustart jedoch zuverlässig.
 
+Ad-hoc signierte Builds besitzen als Designated Requirement nur ihren Code-Hash. Nach einer neu erzeugten Binärdatei kann deshalb ein sichtbarer alter TCC-Eintrag nicht mehr zum aktuellen Build passen; im manuellen ScreenCaptureKit-Test musste FlowDictate aus `Screen & System Audio Recording` entfernt, erneut hinzugefügt und anschließend neu gestartet werden. Da auch das Community-Paket ad-hoc signiert ist, gehört das Berechtigungsverhalten nach einem App-Update ausdrücklich zum Packaging- und Release-Gate.
+
+Drei kontrollierte ScreenCaptureKit-Kurzläufe mit genau einer FlowDictate-Instanz lieferten 259, 250 und 253 Audio-Callbacks. Alle Präsentationszeitstempel waren monoton und vollständig. Der erste Lauf enthielt eine positive Lücke von 829 Frames beziehungsweise rund 17,3 ms bei 48 kHz; die beiden unmittelbaren Wiederholungen hatten keine Lücke. Der Core-Audio-Tap hatte im kontrollierten Zehn-Zyklen-Lauf ebenfalls keine Lücke. Die Abweichung ist damit sporadisch statt dauerhaft reproduzierbar; die Sessionarchitektur darf erkannte Lücken unabhängig davon nicht stillschweigend verdichten.
+
 ## Vorläufige Entscheidung
 
 Core Audio Tap ist der bevorzugte 4.1-Kandidat für macOS 14.2 und neuer. ScreenCaptureKit bleibt vorerst der bestehende Single-System-Audio-Pfad und der Kompatibilitätskandidat für macOS 14.0/14.1.
 
 Diese Entscheidung ist noch nicht final. Vor `GO` fehlen:
 
-- Vergleich der Timestampkontinuität mit ScreenCaptureKit,
+- wiederholter Vergleich der Timestampkontinuität mit ScreenCaptureKit,
 - 5-, 30- und 60-Minuten-Messungen,
 - Prüfung von Bluetooth-, AirPlay- und Ausgaberoutenwechseln.
 

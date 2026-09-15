@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging- und Erstberechtigungs-Gate bestanden; Vergleichs- und Langzeitnachweis ausstehend
+**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging-, Erstberechtigungs- und ScreenCaptureKit-Kurzvergleichs-Gate bestanden; Langzeitnachweis ausstehend
 
 ### 7.1 Ziel
 
@@ -234,6 +234,8 @@ Zu vergleichen sind mindestens:
 Der Spike muss nicht die spätere UI oder Verarbeitung enthalten. Er muss belastbare Antworten zu Berechtigung, Format, Timestamps, Recovery, Stabilität und Packaging liefern.
 
 Am 15. September 2026 wurde der echte Core-Audio-Erstberechtigungsdialog manuell in beiden Richtungen sowie der nachträgliche Widerruf vor und nach App-Neustart geprüft. Ablehnung liefert stumme Callbacks und darf deshalb weder als `Allowed` noch als sichere technische Diagnose `Denied` ausgegeben werden. Nur tatsächlich empfangenes Systemaudiosignal verifiziert den Zugriff für die laufende App-Sitzung. Der Widerruf wirkt erst nach Prozessende. Ein während eines Wiederholungsversuchs beobachteter blockierender Core-Audio-Cleanup-Aufruf wird durch einen begrenzten, vom UI isolierten Cleanup-Pfad abgefangen. Ein anschließender Lauf bestand 10/10 Start-/Stop-Zyklen mit 975 Callbacks, 0 Gaps und erfolgreichem Cleanup; die Langzeitnachweise bleiben Teil des Spike-Gates.
+
+Drei kontrollierte ScreenCaptureKit-Vergleichsläufe mit einer einzelnen App-Instanz lieferten 259, 250 und 253 Callbacks sowie durchgehend monotone, vollständige Zeitstempel. Nur der erste Lauf enthielt eine erkannte Lücke von 829 Frames (rund 17,3 ms bei 48 kHz); die beiden unmittelbaren Wiederholungen hatten keine Lücke. Die sichtbare Ergebnisanzeige im Audio-Tab ist damit manuell bestätigt. Die Langzeitmessungen entscheiden, wie sporadische Abweichungen in Gap-Metrik und Timeline-Recovery eingehen.
 
 ### 7.2 Prüfmatrix
 
@@ -254,6 +256,7 @@ Für jeden Kandidaten dokumentieren:
 - CPU, RAM, File-I/O und Dateigröße,
 - Universal-Build-Kompatibilität für `arm64` und `x86_64`,
 - Verhalten in ad-hoc signierter Community-App.
+- TCC-Verhalten nach Austausch eines ad-hoc signierten Builds, einschließlich Entfernen/erneutem Hinzufügen eines veralteten Berechtigungseintrags.
 
 ### 7.3 Spike-Artefakte
 

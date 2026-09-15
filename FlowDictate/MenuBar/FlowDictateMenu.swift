@@ -411,6 +411,12 @@ struct FlowDictateSettingsView: View {
                         Text("The test stays on this Mac, creates no History entry and sends nothing to OpenAI.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let message = coordinator.systemAudioTestMessage {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }

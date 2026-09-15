@@ -54,6 +54,7 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var setupMessage: String?
     @Published private(set) var isPreviewTestRunning = false
     @Published private(set) var isSystemAudioTestRunning = false
+    @Published private(set) var systemAudioTestMessage: String?
     @Published private(set) var isSmartDictationTestRunning = false
     @Published private(set) var smartDictationTestOutput: String?
     @Published private(set) var availableRelease: GitHubReleaseInfo?
@@ -1387,6 +1388,9 @@ final class DictationCoordinator: ObservableObject {
     func testSystemAudio() {
         guard !isSystemAudioTestRunning, !recorder.isRecording, state.acceptsStart else { return }
         isSystemAudioTestRunning = true
+        let runningMessage = "System Audio test is running for 5 seconds…"
+        setupMessage = runningMessage
+        systemAudioTestMessage = runningMessage
         systemAudioTestTask = Task { [weak self] in
             guard let self else { return }
             var temporaryURL: URL?
@@ -1395,19 +1399,39 @@ final class DictationCoordinator: ObservableObject {
                 try await systemAudioRecorder.start()
                 overlay.updateSource(.systemAudio)
                 overlay.show(status: .recording, reposition: true)
-                setupMessage = "System Audio test is running for 5 seconds…"
                 try await Task.sleep(for: .seconds(5))
                 temporaryURL = try await systemAudioRecorder.stop().url
                 if let temporaryURL { try validateSystemAudioTestFile(temporaryURL) }
-                setupMessage = "System Audio test completed successfully."
+                if let report = systemAudioRecorder.lastTimelineReport {
+                    let message = String(
+                        format: "System Audio test completed: %d callbacks, %d gap(s), largest gap %d frame(s), timestamps %@.",
+                        report.callbackCount,
+                        report.discontinuityCount,
+                        report.largestPositiveGapFrames,
+                        report.hasMonotonicTimeline ? "monotonic" : "need review"
+                    )
+                    setupMessage = message
+                    systemAudioTestMessage = message
+                    FlowLogger.audio.notice(
+                        "ScreenCaptureKit timeline probe completed: callbacks=\(report.callbackCount, privacy: .public) missingPTS=\(report.missingPresentationTimeCount, privacy: .public) regressions=\(report.presentationTimeRegressionCount, privacy: .public) discontinuities=\(report.discontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveGapFrames, privacy: .public)"
+                    )
+                } else {
+                    let message = "System Audio test completed successfully."
+                    setupMessage = message
+                    systemAudioTestMessage = message
+                }
             } catch is CancellationError {
                 if systemAudioRecorder.isRecording {
                     temporaryURL = try? await systemAudioRecorder.stop().url
                 }
-                setupMessage = "System Audio test cancelled."
+                let message = "System Audio test cancelled."
+                setupMessage = message
+                systemAudioTestMessage = message
             } catch {
                 if systemAudioRecorder.isRecording { _ = try? await systemAudioRecorder.stop() }
-                setupMessage = error.localizedDescription
+                let message = error.localizedDescription
+                setupMessage = message
+                systemAudioTestMessage = message
             }
             if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
             sessionRecorder = nil

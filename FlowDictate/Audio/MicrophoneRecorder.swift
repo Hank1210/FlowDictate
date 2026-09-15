@@ -74,11 +74,16 @@ nonisolated final class AudioLevelUpdateGate: @unchecked Sendable {
 @MainActor
 protocol AudioRecording: AnyObject {
     var isRecording: Bool { get }
+    var lastTimelineReport: ScreenCaptureTimelineReport? { get }
     var levelHandler: (@MainActor (Float) -> Void)? { get set }
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)? { get set }
     func selectInputDevice(_ deviceID: AudioDeviceID?)
     func start() async throws
     func stop() async throws -> AudioRecordingResult
+}
+
+extension AudioRecording {
+    var lastTimelineReport: ScreenCaptureTimelineReport? { nil }
 }
 
 @MainActor

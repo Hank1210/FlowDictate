@@ -473,6 +473,28 @@ struct FlowDictateTests {
         #expect(discontinuous.sampleTimeRegressionCount == 1)
     }
 
+    @Test func screenCaptureTimelineAnalyzerDetectsGapsAndRegressions() {
+        var continuous = ScreenCaptureTimelineAnalyzer()
+        continuous.record(presentationTimeSeconds: 10, frameCount: 480, sampleRate: 48_000)
+        continuous.record(presentationTimeSeconds: 10.01, frameCount: 480, sampleRate: 48_000)
+        continuous.record(presentationTimeSeconds: 10.02, frameCount: 480, sampleRate: 48_000)
+        #expect(continuous.report.callbackCount == 3)
+        #expect(continuous.report.hasMonotonicTimeline)
+        #expect(continuous.report.discontinuityCount == 0)
+
+        var discontinuous = continuous
+        discontinuous.record(presentationTimeSeconds: 10.04, frameCount: 480, sampleRate: 48_000)
+        #expect(discontinuous.report.discontinuityCount == 1)
+        #expect(discontinuous.report.largestPositiveGapFrames == 480)
+
+        discontinuous.record(presentationTimeSeconds: nil, frameCount: 480, sampleRate: 48_000)
+        #expect(discontinuous.report.missingPresentationTimeCount == 1)
+        #expect(!discontinuous.report.hasMonotonicTimeline)
+
+        discontinuous.record(presentationTimeSeconds: 10.03, frameCount: 480, sampleRate: 48_000)
+        #expect(discontinuous.report.presentationTimeRegressionCount == 1)
+    }
+
     @MainActor
     @Test func selectingMixedSourceRequiresConfirmationBeforeChangingSetting() {
         let presenter = MockMeetingRecordingConsentPresenter()
