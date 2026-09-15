@@ -233,7 +233,7 @@ Zu vergleichen sind mindestens:
 
 Der Spike muss nicht die spätere UI oder Verarbeitung enthalten. Er muss belastbare Antworten zu Berechtigung, Format, Timestamps, Recovery, Stabilität und Packaging liefern.
 
-Am 15. September 2026 wurde der echte Core-Audio-Erstberechtigungsdialog manuell in beiden Richtungen sowie der nachträgliche Widerruf vor und nach App-Neustart geprüft. Ablehnung liefert stumme Callbacks und darf deshalb weder als `Allowed` noch als sichere technische Diagnose `Denied` ausgegeben werden. Nur tatsächlich empfangenes Systemaudiosignal verifiziert den Zugriff für die laufende App-Sitzung. Der Widerruf wirkt erst nach Prozessende. Ein während eines Wiederholungsversuchs beobachteter blockierender Core-Audio-Cleanup-Aufruf wird durch einen begrenzten, vom UI isolierten Cleanup-Pfad abgefangen; Langzeit- und Wiederholungsnachweise bleiben Teil des Spike-Gates.
+Am 15. September 2026 wurde der echte Core-Audio-Erstberechtigungsdialog manuell in beiden Richtungen sowie der nachträgliche Widerruf vor und nach App-Neustart geprüft. Ablehnung liefert stumme Callbacks und darf deshalb weder als `Allowed` noch als sichere technische Diagnose `Denied` ausgegeben werden. Nur tatsächlich empfangenes Systemaudiosignal verifiziert den Zugriff für die laufende App-Sitzung. Der Widerruf wirkt erst nach Prozessende. Ein während eines Wiederholungsversuchs beobachteter blockierender Core-Audio-Cleanup-Aufruf wird durch einen begrenzten, vom UI isolierten Cleanup-Pfad abgefangen. Ein anschließender Lauf bestand 10/10 Start-/Stop-Zyklen mit 975 Callbacks, 0 Gaps und erfolgreichem Cleanup; die Langzeitnachweise bleiben Teil des Spike-Gates.
 
 ### 7.2 Prüfmatrix
 
