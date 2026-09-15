@@ -1375,7 +1375,9 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func openSystemAudioSettings() {
-        SystemAudioPermissionService().openSystemSettings()
+        SystemAudioPermissionService().openSystemSettings(
+            for: systemAudioPermissionStatus.backend
+        )
     }
 
     func refreshPermissionStatuses() {

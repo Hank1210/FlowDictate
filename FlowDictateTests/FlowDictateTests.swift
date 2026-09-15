@@ -307,7 +307,7 @@ struct FlowDictateTests {
             let strategy = SystemAudioCaptureStrategy.candidate(for: version)
             #expect(strategy.preferredBackend == .coreAudioTap)
             #expect(strategy.requiresAudioCaptureUsageDescription)
-            #expect(strategy.permissionSettingsLabel == "Screen & System Audio Recording")
+            #expect(strategy.permissionSettingsLabel == "System Audio Recording Only")
             #expect(strategy.minimumOperatingSystem.majorVersion == 14)
             #expect(strategy.minimumOperatingSystem.minorVersion == 2)
         }
@@ -352,7 +352,7 @@ struct FlowDictateTests {
         )
         #expect(uncheckedCoreAudioTap.backend == .coreAudioTap)
         #expect(uncheckedCoreAudioTap.readiness == .verifiedWhenCaptureStarts)
-        #expect(uncheckedCoreAudioTap.settingsLabel == "Screen & System Audio Recording")
+        #expect(uncheckedCoreAudioTap.settingsLabel == "System Audio Recording Only")
 
         let verifiedCoreAudioTap = SystemAudioPermissionStatus.resolve(
             for: .mixed,
@@ -361,6 +361,17 @@ struct FlowDictateTests {
             coreAudioTapSucceededThisSession: true
         )
         #expect(verifiedCoreAudioTap.readiness == .authorized)
+    }
+
+    @Test func systemAudioSettingsURLMatchesTheSelectedCaptureBackend() {
+        #expect(
+            SystemAudioPermissionService.systemSettingsURL(for: .screenCaptureKit)
+                .absoluteString.contains("Privacy_ScreenCapture")
+        )
+        #expect(
+            SystemAudioPermissionService.systemSettingsURL(for: .coreAudioTap)
+                .absoluteString.contains("Privacy_AudioCapture")
+        )
     }
 
     @Test func coreAudioTapProbeReportDerivesCapturedDurationFromFrames() {

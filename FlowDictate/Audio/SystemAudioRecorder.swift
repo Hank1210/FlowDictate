@@ -36,11 +36,18 @@ nonisolated struct SystemAudioPermissionService: Sendable {
     }
 
     @MainActor
-    func openSystemSettings() {
-        guard let url = URL(
-            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-        ) else { return }
-        NSWorkspace.shared.open(url)
+    func openSystemSettings(for backend: SystemAudioCaptureBackend) {
+        NSWorkspace.shared.open(Self.systemSettingsURL(for: backend))
+    }
+
+    static func systemSettingsURL(for backend: SystemAudioCaptureBackend) -> URL {
+        let privacySection = switch backend {
+        case .coreAudioTap: "Privacy_AudioCapture"
+        case .screenCaptureKit: "Privacy_ScreenCapture"
+        }
+        return URL(
+            string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(privacySection)"
+        )!
     }
 }
 

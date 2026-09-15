@@ -62,14 +62,12 @@ nonisolated struct SystemAudioPermissionStatus: Sendable, Equatable {
         let backend: SystemAudioCaptureBackend = source == .mixed
             ? strategy.preferredBackend
             : .screenCaptureKit
-        let settingsLabel = "Screen & System Audio Recording"
-
         switch backend {
         case .screenCaptureKit:
             return Self(
                 backend: .screenCaptureKit,
                 readiness: screenCaptureAuthorized ? .authorized : .requestRequired,
-                settingsLabel: settingsLabel
+                settingsLabel: "Screen & System Audio Recording"
             )
         case .coreAudioTap:
             return Self(
@@ -77,7 +75,7 @@ nonisolated struct SystemAudioPermissionStatus: Sendable, Equatable {
                 readiness: coreAudioTapSucceededThisSession
                     ? .authorized
                     : .verifiedWhenCaptureStarts,
-                settingsLabel: settingsLabel
+                settingsLabel: "System Audio Recording Only"
             )
         }
     }

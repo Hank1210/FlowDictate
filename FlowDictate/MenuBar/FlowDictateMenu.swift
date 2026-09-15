@@ -394,6 +394,11 @@ struct FlowDictateSettingsView: View {
                     Text(coordinator.systemAudioPermissionStatus.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if coordinator.systemAudioPermissionStatus.backend == .coreAudioTap {
+                        Text("In System Settings, use the FlowDictate switch under \u{201c}System Audio Recording Only.\u{201d} macOS may show it on the same page as screen recording access.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if settings.recordingAudioSource == .systemAudio {
                         Button("Test System Audio for 5 Seconds…") {
                             coordinator.testSystemAudio()

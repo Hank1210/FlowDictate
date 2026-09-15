@@ -112,10 +112,14 @@ Am 15. September 2026 wurde die `AudioCapture`-Freigabe für die FlowDictate-Bun
 |---|---|---|---|
 | Nicht erlauben | 5,216 s, 489 Callbacks, 0 mit Signal | `inconclusive`; weiterhin `Checked when recording starts` | bestanden |
 | Erlauben bei laufendem Systemton | 5,2 s, 489 Callbacks, 489 mit Signal, 0 Gaps | Probe erfolgreich; `Allowed` für die App-Sitzung | bestanden |
+| Zugriff in `System Audio Recording Only` widerrufen, laufende App | 5,1 s, 476 Callbacks, 472 mit Signal, 0 Gaps | bestehender Prozess behält Zugriff bis zum Ende | bestanden |
+| gleicher Widerruf nach App-Neustart | laufender Systemton, kein Signal empfangen | `inconclusive`; `Checked when recording starts` bleibt unverifiziert | bestanden |
 
 Die Ablehnung darf nicht aus stummen Callbacks allein abgeleitet werden. Der Nutzer erhält deshalb einen sichtbaren, direkt bei den Probe-Buttons angezeigten Hinweis, dass kein Systemaudiosignal empfangen wurde und Zugriff beziehungsweise Wiedergabe geprüft werden sollen.
 
 Bei einem zusätzlichen Wiederholungsversuch mit verweigertem Zugriff blockierte macOS synchron in `AudioDeviceDestroyIOProcID`. Ein Prozess-Sample bestätigte, dass die fünfsekündige Aufnahme bereits beendet war und ausschließlich das Cleanup wartete. Der Spike führt die synchronen Destroy-Aufrufe deshalb auf einem isolierten Hintergrundpfad aus und gibt die UI nach einem Drei-Sekunden-Limit mit einem Neustarthinweis frei. Der normale Ablehnungs- und der anschließende Erlauben-Lauf räumten vollständig auf. Berechtigungstests werden künftig nicht parallel mit einer zweiten FlowDictate-Instanz derselben Bundle-ID ausgeführt.
+
+Der manuelle Widerrufstest zeigte außerdem, dass ScreenCaptureKit und Core Audio Tap getrennte TCC-Dienste besitzen. `Privacy_ScreenCapture` widerruft nicht den Tap-Zugriff. Mixed Recording muss deshalb die Untersektion `Privacy_AudioCapture` (`System Audio Recording Only`) ansteuern; Single System Audio bleibt bei `Privacy_ScreenCapture`. macOS 26.6.2 (Build 25G83) zeigt beide Schaltergruppen gemeinsam in der Ansicht `Screen & System Audio Recording`, deshalb benennt die FlowDictate-UX ausdrücklich den unteren Bereich `System Audio Recording Only`. Ein Widerruf des richtigen Schalters wirkt beim bereits laufenden Prozess nicht rückwirkend, nach Prozessneustart jedoch zuverlässig.
 
 ## Vorläufige Entscheidung
 
@@ -123,7 +127,6 @@ Core Audio Tap ist der bevorzugte 4.1-Kandidat für macOS 14.2 und neuer. Screen
 
 Diese Entscheidung ist noch nicht final. Vor `GO` fehlen:
 
-- nachträglicher Widerruf über Systemeinstellungen einschließlich Neustartverhalten,
 - Vergleich der Timestampkontinuität mit ScreenCaptureKit,
 - 5-, 30- und 60-Minuten-Messungen,
 - Prüfung von Bluetooth-, AirPlay- und Ausgaberoutenwechseln.
