@@ -83,6 +83,7 @@ struct FlowDictateMenu: View {
                 || coordinator.isProcessing
                 || coordinator.isSystemAudioTestRunning
                 || coordinator.isCoreAudioTapProbeRunning
+                || coordinator.isMixedCaptureTestRunning
         )
 
         Menu("Microphone") {
@@ -108,6 +109,10 @@ struct FlowDictateMenu: View {
                 coordinator.refreshInputDevices()
             }
         }
+        .disabled(
+            coordinator.isRecording
+                || coordinator.isMixedCaptureTestRunning
+        )
 
         if case .failed(_, let retainedAudioURL?) = coordinator.state {
             Button("Show Saved Recording in Finder") {
@@ -377,6 +382,7 @@ struct FlowDictateSettingsView: View {
                         || coordinator.isProcessing
                         || coordinator.isSystemAudioTestRunning
                         || coordinator.isCoreAudioTapProbeRunning
+                        || coordinator.isMixedCaptureTestRunning
                 )
 
                 Text(settings.recordingAudioSource.explanation)
@@ -460,10 +466,38 @@ struct FlowDictateSettingsView: View {
                         Button("Reset Meeting Recording Confirmation") {
                             coordinator.resetMeetingRecordingConsent()
                         }
+                        .disabled(coordinator.isMixedCaptureTestRunning)
                     } else {
                         Button("Review and Confirm…") {
                             coordinator.requestMeetingRecordingConsent()
                         }
+                    }
+
+                    Divider()
+                    Button("Run Mixed Capture Test for 5 Seconds…") {
+                        coordinator.runMixedCaptureTest()
+                    }
+                    .disabled(
+                        !coordinator.hasCurrentMeetingRecordingConsent
+                            || coordinator.isMixedCaptureTestRunning
+                            || coordinator.isSystemAudioTestRunning
+                            || coordinator.isCoreAudioTapProbeRunning
+                            || coordinator.isRecording
+                            || coordinator.isProcessing
+                    )
+                    if coordinator.isMixedCaptureTestRunning {
+                        Button("Cancel Mixed Capture Test") {
+                            coordinator.cancelMixedCaptureTest()
+                        }
+                    }
+                    Text("Development test: records separate microphone and System Audio originals plus a session manifest. It creates no History entry, starts no transcription and sends nothing over the network.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let message = coordinator.mixedCaptureTestMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
 
                     if #available(macOS 14.2, *) {
@@ -476,6 +510,7 @@ struct FlowDictateSettingsView: View {
                         }
                         .disabled(
                             coordinator.isCoreAudioTapProbeRunning
+                                || coordinator.isMixedCaptureTestRunning
                                 || coordinator.isRecording
                                 || coordinator.isProcessing
                         )
@@ -489,6 +524,7 @@ struct FlowDictateSettingsView: View {
                         }
                         .disabled(
                             coordinator.isCoreAudioTapProbeRunning
+                                || coordinator.isMixedCaptureTestRunning
                                 || coordinator.isRecording
                                 || coordinator.isProcessing
                         )
@@ -523,7 +559,11 @@ struct FlowDictateSettingsView: View {
                             .tag(Optional(device.uid))
                     }
                 }
-                .disabled(coordinator.isRecording || settings.recordingAudioSource == .systemAudio)
+                .disabled(
+                    coordinator.isRecording
+                        || coordinator.isMixedCaptureTestRunning
+                        || settings.recordingAudioSource == .systemAudio
+                )
 
                 HStack {
                     Text("Input level")
@@ -536,7 +576,11 @@ struct FlowDictateSettingsView: View {
                 Button("Refresh Devices") {
                     coordinator.refreshInputDevices()
                 }
-                .disabled(coordinator.isRecording || settings.recordingAudioSource == .systemAudio)
+                .disabled(
+                    coordinator.isRecording
+                        || coordinator.isMixedCaptureTestRunning
+                        || settings.recordingAudioSource == .systemAudio
+                )
 
                 if coordinator.isRecording {
                     Text("Microphone controls are paused while a recording is running.")
@@ -557,6 +601,7 @@ struct FlowDictateSettingsView: View {
         .disabled(
             coordinator.isSystemAudioTestRunning
                 || coordinator.isCoreAudioTapProbeRunning
+                || coordinator.isMixedCaptureTestRunning
                 || coordinator.isRecording
                 || coordinator.isProcessing
         )

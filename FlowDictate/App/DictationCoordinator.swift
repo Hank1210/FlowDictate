@@ -69,6 +69,8 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var isMeetingRecordingConsentPresented = false
     @Published private(set) var isCoreAudioTapProbeRunning = false
     @Published private(set) var coreAudioTapProbeMessage: String?
+    @Published private(set) var isMixedCaptureTestRunning = false
+    @Published private(set) var mixedCaptureTestMessage: String?
     @Published private(set) var queueSnapshot = DictationQueueSnapshot(
         processingCount: 0,
         queuedCount: 0,
@@ -120,6 +122,9 @@ final class DictationCoordinator: ObservableObject {
     private let captureProbeArtifactStore = CaptureProbeArtifactStore()
     private let meetingRecordingConsentPresenter: any MeetingRecordingConsentPresenting
     private let coreAudioTapCaptureProbe = CoreAudioTapCaptureProbe()
+    private let mixedRecordingCoordinatorFactory:
+        @MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating
+    private let mixedCaptureTestDuration: Duration
 
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
@@ -132,6 +137,7 @@ final class DictationCoordinator: ObservableObject {
     private var previewTestTask: Task<Void, Never>?
     private var systemAudioTestTask: Task<Void, Never>?
     private var coreAudioTapProbeTask: Task<Void, Never>?
+    private var mixedCaptureTestTask: Task<Void, Never>?
     private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
@@ -228,6 +234,9 @@ final class DictationCoordinator: ObservableObject {
         jobStore: DictationJobStore? = nil,
         processActivityManager: ProcessActivityManaging? = nil,
         meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil,
+        mixedRecordingCoordinatorFactory:
+            (@MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating)? = nil,
+        mixedCaptureTestDuration: Duration = .seconds(5),
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
         automaticallyPresentOnboarding: Bool = false
@@ -266,6 +275,19 @@ final class DictationCoordinator: ObservableObject {
         self.processActivityManager = processActivityManager ?? SystemProcessActivityManager()
         self.meetingRecordingConsentPresenter = meetingRecordingConsentPresenter
             ?? MeetingRecordingConsentWindowController()
+        self.mixedRecordingCoordinatorFactory = mixedRecordingCoordinatorFactory
+            ?? { inputDeviceID in
+                MixedRecordingSessionCoordinator(
+                    microphoneRecorder: MicrophoneTrackRecorder(
+                        inputDeviceID: inputDeviceID
+                    ),
+                    systemAudioRecorder: SystemAudioTrackRecorder(),
+                    store: MeetingSessionStore(
+                        recordingLocationStore: recordingLocationStore
+                    )
+                )
+            }
+        self.mixedCaptureTestDuration = mixedCaptureTestDuration
         livePreviewCoordinator = LivePreviewCoordinator(
             provider: livePreviewProvider ?? AppleSpeechLivePreviewProvider()
         )
@@ -352,6 +374,7 @@ final class DictationCoordinator: ObservableObject {
         previewTestTask?.cancel()
         systemAudioTestTask?.cancel()
         coreAudioTapProbeTask?.cancel()
+        mixedCaptureTestTask?.cancel()
         localModelInstallTask?.cancel()
         jobProcessingTask?.cancel()
     }
@@ -378,6 +401,7 @@ final class DictationCoordinator: ObservableObject {
             && !isPreviewTestRunning
             && !isSystemAudioTestRunning
             && !isCoreAudioTapProbeRunning
+            && !isMixedCaptureTestRunning
             && !hasQueueReservation
             && (
                 queueSnapshot.totalActiveCount == 0
@@ -547,6 +571,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func requestCancel() {
+        if isMixedCaptureTestRunning {
+            mixedCaptureTestTask?.cancel()
+            return
+        }
         if isPreviewTestRunning {
             previewTestTask?.cancel()
             return
@@ -1249,7 +1277,8 @@ final class DictationCoordinator: ObservableObject {
         guard !recorder.isRecording,
               !isProcessing,
               !isSystemAudioTestRunning,
-              !isCoreAudioTapProbeRunning else { return }
+              !isCoreAudioTapProbeRunning,
+              !isMixedCaptureTestRunning else { return }
         guard settings.recordingAudioSource != source else { return }
         if MixedRecordingConsentGate.requirement(
             for: source,
@@ -1273,11 +1302,148 @@ final class DictationCoordinator: ObservableObject {
         presentMeetingRecordingConsent()
     }
 
+    func runMixedCaptureTest() {
+        guard !isMixedCaptureTestRunning,
+              !isCoreAudioTapProbeRunning,
+              !isSystemAudioTestRunning,
+              settings.recordingAudioSource == .mixed,
+              activeDictationTask == nil,
+              canStartNewRecording else { return }
+        guard hasCurrentMeetingRecordingConsent else {
+            presentMeetingRecordingConsent()
+            return
+        }
+        refreshConfigurationStatus()
+        guard recordingLocationConfigured else {
+            showOnboarding()
+            setupMessage = RecordingLocationError.notConfigured.localizedDescription
+            return
+        }
+
+        isMixedCaptureTestRunning = true
+        latestOutputNotice = nil
+        latestOutputURL = nil
+        let runningMessage = "Mixed capture test is preparing two original tracks…"
+        setupMessage = runningMessage
+        mixedCaptureTestMessage = runningMessage
+        mixedCaptureTestTask = Task { [weak self] in
+            guard let self else { return }
+            let activity = processActivityManager.beginUserInitiatedActivity(
+                reason: "Testing synchronized FlowDictate mixed capture"
+            )
+            defer {
+                processActivityManager.endActivity(activity)
+                isMixedCaptureTestRunning = false
+                mixedCaptureTestTask = nil
+                audioLevel = 0
+                overlay.hide()
+                refreshPermissionStatus()
+            }
+
+            var coordinator: (any MixedRecordingSessionCoordinating)?
+            do {
+                try await permissionManager.ensureMicrophoneAccess()
+                let inputDeviceID: AudioDeviceID?
+                do {
+                    inputDeviceID = try audioDeviceService.deviceID(
+                        forUID: settings.inputDeviceUID
+                    )
+                } catch AudioDeviceServiceError.selectedDeviceUnavailable {
+                    settings.inputDeviceUID = nil
+                    inputDeviceID = nil
+                }
+
+                let createdCoordinator = mixedRecordingCoordinatorFactory(inputDeviceID)
+                coordinator = createdCoordinator
+                let provider = settings.transcriptionProviderID
+                let engineID = provider == .local
+                    ? TranscriptionProviderRegistry.local.capabilities.engineID
+                    : TranscriptionProviderRegistry.openAI.capabilities.engineID
+                let modelID = provider == .local
+                    ? settings.localTranscriptionModelID
+                    : settings.transcriptionModel
+                let session = try await createdCoordinator.start(
+                    MixedRecordingSessionRequest(
+                        providerID: provider.rawValue,
+                        engineID: engineID,
+                        modelID: modelID,
+                        language: settings.transcriptionLanguage.apiValue
+                    )
+                )
+                latestOutputURL = try meetingSessionDirectory(for: session.id)
+                overlay.updateSource(.mixed)
+                overlay.show(status: .recording, reposition: true)
+                let recordingMessage = "Mixed capture test is recording microphone and System Audio for 5 seconds…"
+                setupMessage = recordingMessage
+                mixedCaptureTestMessage = recordingMessage
+                try await Task.sleep(for: mixedCaptureTestDuration)
+
+                overlay.show(status: .finalizing)
+                let completed = try await createdCoordinator.stop()
+                let message = mixedCaptureSummary(completed)
+                setupMessage = message
+                mixedCaptureTestMessage = message
+                latestOutputNotice = message
+                FlowLogger.audio.notice(
+                    "Mixed capture test completed for session \(completed.id, privacy: .public) with status \(completed.status.rawValue, privacy: .public)"
+                )
+            } catch is CancellationError {
+                if let coordinator {
+                    _ = try? await coordinator.cancel()
+                }
+                let message = "Mixed capture test cancelled. Any finalized original tracks were preserved."
+                setupMessage = message
+                mixedCaptureTestMessage = message
+                if latestOutputURL != nil { latestOutputNotice = message }
+            } catch {
+                if let coordinator {
+                    _ = try? await coordinator.cancel()
+                }
+                let message = "Mixed capture test failed: \(error.localizedDescription)"
+                setupMessage = message
+                mixedCaptureTestMessage = message
+                if latestOutputURL != nil { latestOutputNotice = message }
+                FlowLogger.audio.error(
+                    "Mixed capture test failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    func cancelMixedCaptureTest() {
+        mixedCaptureTestTask?.cancel()
+    }
+
+    private func meetingSessionDirectory(for id: UUID) throws -> URL {
+        try recordingLocationStore.resolvedDirectory()
+            .appendingPathComponent("MeetingSessions", isDirectory: true)
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    private func mixedCaptureSummary(_ session: MixedRecordingSession) -> String {
+        let trackSummary = RecordingTrackRole.allCases.compactMap { role in
+            session.tracks.first(where: { $0.role == role }).map { track in
+                let title = role == .localSpeaker ? "Microphone" : "System Audio"
+                let seconds = Double(track.durationMilliseconds) / 1_000
+                let peak = track.quality.peakLevel ?? 0
+                return String(
+                    format: "%@: %.1f s, %d gap(s), peak %.3f",
+                    title,
+                    seconds,
+                    track.gaps.count,
+                    peak
+                )
+            }
+        }.joined(separator: "; ")
+        return "Mixed capture test completed (\(trackSummary)). Two original tracks and the session manifest were saved; no transcription was started."
+    }
+
     func runCoreAudioTapCaptureProbe(
         duration: SystemAudioProbeDuration = .fiveSeconds
     ) {
         guard !isCoreAudioTapProbeRunning,
               !isSystemAudioTestRunning,
+              !isMixedCaptureTestRunning,
               !recorder.isRecording,
               !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
@@ -1339,6 +1505,7 @@ final class DictationCoordinator: ObservableObject {
     func runCoreAudioTapRepeatedCaptureProbe() {
         guard !isCoreAudioTapProbeRunning,
               !isSystemAudioTestRunning,
+              !isMixedCaptureTestRunning,
               !recorder.isRecording,
               !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
@@ -1446,6 +1613,7 @@ final class DictationCoordinator: ObservableObject {
     func testSystemAudio(duration: SystemAudioProbeDuration = .fiveSeconds) {
         guard !isSystemAudioTestRunning,
               !isCoreAudioTapProbeRunning,
+              !isMixedCaptureTestRunning,
               !recorder.isRecording,
               state.acceptsStart else { return }
         isSystemAudioTestRunning = true
@@ -1548,7 +1716,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func toggleDictation() async {
-        guard !isHandlingToggle, !isPreviewTestRunning, !isSystemAudioTestRunning else { return }
+        guard !isHandlingToggle,
+              !isPreviewTestRunning,
+              !isSystemAudioTestRunning,
+              !isMixedCaptureTestRunning else { return }
         isHandlingToggle = true
         defer { isHandlingToggle = false }
         if recorder.isRecording { await stopAndTranscribe() }

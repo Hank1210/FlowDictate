@@ -18,6 +18,12 @@ nonisolated protocol MixedTrackRecording: Sendable {
     func cancel() async -> MixedTrackCaptureResult?
 }
 
+nonisolated protocol MixedRecordingSessionCoordinating: Sendable {
+    func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession
+    func stop() async throws -> MixedRecordingSession
+    func cancel() async throws -> MixedRecordingSession
+}
+
 nonisolated struct MixedTrackStartResult: Sendable, Equatable {
     var firstAnchor: TrackTimestampAnchor
 }
@@ -542,6 +548,8 @@ actor MixedRecordingSessionCoordinator {
         }
     }
 }
+
+extension MixedRecordingSessionCoordinator: MixedRecordingSessionCoordinating {}
 
 nonisolated private enum MixedTrackOperationOutcome<Value: Sendable>: Sendable {
     case success(Value)

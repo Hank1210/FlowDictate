@@ -1904,6 +1904,38 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func mixedCaptureTestUsesSessionCoordinatorWithoutStartingTranscription() async throws {
+        var completedSession = makeValidMixedRecordingSession()
+        completedSession.status = .queued
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: completedSession,
+            stopResult: completedSession
+        )
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            mixedCaptureTestDuration: .milliseconds(1)
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+
+        harness.coordinator.runMixedCaptureTest()
+        for _ in 0..<80 where harness.coordinator.isMixedCaptureTestRunning {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await mixedCoordinator.startCount == 1)
+        #expect(await mixedCoordinator.stopCount == 1)
+        #expect(await mixedCoordinator.cancelCount == 0)
+        #expect(harness.recorder.startCount == 0)
+        #expect(harness.provider.transcribeCount == 0)
+        #expect(harness.inserter.insertCount == 0)
+        #expect(harness.coordinator.mixedCaptureTestMessage?.contains("completed") == true)
+        #expect(harness.coordinator.latestOutputURL?.lastPathComponent == completedSession.id.uuidString)
+        #expect(harness.overlay.presentations.contains(.recording))
+        #expect(harness.overlay.presentations.contains(.finalizing))
+    }
+
+    @MainActor
     @Test func tooShortRecordingFailsBeforeTranscriptionProvider() async throws {
         let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
         harness.coordinator.settings.dictationActivationMode = .pressAndHold
@@ -3269,7 +3301,10 @@ struct FlowDictateTests {
         recordingSource: RecordingAudioSource = .microphone,
         transcriptionProviderID: TranscriptionProviderID = .openAI,
         privacyMode: PrivacyMode = .cloudTranscription,
-        meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil
+        meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil,
+        mixedRecordingCoordinatorFactory:
+            (@MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating)? = nil,
+        mixedCaptureTestDuration: Duration = .seconds(5)
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -3331,6 +3366,8 @@ struct FlowDictateTests {
             ),
             processActivityManager: processActivityManager,
             meetingRecordingConsentPresenter: meetingRecordingConsentPresenter,
+            mixedRecordingCoordinatorFactory: mixedRecordingCoordinatorFactory,
+            mixedCaptureTestDuration: mixedCaptureTestDuration,
             livePreviewAvailabilityProvider: livePreviewAvailabilityProvider ?? { _, _ in
                 .available(localeIdentifier: "de-DE")
             }
@@ -3603,6 +3640,34 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
                 droppedBufferCount: 0
             )
         )
+    }
+}
+
+private actor MockMixedRecordingSessionCoordinator: MixedRecordingSessionCoordinating {
+    private let startResult: MixedRecordingSession
+    private let stopResult: MixedRecordingSession
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private(set) var cancelCount = 0
+
+    init(startResult: MixedRecordingSession, stopResult: MixedRecordingSession) {
+        self.startResult = startResult
+        self.stopResult = stopResult
+    }
+
+    func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession {
+        startCount += 1
+        return startResult
+    }
+
+    func stop() async throws -> MixedRecordingSession {
+        stopCount += 1
+        return stopResult
+    }
+
+    func cancel() async throws -> MixedRecordingSession {
+        cancelCount += 1
+        return stopResult
     }
 }
 
