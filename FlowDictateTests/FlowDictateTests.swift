@@ -1086,7 +1086,77 @@ struct FlowDictateTests {
         #expect(file.length == 4_800)
     }
 
-    @Test func microphoneTrackMetricsDetectGapClippingAndSilence() throws {
+    @Test func systemAudioTrackSinkWritesFloatCAFAndRejectsLateCallbacks() throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSystemAudioTrack-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: 4_800
+        ))
+        buffer.frameLength = 4_800
+        let samples = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<Int(buffer.frameLength) {
+            samples[frame] = 0.125
+        }
+        let hostTime = mach_continuous_time()
+        let sink = try SystemAudioTrackCaptureSink(
+            outputURL: outputURL,
+            sourceFormat: format,
+            outputFormat: format
+        )
+        let audioTime = AVAudioTime(
+            hostTime: hostTime,
+            sampleTime: 0,
+            atRate: 48_000
+        )
+        var timeStamp = audioTime.audioTimeStamp
+
+        sink.begin(requestedHostTime: hostTime)
+        withUnsafePointer(to: &timeStamp) { timePointer in
+            sink.append(
+                inputData: UnsafePointer(buffer.audioBufferList),
+                inputTime: timePointer
+            )
+        }
+        sink.endCapture()
+
+        var lateTimeStamp = AVAudioTime(
+            hostTime: hostTime + AudioConvertNanosToHostTime(100_000_000),
+            sampleTime: 4_800,
+            atRate: 48_000
+        ).audioTimeStamp
+        withUnsafePointer(to: &lateTimeStamp) { timePointer in
+            sink.append(
+                inputData: UnsafePointer(buffer.audioBufferList),
+                inputTime: timePointer
+            )
+        }
+
+        let result = try sink.finish()
+        let file = try AVAudioFile(forReading: outputURL)
+
+        #expect(result.formatIdentifier == "lpcm")
+        #expect(result.sampleRate == 48_000)
+        #expect(result.channelCount == 1)
+        #expect(result.durationMilliseconds >= 99)
+        #expect(result.durationMilliseconds <= 101)
+        #expect(result.timestampAnchors.count == 2)
+        #expect(result.timestampAnchors.last?.trackFramePosition == 4_800)
+        #expect(abs((result.quality.peakLevel ?? 0) - 0.125) < 0.01)
+        #expect(result.gaps.isEmpty)
+        #expect(file.processingFormat.commonFormat == .pcmFormatFloat32)
+        #expect(file.processingFormat.channelCount == 1)
+        #expect(file.length == 4_800)
+    }
+
+    @Test func sharedPCMTrackMetricsDetectGapClippingAndSilence() throws {
         let format = try #require(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 48_000,
@@ -1111,7 +1181,7 @@ struct FlowDictateTests {
         }
         let firstHostTime = mach_continuous_time()
         let secondHostTime = firstHostTime + AudioConvertNanosToHostTime(20_000_000)
-        var metrics = MicrophoneTrackMetrics(
+        var metrics = PCMTrackMetrics(
             requestedHostTime: firstHostTime,
             sampleRate: 48_000
         )
