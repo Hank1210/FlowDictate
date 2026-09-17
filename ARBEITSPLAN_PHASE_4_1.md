@@ -332,9 +332,11 @@ Vor Schritt 4.1.2 liegt eine eindeutige Entscheidung vor:
 
 ## 8. Schritt 4.1.2 – MixedRecordingSessionCoordinator und Dual Capture
 
-**Status:** `IN ARBEIT` – testbare Orchestrierungsschicht implementiert; konkrete Trackrecorder und App-Integration stehen noch aus
+**Status:** `IN ARBEIT` – Orchestrierung und echter Mikrofon-Trackrecorder implementiert; Systemaudio-Trackrecorder und App-Integration stehen noch aus
 
-Der erste Teilstand enthält den actor-basierten Session-Coordinator, die Recorder-/Store-Schnittstellen, eine gemeinsame monotone Startbarriere sowie unabhängige Stop-, Cancel- und Teilfehlerbehandlung. Manifest und Originalpfade werden vor Capturebeginn angelegt; ein zweiter Start wird abgewiesen und Startfehler stoppen beide Recorder. Vier Fake-Recorder-Tests decken Startbarriere, Startausfall, partielle Finalisierung und Cancel mit anschließendem Neustart ab. Die bestehende `captureNotAvailable`-Sperre bleibt bestehen, bis Mikrofon- und Systemaudio-Trackrecorder angeschlossen und real gemeinsam abgenommen sind.
+Der erste Teilstand enthält den actor-basierten Session-Coordinator, die Recorder-/Store-Schnittstellen, eine gemeinsame monotone Startbarriere sowie unabhängige Stop-, Cancel- und Teilfehlerbehandlung. Manifest und Originalpfade werden vor Capturebeginn angelegt; ein zweiter Start wird abgewiesen und Startfehler stoppen beide Recorder. Vier Fake-Recorder-Tests decken Startbarriere, Startausfall, partielle Finalisierung und Cancel mit anschließendem Neustart ab.
+
+Der echte `MicrophoneTrackRecorder` schreibt die lokale Spur als mono Float32 Linear PCM in ein segmentierbares CAF bei nativer Samplerate. Er bestätigt den Start erst nach dem ersten Sample, erzeugt monotone Start-, Fünf-Sekunden- und Endanker und persistiert Gap-, Peak-, Clipping-, Stille- und Dropped-Buffer-Metriken. Stop und Cancel entfernen den Tap vor der Finalisierung und erhalten bereits geschriebene Originaldaten. Ein echter CAF-Writer-Test prüft vollständige Stereo-zu-Mono-Konvertierung ohne verlorene Restframes; ein separater Metriktest deckt Gap, Clipping und Stille ab. Vollständige Regression am 17. September 2026: 128/128 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Die bestehende `captureNotAvailable`-Sperre bleibt bestehen, bis auch der Systemaudio-Trackrecorder angeschlossen und beide Spuren real gemeinsam abgenommen sind.
 
 ### 8.1 Voraussichtliche Dateien
 

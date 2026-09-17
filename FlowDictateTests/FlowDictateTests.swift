@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import AudioToolbox
 import AVFoundation
 import Carbon.HIToolbox
 import Combine
@@ -1025,6 +1026,114 @@ struct FlowDictateTests {
         let restarted = try await coordinator.start(secondRequest)
         #expect(restarted.status == .recording)
         _ = try await coordinator.cancel()
+    }
+
+    @Test func microphoneTrackSinkWritesMonoFloatCAFWithTimelineMetadata() throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMicrophoneTrack-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let sourceFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: false
+        ))
+        let outputFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: sourceFormat,
+            frameCapacity: 4_800
+        ))
+        buffer.frameLength = 4_800
+        let channelData = try #require(buffer.floatChannelData)
+        for channel in 0..<2 {
+            for frame in 0..<Int(buffer.frameLength) {
+                channelData[channel][frame] = 0.25
+            }
+        }
+        let hostTime = mach_continuous_time()
+        let sink = try MicrophoneTrackCaptureSink(
+            outputURL: outputURL,
+            sourceFormat: sourceFormat,
+            outputFormat: outputFormat
+        )
+
+        sink.begin(requestedHostTime: hostTime)
+        sink.append(
+            buffer,
+            at: AVAudioTime(hostTime: hostTime, sampleTime: 0, atRate: 48_000)
+        )
+        let result = try sink.finish()
+        let file = try AVAudioFile(forReading: outputURL)
+
+        #expect(result.formatIdentifier == "lpcm")
+        #expect(result.sampleRate == 48_000)
+        #expect(result.channelCount == 1)
+        #expect(result.durationMilliseconds >= 99)
+        #expect(result.durationMilliseconds <= 101)
+        #expect(result.byteCount > 0)
+        #expect(result.timestampAnchors.count == 2)
+        #expect(result.timestampAnchors.first?.trackFramePosition == 0)
+        #expect(result.timestampAnchors.last?.trackFramePosition == 4_800)
+        #expect(abs((result.quality.peakLevel ?? 0) - 0.25) < 0.01)
+        #expect(result.gaps.isEmpty)
+        #expect(file.processingFormat.commonFormat == .pcmFormatFloat32)
+        #expect(file.processingFormat.channelCount == 1)
+        #expect(file.length == 4_800)
+    }
+
+    @Test func microphoneTrackMetricsDetectGapClippingAndSilence() throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let clipped = try #require(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: 480
+        ))
+        let silent = try #require(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: 480
+        ))
+        clipped.frameLength = 480
+        silent.frameLength = 480
+        let clippedSamples = try #require(clipped.floatChannelData?[0])
+        let silentSamples = try #require(silent.floatChannelData?[0])
+        for frame in 0..<480 {
+            clippedSamples[frame] = 1
+            silentSamples[frame] = 0
+        }
+        let firstHostTime = mach_continuous_time()
+        let secondHostTime = firstHostTime + AudioConvertNanosToHostTime(20_000_000)
+        var metrics = MicrophoneTrackMetrics(
+            requestedHostTime: firstHostTime,
+            sampleRate: 48_000
+        )
+
+        metrics.record(
+            buffer: clipped,
+            time: AVAudioTime(hostTime: firstHostTime, sampleTime: 0, atRate: 48_000)
+        )
+        metrics.record(
+            buffer: silent,
+            time: AVAudioTime(hostTime: secondHostTime, sampleTime: 960, atRate: 48_000)
+        )
+        let result = try metrics.captureResult(byteCount: 100)
+
+        #expect(result.gaps.count == 1)
+        #expect(result.gaps.first?.reason == .droppedBuffers)
+        #expect(result.gaps.first?.startMilliseconds == 10)
+        #expect(result.gaps.first?.endMilliseconds == 20)
+        #expect(result.quality.peakLevel == 1)
+        #expect(result.quality.clippedFrameCount == 480)
+        #expect(result.quality.silentDurationMilliseconds == 10)
+        #expect(result.quality.droppedBufferCount == 1)
     }
 
     @Test func meetingSessionStoreSurfacesCorruptManifestWithoutReplacingIt() async throws {
