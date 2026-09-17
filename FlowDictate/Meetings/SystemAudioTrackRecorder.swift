@@ -10,8 +10,11 @@ nonisolated enum SystemAudioTrackRecorderError: LocalizedError, Sendable, Equata
     case missingUsageDescription
     case invalidTapIdentifier
     case invalidTapFormat
+    case permissionDenied
+    case unavailable
     case noAudioReceived
     case captureCancelled
+    case interrupted(String)
     case conversionFailed(String)
     case writerFailed(String)
     case operationFailed(operation: String, status: OSStatus)
@@ -33,10 +36,16 @@ nonisolated enum SystemAudioTrackRecorderError: LocalizedError, Sendable, Equata
             "Core Audio created a system audio tap without a usable identifier."
         case .invalidTapFormat:
             "Core Audio created a system audio tap without a usable PCM format."
+        case .permissionDenied:
+            "Screen & System Audio Recording access is required for this system audio track."
+        case .unavailable:
+            "System audio capture is not available."
         case .noAudioReceived:
             "The system audio track started but delivered no audio buffers."
         case .captureCancelled:
             "System audio capture was cancelled."
+        case let .interrupted(message):
+            "System audio capture stopped unexpectedly: \(message)"
         case let .conversionFailed(message):
             "System audio could not be converted to mono Float32 PCM: \(message)"
         case let .writerFailed(message):
@@ -49,10 +58,10 @@ nonisolated enum SystemAudioTrackRecorderError: LocalizedError, Sendable, Equata
     }
 }
 
-/// Productive system-audio recorder for macOS 14.2 and later.
-/// The macOS 14.0/14.1 ScreenCaptureKit compatibility adapter is kept separate so
-/// the two permission and recovery contracts cannot silently switch at runtime.
-actor SystemAudioTrackRecorder: MixedTrackRecording {
+/// Productive Core Audio implementation for macOS 14.2 and later.
+/// Backend selection lives in `SystemAudioTrackRecorder` so a recording never
+/// silently switches permission or recovery contracts after preparation.
+actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
     nonisolated let role: RecordingTrackRole = .systemAudio
 
     private let firstBufferTimeout: Duration
@@ -540,7 +549,7 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
             try Task.checkCancellation()
-            let (anchor, failure) = startSnapshot()
+            let (anchor, failure) = firstAnchorSnapshot()
             if let failure { throw failure }
             if let anchor { return anchor }
             try await Task.sleep(for: .milliseconds(10))
@@ -620,7 +629,10 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
         return outputBuffer
     }
 
-    private func startSnapshot() -> (TrackTimestampAnchor?, SystemAudioTrackRecorderError?) {
+    func firstAnchorSnapshot() -> (
+        TrackTimestampAnchor?,
+        SystemAudioTrackRecorderError?
+    ) {
         lock.lock()
         defer { lock.unlock() }
         return (metrics.firstAnchor, failure)

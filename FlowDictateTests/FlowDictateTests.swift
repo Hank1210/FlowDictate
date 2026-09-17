@@ -314,6 +314,38 @@ struct FlowDictateTests {
         }
     }
 
+    @Test func mixedSystemAudioRecorderPinsBackendForItsLifetime() {
+        let compatibilityRecorder = SystemAudioTrackRecorder(
+            version: OperatingSystemVersion(
+                majorVersion: 14,
+                minorVersion: 1,
+                patchVersion: 9
+            )
+        )
+        let coreAudioRecorder = SystemAudioTrackRecorder(
+            version: OperatingSystemVersion(
+                majorVersion: 14,
+                minorVersion: 2,
+                patchVersion: 0
+            )
+        )
+
+        #expect(compatibilityRecorder.role == .systemAudio)
+        #expect(compatibilityRecorder.backend == .screenCaptureKit)
+        #expect(coreAudioRecorder.role == .systemAudio)
+        #expect(coreAudioRecorder.backend == .coreAudioTap)
+    }
+
+    @Test func screenCaptureKitMixedTrackRequiresCAFOutput() async {
+        let recorder = ScreenCaptureKitSystemTrackRecorder()
+        let invalidURL = FileManager.default.temporaryDirectory
+            .appending(path: "mixed-system-audio-\(UUID().uuidString).m4a")
+
+        await #expect(throws: SystemAudioTrackRecorderError.invalidOutputURL) {
+            try await recorder.prepare(outputURL: invalidURL)
+        }
+    }
+
     @Test func systemAudioPermissionStatusMatchesTheSelectedCaptureBackend() {
         let macOS14_1 = OperatingSystemVersion(
             majorVersion: 14,
