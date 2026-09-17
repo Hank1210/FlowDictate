@@ -384,6 +384,8 @@ struct FlowDictateTests {
             tapRemoved: true
         )
         let report = CoreAudioTapProbeReport(
+            requestedDuration: 5,
+            wallDuration: 5.01,
             callbackCount: 100,
             nonSilentCallbackCount: 80,
             frameCount: 240_000,
@@ -404,6 +406,7 @@ struct FlowDictateTests {
         )
 
         #expect(report.capturedDuration == 5)
+        #expect(abs(report.stopDelay - 0.01) < 0.000_001)
         #expect(report.hasCapturedSignal)
         #expect(report.hasMonotonicTimeline)
         #expect(report.hasContinuousSampleTimeline)
@@ -416,6 +419,8 @@ struct FlowDictateTests {
         #expect(repeated.allTimelinesMonotonic)
 
         let silentReport = CoreAudioTapProbeReport(
+            requestedDuration: 5,
+            wallDuration: 5,
             callbackCount: 100,
             nonSilentCallbackCount: 0,
             frameCount: 240_000,
@@ -449,6 +454,89 @@ struct FlowDictateTests {
         #expect(incompleteCleanup.firstFailure != nil)
     }
 
+    @Test func coreAudioTimedStopRunsOnlyOnce() async {
+        let counter = LockedTestCounter()
+        let timedStop = CoreAudioTapTimedStop {
+            counter.increment()
+            return noErr
+        }
+
+        let result = await withTaskGroup(of: CoreAudioTapTimedStop.Result.self) { group in
+            group.addTask { await timedStop.wait(for: 60) }
+            timedStop.stopNow()
+            timedStop.stopNow()
+            return await group.next()!
+        }
+
+        #expect(result.status == noErr)
+        #expect(counter.value == 1)
+    }
+
+    @Test func coreAudioTimedStopFiresFromItsDedicatedTimer() async {
+        let counter = LockedTestCounter()
+        let timedStop = CoreAudioTapTimedStop {
+            counter.increment()
+            return noErr
+        }
+
+        let result = await timedStop.wait(for: 0.05)
+
+        #expect(result.status == noErr)
+        #expect(result.elapsed >= 0.04)
+        #expect(result.elapsed < 1)
+        #expect(counter.value == 1)
+    }
+
+    @Test func captureProbeArtifactsRemoveOnlyFilesFromStoppedProcesses() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateCaptureProbeArtifacts-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CaptureProbeArtifactStore(directoryURL: directory)
+        let activeURL = try store.makeURL(processID: 111)
+        let abandonedURL = try store.makeURL(processID: 222)
+        let unrelatedURL = directory.appendingPathComponent("user-recording.m4a")
+        let matchingDirectoryURL = directory.appendingPathComponent(
+            "\(CaptureProbeArtifactStore.filePrefix)222-\(UUID().uuidString).m4a",
+            isDirectory: true
+        )
+        try Data("active".utf8).write(to: activeURL)
+        try Data("abandoned".utf8).write(to: abandonedURL)
+        try Data("unrelated".utf8).write(to: unrelatedURL)
+        try FileManager.default.createDirectory(
+            at: matchingDirectoryURL,
+            withIntermediateDirectories: false
+        )
+
+        let removed = try store.removeAbandonedArtifacts { $0 == 111 }
+
+        #expect(removed.map(\.lastPathComponent) == [abandonedURL.lastPathComponent])
+        #expect(FileManager.default.fileExists(atPath: activeURL.path))
+        #expect(!FileManager.default.fileExists(atPath: abandonedURL.path))
+        #expect(FileManager.default.fileExists(atPath: unrelatedURL.path))
+        #expect(FileManager.default.fileExists(atPath: matchingDirectoryURL.path))
+    }
+
+    @Test func captureProbeArtifactRemovalRejectsPathsOutsideItsDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateCaptureProbeScope-\(UUID())", isDirectory: true)
+        let probeDirectory = root.appendingPathComponent("probes", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = CaptureProbeArtifactStore(directoryURL: probeDirectory)
+        let probeURL = try store.makeURL(processID: 333)
+        let outsideURL = root.appendingPathComponent(
+            "\(CaptureProbeArtifactStore.filePrefix)333-outside.m4a"
+        )
+        try Data("probe".utf8).write(to: probeURL)
+        try Data("outside".utf8).write(to: outsideURL)
+
+        try store.removeArtifact(at: outsideURL)
+        try store.removeArtifact(at: probeURL)
+
+        #expect(FileManager.default.fileExists(atPath: outsideURL.path))
+        #expect(!FileManager.default.fileExists(atPath: probeURL.path))
+    }
+
     @Test func coreAudioTapTimelineAnalyzerDetectsGapsAndRegressions() {
         var continuous = CoreAudioTapTimelineAnalyzer()
         continuous.record(hostTime: 1_000, sampleTime: 0, frameCount: 480)
@@ -479,6 +567,10 @@ struct FlowDictateTests {
         continuous.record(presentationTimeSeconds: 10.01, frameCount: 480, sampleRate: 48_000)
         continuous.record(presentationTimeSeconds: 10.02, frameCount: 480, sampleRate: 48_000)
         #expect(continuous.report.callbackCount == 3)
+        #expect(continuous.report.frameCount == 1_440)
+        #expect(continuous.report.sampleRate == 48_000)
+        #expect(continuous.report.capturedDuration == 0.03)
+        #expect(continuous.report.sampleRateChangeCount == 0)
         #expect(continuous.report.hasMonotonicTimeline)
         #expect(continuous.report.discontinuityCount == 0)
 
@@ -493,6 +585,16 @@ struct FlowDictateTests {
 
         discontinuous.record(presentationTimeSeconds: 10.03, frameCount: 480, sampleRate: 48_000)
         #expect(discontinuous.report.presentationTimeRegressionCount == 1)
+
+        discontinuous.record(presentationTimeSeconds: 10.04, frameCount: 441, sampleRate: 44_100)
+        #expect(discontinuous.report.sampleRateChangeCount == 1)
+    }
+
+    @Test func systemAudioProbeDurationsMatchTheLongFormGateMatrix() {
+        #expect(SystemAudioProbeDuration.fiveSeconds.rawValue == 5)
+        #expect(SystemAudioProbeDuration.fiveMinutes.rawValue == 300)
+        #expect(SystemAudioProbeDuration.thirtyMinutes.rawValue == 1_800)
+        #expect(SystemAudioProbeDuration.sixtyMinutes.rawValue == 3_600)
     }
 
     @MainActor
@@ -3233,6 +3335,23 @@ private nonisolated final class SlowRemovalFileManager: FileManager, @unchecked 
         try super.removeItem(at: URL)
         lock.lock()
         storedRemovalCount += 1
+        lock.unlock()
+    }
+}
+
+private nonisolated final class LockedTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func increment() {
+        lock.lock()
+        storedValue += 1
         lock.unlock()
     }
 }

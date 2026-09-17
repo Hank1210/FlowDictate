@@ -100,7 +100,7 @@ Status: `ERLEDIGT` – implementiert, als zusammenhängender Diff geprüft und m
 - explizite technische Sperre des echten Mixed-Starts, solange der Capture-Coordinator fehlt.
 - Unit-Tests für Consent, Sessionmodell, Store, Recovery und Cancel-Erhalt.
 
-Letzter verifizierter Teststand: 111 Tests erfolgreich am 13. September 2026.
+Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
 ### 4.3 Noch nicht implementiert
 
@@ -113,7 +113,7 @@ Letzter verifizierter Teststand: 111 Tests erfolgreich am 13. September 2026.
 - Tracktranskription und persistierter Trackfortschritt,
 - zeitbasierter Transcript-Merge,
 - Historyschema 7 und Meeting-Detailansicht,
-- reale Langzeit-, Performance- und Recoverynachweise.
+- reale Langzeit-, Performance- und Recoverynachweise für vollständige Mixed Sessions.
 
 Die sichtbare Auswahl `.mixed` ist deshalb derzeit kein Versprechen funktionierender Aufnahme: Der Coordinator bricht den Start absichtlich mit `captureNotAvailable` ab.
 
@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `IN ARBEIT` – API-/Build-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging-, Erstberechtigungs- und ScreenCaptureKit-Kurzvergleichs-Gate bestanden; Langzeitnachweis ausstehend
+**Status:** `IN ARBEIT` – API-/Build-, Signal-, Dauer-, Routenwechsel-, Cancel-, Prozessneustart- und Artefakt-Recovery-Gates beider Backends bestanden; finaler Release-/Community-Paketnachweis ausstehend
 
 ### 7.1 Ziel
 
@@ -236,6 +236,36 @@ Der Spike muss nicht die spätere UI oder Verarbeitung enthalten. Er muss belast
 Am 15. September 2026 wurde der echte Core-Audio-Erstberechtigungsdialog manuell in beiden Richtungen sowie der nachträgliche Widerruf vor und nach App-Neustart geprüft. Ablehnung liefert stumme Callbacks und darf deshalb weder als `Allowed` noch als sichere technische Diagnose `Denied` ausgegeben werden. Nur tatsächlich empfangenes Systemaudiosignal verifiziert den Zugriff für die laufende App-Sitzung. Der Widerruf wirkt erst nach Prozessende. Ein während eines Wiederholungsversuchs beobachteter blockierender Core-Audio-Cleanup-Aufruf wird durch einen begrenzten, vom UI isolierten Cleanup-Pfad abgefangen. Ein anschließender Lauf bestand 10/10 Start-/Stop-Zyklen mit 975 Callbacks, 0 Gaps und erfolgreichem Cleanup; die Langzeitnachweise bleiben Teil des Spike-Gates.
 
 Drei kontrollierte ScreenCaptureKit-Vergleichsläufe mit einer einzelnen App-Instanz lieferten 259, 250 und 253 Callbacks sowie durchgehend monotone, vollständige Zeitstempel. Nur der erste Lauf enthielt eine erkannte Lücke von 829 Frames (rund 17,3 ms bei 48 kHz); die beiden unmittelbaren Wiederholungen hatten keine Lücke. Die sichtbare Ergebnisanzeige im Audio-Tab ist damit manuell bestätigt. Die Langzeitmessungen entscheiden, wie sporadische Abweichungen in Gap-Metrik und Timeline-Recovery eingehen.
+
+Der Langzeitdiagnose-Build bietet ohne erneute Kompilierung 5 Sekunden sowie 5, 30 und 60 Minuten für beide Backends, expliziten Abbruch und sichtbare Dauer-, Gap-, Zeitstempel-, Sample-Rate- und temporäre Dateigrößenmetriken. Sein Kontrollvergleich ergab für ScreenCaptureKit 4,4 Sekunden erfasste Audiodaten mit einer 38.400-Frame-Lücke, direkt danach für Core Audio Tap 5,0 Sekunden ohne Lücke und mit erfolgreichem Cleanup. Normale Diktation und Quellenwechsel bleiben während einer Probe gesperrt.
+
+Der erste Core-Audio-Fünf-Minuten-Lauf war qualitativ lückenfrei und cleanup-stabil, lief jedoch real und audiobasiert 310,9 statt 300 Sekunden. Da Start-/Stop-Systemlogs und erfasste Frames übereinstimmen, ist dies als verspäteter Diagnose-Timer-Stop und nicht als Audio-Clock-Drift zu behandeln. Der folgende ScreenCaptureKit-Lauf grenzt den gemeinsamen Zeitmechanismus ein.
+
+Der ScreenCaptureKit-Gegenlauf erfasste 300,040 Sekunden, 15.002 Callbacks, 0 Gaps, monotone vollständige PTS, 0 Sample-Rate-Änderungen und 2.477.371 Bytes temporäre M4A-Daten. Damit bestand ScreenCaptureKit das Fünf-Minuten-Qualitätsgate in diesem Lauf; der Core-Audio-Timer-Ausreißer wird mit einem zweiten gleich kontrollierten Lauf eingegrenzt.
+
+Der zweite Core-Audio-Lauf bestätigte den backendnahen Stop-Ausreißer: 319,979 Sekunden Audiodaten, 29.998 Callbacks, 0 Gaps, monotone Zeitstempel und erfolgreiches Cleanup; die Systemlogs zeigten ebenfalls rund 320 Sekunden zwischen Start und Stop. Vor längeren Gates wird `AudioDeviceStop` deshalb durch einen dedizierten hochpriorisierten Timer direkt ausgelöst und vom potentiell blockierenden Destroy-Cleanup getrennt. Die Diagnose zeigt anschließend Sollzeit, reale Stop-Laufzeit und Audiodauer separat an. Erst ein korrigierter Fünf-Minuten-Lauf gibt das 30-Minuten-Gate frei.
+
+Der korrigierte Fünf-Minuten-Lauf bestand dieses Gate mit 300,000 Sekunden Sollzeit, 300,001738 Sekunden realer Stop-Laufzeit und 300,010667 Sekunden Audiodaten. Er lieferte 28.126 Callbacks, 0 Gaps, monotone Zeitstempel und erfolgreiches Cleanup. Der nächste Langzeitschritt ist damit der 30-Minuten-Core-Audio-Lauf; erst nach dessen Bewertung folgt der entsprechende ScreenCaptureKit-Vergleich.
+
+Der Core-Audio-30-Minuten-Lauf bestand ebenfalls: 1.800,000 Sekunden Sollzeit, 1.800,008087 Sekunden Wall, 1.800,000 Sekunden Audio, 168.750 Callbacks, 0 Gaps, monotone Zeitstempel und erfolgreiches Cleanup. Das 30-Minuten-Gate für den bevorzugten Core-Audio-Pfad ist damit erfüllt. Nächster Schritt ist der gleich lange ScreenCaptureKit-Gegenlauf.
+
+Der ScreenCaptureKit-30-Minuten-Gegenlauf endete mit 1.800,253867 Sekunden Wall, 1.799,400 Sekunden Audio und 89.970 Callbacks. PTS und Sample-Rate blieben stabil, jedoch trat eine Lücke von 31.680 Frames beziehungsweise 0,66 Sekunden auf. Der Lauf ist damit technisch abgeschlossen, aber nicht lückenfrei bestanden. Core Audio Tap bleibt der klare Vorzugspfad; für ScreenCaptureKit als macOS-14.0/14.1-Kompatibilitätspfad sind Gap-Warnung und Recovery zwingend.
+
+Der Core-Audio-60-Minuten-Lauf bestand mit 3.600,000 Sekunden Sollzeit, 3.600,010060 Sekunden Wall, 3.600,000 Sekunden Audio, 337.500 Callbacks, 0 Gaps, monotonen Zeitstempeln und erfolgreichem Cleanup. Damit sind die Dauergates 5, 30 und 60 Minuten für Core Audio Tap auf dem aktuellen Testsystem erfüllt. Für die finale Spike-Entscheidung bleiben insbesondere der 60-Minuten-ScreenCaptureKit-Vergleich, Ausgaberoutenwechsel und der Release-/Community-Paketnachweis offen.
+
+Der ScreenCaptureKit-60-Minuten-Vergleich bestand mit 3.600,487661 Sekunden Wall, 3.600,100000 Sekunden Audio, 180.005 Callbacks, vollständigen monotonen PTS, 0 Gaps und 0 Sample-Rate-Änderungen. Die im 30-Minuten-Lauf erkannte 0,66-Sekunden-Lücke ist damit sporadisch statt dauerhafte Drift. Die reine 5-/30-/60-Minuten-Matrix ist abgeschlossen; offen bleiben Ausgaberoutenwechsel, Recovery und der Release-/Community-Paketnachweis.
+
+Der fünfminütige Core-Audio-Ausgaberoutenwechsel MacBook-Lautsprecher → Plantronics-Headset → MacBook-Lautsprecher, mit kurzem zusätzlichen AirPods-Wechsel, bestand mit 300,009434 Sekunden Wall, 300,010667 Sekunden Audio, 28.126 Callbacks, 0 Gaps, monotonen Zeitstempeln und erfolgreichem Cleanup. Als Vergleich folgt derselbe Routenwechsel mit ScreenCaptureKit.
+
+Auch ScreenCaptureKit bestand den fünfminütigen Wechsel MacBook-Lautsprecher → Plantronics-Headset → MacBook-Lautsprecher: 300,168522 Sekunden Wall, 300,020000 Sekunden Audio, 15.001 Callbacks, vollständige monotone PTS, 0 Gaps und 0 Sample-Rate-Änderungen. Der Ausgaberoutenvergleich ist damit abgeschlossen; nächster Gate-Bereich ist Cancel/Recovery.
+
+Core Audio Tap bestand Cancel/Recovery: Eine laufende 30-Minuten-Probe wurde nach wenigen Sekunden abgebrochen, der Start-Button sofort wieder freigegeben und ein direkt folgender Fünf-Sekunden-Lauf mit 469 Callbacks, 0 Gaps, monotonen Zeitstempeln und erfolgreichem Cleanup beendet. Als Gegenprobe folgt derselbe Ablauf mit ScreenCaptureKit.
+
+ScreenCaptureKit bestand Cancel/Recovery ebenfalls: Nach Abbruch wurde der Button wieder aktiv; der direkte Fünf-Sekunden-Wiederholungslauf endete mit 5,182252 Sekunden Wall, 5,080000 Sekunden Audio, 254 Callbacks, vollständigen monotonen PTS, 0 Gaps und 0 Sample-Rate-Änderungen. Als nächstes folgt kontrollierter Prozessabbruch/Neustart zur Prüfung der OS-Ressourcenfreigabe.
+
+Core Audio Tap bestand den kontrollierten Prozessabbruch/Neustart: Die laufende Probe wurde per hartem Prozessende ohne Cleanup unterbrochen, der Debug-Build neu gestartet und unmittelbar danach eine Fünf-Sekunden-Probe mit 470 Callbacks, 0 Gaps, monotonen Zeitstempeln und erfolgreichem Cleanup abgeschlossen. macOS gab Tap und Aggregate Device prozessgebunden frei. Als Gegenprobe folgt ScreenCaptureKit einschließlich Prüfung auf verwaiste temporäre Dateien.
+
+ScreenCaptureKit bestand die Ressourcen-Recovery nach demselben harten Prozessabbruch: Nach Neustart lief eine unmittelbare Fünf-Sekunden-Probe mit 5,3 Sekunden Wall, 5,1 Sekunden Audio, 257 Callbacks, vollständigen monotonen PTS, 0 Gaps und 0 Sample-Rate-Änderungen durch. Der Abbruch hinterließ jedoch im bisherigen Diagnosepfad eine 403.755 Bytes große, unlesbare M4A-Datei im normalen Aufnahmeordner. Probe-Artefakte werden deshalb nun in einem eigenen temporären Verzeichnis erzeugt; reguläres Ende und Cancel entfernen sie direkt, beim Appstart werden ausschließlich eindeutig als Probe markierte Dateien nicht mehr laufender Prozesse entfernt. Normale Nutzeraufnahmen liegen außerhalb dieses Bereichs und werden von dieser Bereinigung nie angefasst. Der manuelle Nachweis des neuen Pfads bestand: Nach `SIGKILL` blieb das 279.536-Byte-Probe-Artefakt zunächst bestehen, wurde beim Neustart automatisch entfernt und eine direkte Fünf-Sekunden-Wiederholung lief mit 5,2 Sekunden Wall, 5,0 Sekunden Audio, 252 Callbacks, 0 Gaps und stabiler Sample-Rate durch. Auch nach dem regulären Ende blieb kein Probe-Artefakt zurück.
 
 ### 7.2 Prüfmatrix
 

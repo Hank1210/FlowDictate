@@ -6,6 +6,34 @@ nonisolated enum SystemAudioCaptureBackend: String, Codable, Sendable, Equatable
     case screenCaptureKit
 }
 
+nonisolated enum SystemAudioProbeDuration: Int, CaseIterable, Identifiable, Sendable {
+    case fiveSeconds = 5
+    case fiveMinutes = 300
+    case thirtyMinutes = 1_800
+    case sixtyMinutes = 3_600
+
+    var id: Int { rawValue }
+    var duration: Duration { .seconds(rawValue) }
+
+    var title: String {
+        switch self {
+        case .fiveSeconds: "5 Seconds"
+        case .fiveMinutes: "5 Minutes"
+        case .thirtyMinutes: "30 Minutes"
+        case .sixtyMinutes: "60 Minutes"
+        }
+    }
+
+    var compactTitle: String {
+        switch self {
+        case .fiveSeconds: "5 sec"
+        case .fiveMinutes: "5 min"
+        case .thirtyMinutes: "30 min"
+        case .sixtyMinutes: "60 min"
+        }
+    }
+}
+
 nonisolated struct SystemAudioCaptureStrategy: Sendable {
     let preferredBackend: SystemAudioCaptureBackend
     let minimumOperatingSystem: OperatingSystemVersion
@@ -46,6 +74,8 @@ nonisolated struct SystemAudioCaptureStrategy: Sendable {
 }
 
 nonisolated struct CoreAudioTapProbeReport: Sendable, Equatable {
+    let requestedDuration: TimeInterval
+    let wallDuration: TimeInterval
     let callbackCount: Int
     let nonSilentCallbackCount: Int
     let frameCount: Int64
@@ -67,6 +97,10 @@ nonisolated struct CoreAudioTapProbeReport: Sendable, Equatable {
     var capturedDuration: TimeInterval {
         guard sampleRate > 0 else { return 0 }
         return TimeInterval(frameCount) / sampleRate
+    }
+
+    var stopDelay: TimeInterval {
+        wallDuration - requestedDuration
     }
 
     var hasCapturedSignal: Bool {
@@ -213,6 +247,7 @@ actor CoreAudioTapCaptureProbe {
         var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
         var ioProcID: AudioDeviceIOProcID?
         var deviceStarted = false
+        var timedStopResult: CoreAudioTapTimedStop.Result?
         var createdTapUID: String?
         var createdAggregateUID: String?
 
@@ -278,14 +313,23 @@ actor CoreAudioTapCaptureProbe {
                 operation: "start audio-only capture"
             )
             deviceStarted = true
-
-            try await Task.sleep(for: duration)
+            let timedStop = CoreAudioTapTimedStop {
+                AudioDeviceStop(aggregateDeviceID, ioProcID)
+            }
+            timedStopResult = await timedStop.wait(for: duration.timeInterval)
+            deviceStarted = timedStopResult?.status != noErr
+            try check(
+                timedStopResult?.status ?? kAudioHardwareUnspecifiedError,
+                operation: "stop audio-only capture"
+            )
+            try Task.checkCancellation()
         } catch {
             let cleanupReport = await cleanupWithTimeout(
                 tapID: tapID,
                 aggregateDeviceID: aggregateDeviceID,
                 ioProcID: ioProcID,
                 deviceStarted: deviceStarted,
+                precomputedStopStatus: timedStopResult?.status,
                 tapUID: createdTapUID,
                 aggregateUID: createdAggregateUID
             )
@@ -300,6 +344,7 @@ actor CoreAudioTapCaptureProbe {
             aggregateDeviceID: aggregateDeviceID,
             ioProcID: ioProcID,
             deviceStarted: deviceStarted,
+            precomputedStopStatus: timedStopResult?.status,
             tapUID: createdTapUID,
             aggregateUID: createdAggregateUID
         ) else {
@@ -316,7 +361,11 @@ actor CoreAudioTapCaptureProbe {
                 status: failure.status
             )
         }
-        let report = metrics.report(cleanup: cleanupReport)
+        let report = metrics.report(
+            requestedDuration: duration.timeInterval,
+            wallDuration: timedStopResult?.elapsed ?? 0,
+            cleanup: cleanupReport
+        )
         guard report.callbackCount > 0 else {
             throw CoreAudioTapProbeError.noAudioCallbacks
         }
@@ -414,6 +463,7 @@ actor CoreAudioTapCaptureProbe {
         aggregateDeviceID: AudioObjectID,
         ioProcID: AudioDeviceIOProcID?,
         deviceStarted: Bool,
+        precomputedStopStatus: OSStatus? = nil,
         tapUID: String?,
         aggregateUID: String?
     ) async -> CoreAudioTapCleanupReport? {
@@ -426,6 +476,7 @@ actor CoreAudioTapCaptureProbe {
                         aggregateDeviceID: aggregateDeviceID,
                         ioProcID: ioProcID,
                         deviceStarted: deviceStarted,
+                        precomputedStopStatus: precomputedStopStatus,
                         tapUID: tapUID,
                         aggregateUID: aggregateUID
                     )
@@ -443,10 +494,11 @@ actor CoreAudioTapCaptureProbe {
         aggregateDeviceID: AudioObjectID,
         ioProcID: AudioDeviceIOProcID?,
         deviceStarted: Bool,
+        precomputedStopStatus: OSStatus?,
         tapUID: String?,
         aggregateUID: String?
     ) -> CoreAudioTapCleanupReport {
-        var stopStatus: OSStatus?
+        var stopStatus = precomputedStopStatus
         var destroyIOProcStatus: OSStatus?
         var destroyAggregateDeviceStatus: OSStatus?
         var destroyTapStatus: OSStatus?
@@ -528,6 +580,91 @@ actor CoreAudioTapCaptureProbe {
             aggregateDeviceRemoved: aggregateDeviceRemoved,
             tapRemoved: tapRemoved
         )
+    }
+}
+
+nonisolated final class CoreAudioTapTimedStop: @unchecked Sendable {
+    nonisolated struct Result: Sendable, Equatable {
+        let status: OSStatus
+        let elapsed: TimeInterval
+    }
+
+    private let lock = NSLock()
+    private let queue = DispatchQueue(
+        label: "de.euler.FlowDictate.core-audio-tap-timed-stop",
+        qos: .userInteractive
+    )
+    private let stopAction: () -> OSStatus
+    private var startedAtUptimeNanoseconds: UInt64 = 0
+    private var timer: DispatchSourceTimer?
+    private var continuation: CheckedContinuation<Result, Never>?
+    private var result: Result?
+    private var isStopping = false
+
+    init(stopAction: @escaping () -> OSStatus) {
+        self.stopAction = stopAction
+    }
+
+    func wait(for duration: TimeInterval) async -> Result {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    continuation.resume(returning: result)
+                    return
+                }
+                self.continuation = continuation
+                startedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+                let timer = DispatchSource.makeTimerSource(queue: queue)
+                self.timer = timer
+                timer.setEventHandler { [weak self] in self?.stopNow() }
+                timer.schedule(deadline: .now() + max(0, duration), leeway: .milliseconds(10))
+                timer.resume()
+                let shouldStopImmediately = Task.isCancelled
+                lock.unlock()
+                if shouldStopImmediately { stopNow() }
+            }
+        } onCancel: {
+            stopNow()
+        }
+    }
+
+    func stopNow() {
+        lock.lock()
+        guard result == nil, !isStopping else {
+            lock.unlock()
+            return
+        }
+        isStopping = true
+        let startedAt = startedAtUptimeNanoseconds
+        timer?.setEventHandler {}
+        timer?.cancel()
+        timer = nil
+        lock.unlock()
+
+        let stoppedAt = DispatchTime.now().uptimeNanoseconds
+        let status = stopAction()
+        let elapsed = startedAt == 0
+            ? 0
+            : TimeInterval(stoppedAt - startedAt) / 1_000_000_000
+        let result = Result(status: status, elapsed: elapsed)
+
+        lock.lock()
+        self.result = result
+        isStopping = false
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: result)
+    }
+}
+
+nonisolated private extension Duration {
+    var timeInterval: TimeInterval {
+        let components = self.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }
 }
 
@@ -656,10 +793,16 @@ nonisolated private final class CoreAudioTapProbeMetrics: @unchecked Sendable {
         lock.unlock()
     }
 
-    func report(cleanup: CoreAudioTapCleanupReport) -> CoreAudioTapProbeReport {
+    func report(
+        requestedDuration: TimeInterval,
+        wallDuration: TimeInterval,
+        cleanup: CoreAudioTapCleanupReport
+    ) -> CoreAudioTapProbeReport {
         lock.lock()
         defer { lock.unlock() }
         return CoreAudioTapProbeReport(
+            requestedDuration: requestedDuration,
+            wallDuration: wallDuration,
             callbackCount: callbackCount,
             nonSilentCallbackCount: nonSilentCallbackCount,
             frameCount: frameCount,

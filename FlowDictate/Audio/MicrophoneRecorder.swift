@@ -79,11 +79,16 @@ protocol AudioRecording: AnyObject {
     var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)? { get set }
     func selectInputDevice(_ deviceID: AudioDeviceID?)
     func start() async throws
+    func start(at outputURL: URL?) async throws
     func stop() async throws -> AudioRecordingResult
 }
 
 extension AudioRecording {
     var lastTimelineReport: ScreenCaptureTimelineReport? { nil }
+
+    func start(at outputURL: URL?) async throws {
+        try await start()
+    }
 }
 
 @MainActor

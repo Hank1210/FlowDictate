@@ -78,7 +78,12 @@ struct FlowDictateMenu: View {
                 }
             }
         }
-        .disabled(coordinator.isRecording || coordinator.isProcessing)
+        .disabled(
+            coordinator.isRecording
+                || coordinator.isProcessing
+                || coordinator.isSystemAudioTestRunning
+                || coordinator.isCoreAudioTapProbeRunning
+        )
 
         Menu("Microphone") {
             Button {
@@ -148,6 +153,7 @@ struct FlowDictateSettingsView: View {
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var launchAtLogin: LaunchAtLoginManager
     @State private var apiKey = ""
+    @State private var systemAudioProbeDuration = SystemAudioProbeDuration.fiveMinutes
 
     init(coordinator: DictationCoordinator) {
         self.coordinator = coordinator
@@ -366,7 +372,12 @@ struct FlowDictateSettingsView: View {
                     Text(RecordingAudioSource.systemAudio.title).tag(RecordingAudioSource.systemAudio)
                     Text(RecordingAudioSource.mixed.title).tag(RecordingAudioSource.mixed)
                 }
-                .disabled(coordinator.isRecording || coordinator.isProcessing)
+                .disabled(
+                    coordinator.isRecording
+                        || coordinator.isProcessing
+                        || coordinator.isSystemAudioTestRunning
+                        || coordinator.isCoreAudioTapProbeRunning
+                )
 
                 Text(settings.recordingAudioSource.explanation)
                     .font(.caption)
@@ -400,14 +411,20 @@ struct FlowDictateSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     if settings.recordingAudioSource == .systemAudio {
-                        Button("Test System Audio for 5 Seconds…") {
-                            coordinator.testSystemAudio()
+                        systemAudioProbeDurationPicker
+                        Button("Run ScreenCaptureKit Probe for \(systemAudioProbeDuration.title)…") {
+                            coordinator.testSystemAudio(duration: systemAudioProbeDuration)
                         }
                         .disabled(
                             coordinator.isSystemAudioTestRunning
                                 || coordinator.isRecording
                                 || coordinator.isProcessing
                         )
+                        if coordinator.isSystemAudioTestRunning {
+                            Button("Cancel ScreenCaptureKit Probe") {
+                                coordinator.cancelSystemAudioTest()
+                            }
+                        }
                         Text("The test stays on this Mac, creates no History entry and sends nothing to OpenAI.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -451,14 +468,22 @@ struct FlowDictateSettingsView: View {
 
                     if #available(macOS 14.2, *) {
                         Divider()
-                        Button("Run Audio-Only Capture Probe for 5 Seconds…") {
-                            coordinator.runCoreAudioTapCaptureProbe()
+                        systemAudioProbeDurationPicker
+                        Button("Run Audio-Only Capture Probe for \(systemAudioProbeDuration.title)…") {
+                            coordinator.runCoreAudioTapCaptureProbe(
+                                duration: systemAudioProbeDuration
+                            )
                         }
                         .disabled(
                             coordinator.isCoreAudioTapProbeRunning
                                 || coordinator.isRecording
                                 || coordinator.isProcessing
                         )
+                        if coordinator.isCoreAudioTapProbeRunning {
+                            Button("Cancel Audio-Only Capture Probe") {
+                                coordinator.cancelCoreAudioTapCaptureProbe()
+                            }
+                        }
                         Button("Run 10 Start/Stop Probe Cycles…") {
                             coordinator.runCoreAudioTapRepeatedCaptureProbe()
                         }
@@ -520,6 +545,21 @@ struct FlowDictateSettingsView: View {
                 }
             }
         }
+    }
+
+    private var systemAudioProbeDurationPicker: some View {
+        Picker("Probe duration", selection: $systemAudioProbeDuration) {
+            ForEach(SystemAudioProbeDuration.allCases) { duration in
+                Text(duration.compactTitle).tag(duration)
+            }
+        }
+        .pickerStyle(.segmented)
+        .disabled(
+            coordinator.isSystemAudioTestRunning
+                || coordinator.isCoreAudioTapProbeRunning
+                || coordinator.isRecording
+                || coordinator.isProcessing
+        )
     }
 
     private var transcriptionSettings: some View {

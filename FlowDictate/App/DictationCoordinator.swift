@@ -117,6 +117,7 @@ final class DictationCoordinator: ObservableObject {
     private let jobStore: DictationJobStore
     private let processingQueue: DictationProcessingQueue
     private let processActivityManager: ProcessActivityManaging
+    private let captureProbeArtifactStore = CaptureProbeArtifactStore()
     private let meetingRecordingConsentPresenter: any MeetingRecordingConsentPresenting
     private let coreAudioTapCaptureProbe = CoreAudioTapCaptureProbe()
 
@@ -130,6 +131,7 @@ final class DictationCoordinator: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private var previewTestTask: Task<Void, Never>?
     private var systemAudioTestTask: Task<Void, Never>?
+    private var coreAudioTapProbeTask: Task<Void, Never>?
     private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
@@ -275,6 +277,19 @@ final class DictationCoordinator: ObservableObject {
                 )
             }
 
+        do {
+            let removed = try captureProbeArtifactStore.removeAbandonedArtifacts()
+            if !removed.isEmpty {
+                FlowLogger.audio.notice(
+                    "Removed \(removed.count, privacy: .public) abandoned capture-probe artifact(s)"
+                )
+            }
+        } catch {
+            FlowLogger.audio.error(
+                "Could not clean capture-probe artifacts: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+
         for candidate in [microphoneRecorder, self.systemAudioRecorder] {
             candidate.levelHandler = { [weak self, weak candidate] level in
                 let activeLevel = candidate?.isRecording == true ? level : 0
@@ -336,6 +351,7 @@ final class DictationCoordinator: ObservableObject {
         overlayDismissTask?.cancel()
         previewTestTask?.cancel()
         systemAudioTestTask?.cancel()
+        coreAudioTapProbeTask?.cancel()
         localModelInstallTask?.cancel()
         jobProcessingTask?.cancel()
     }
@@ -361,6 +377,7 @@ final class DictationCoordinator: ObservableObject {
             && state.acceptsStart
             && !isPreviewTestRunning
             && !isSystemAudioTestRunning
+            && !isCoreAudioTapProbeRunning
             && !hasQueueReservation
             && (
                 queueSnapshot.totalActiveCount == 0
@@ -1229,7 +1246,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func selectRecordingAudioSource(_ source: RecordingAudioSource) {
-        guard !recorder.isRecording, !isProcessing else { return }
+        guard !recorder.isRecording,
+              !isProcessing,
+              !isSystemAudioTestRunning,
+              !isCoreAudioTapProbeRunning else { return }
         guard settings.recordingAudioSource != source else { return }
         if MixedRecordingConsentGate.requirement(
             for: source,
@@ -1253,26 +1273,42 @@ final class DictationCoordinator: ObservableObject {
         presentMeetingRecordingConsent()
     }
 
-    func runCoreAudioTapCaptureProbe() {
-        guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
+    func runCoreAudioTapCaptureProbe(
+        duration: SystemAudioProbeDuration = .fiveSeconds
+    ) {
+        guard !isCoreAudioTapProbeRunning,
+              !isSystemAudioTestRunning,
+              !recorder.isRecording,
+              !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
-        let runningMessage = "Audio-only capture probe is running. Play System Audio for 5 seconds…"
+        let runningMessage = "Audio-only capture probe is running for \(duration.title.lowercased()). Play System Audio…"
         setupMessage = runningMessage
         coreAudioTapProbeMessage = runningMessage
-        Task { [weak self] in
+        coreAudioTapProbeTask = Task { [weak self] in
             guard let self else { return }
-            defer { isCoreAudioTapProbeRunning = false }
+            let activity = processActivityManager.beginUserInitiatedActivity(
+                reason: "Measuring FlowDictate audio-only capture"
+            )
+            defer {
+                processActivityManager.endActivity(activity)
+                isCoreAudioTapProbeRunning = false
+                coreAudioTapProbeTask = nil
+            }
             do {
-                let report = try await coreAudioTapCaptureProbe.run()
+                let report = try await coreAudioTapCaptureProbe.run(for: duration.duration)
                 if report.hasCapturedSignal {
                     hasVerifiedCoreAudioTapAccess = true
                     refreshPermissionStatus()
                     let message = String(
-                        format: "Audio-only probe succeeded: %.1f s, %d callbacks (%d with signal), %d gap(s), cleanup %@.",
+                        format: "Audio-only probe succeeded: %.1f s requested, %.1f s wall, %.1f s audio, %d callbacks (%d with signal), %d gap(s), largest gap %lld frame(s), timestamps %@, cleanup %@.",
+                        report.requestedDuration,
+                        report.wallDuration,
                         report.capturedDuration,
                         report.callbackCount,
                         report.nonSilentCallbackCount,
                         report.sampleDiscontinuityCount,
+                        report.largestPositiveSampleGapFrames,
+                        report.hasMonotonicTimeline ? "monotonic" : "need review",
                         report.cleanup.succeeded ? "passed" : "failed"
                     )
                     setupMessage = message
@@ -1283,8 +1319,12 @@ final class DictationCoordinator: ObservableObject {
                     coreAudioTapProbeMessage = message
                 }
                 FlowLogger.audio.notice(
-                    "Core Audio tap probe completed: duration=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) signalVerified=\(report.hasCapturedSignal, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.cleanup.succeeded, privacy: .public)"
+                    "Core Audio tap probe completed: requested=\(report.requestedDuration, privacy: .public)s wall=\(report.wallDuration, privacy: .public)s audio=\(report.capturedDuration, privacy: .public)s stopDelay=\(report.stopDelay, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) signalCallbacks=\(report.nonSilentCallbackCount, privacy: .public) signalVerified=\(report.hasCapturedSignal, privacy: .public) sampleRate=\(report.sampleRate, privacy: .public) channels=\(report.channelCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.cleanup.succeeded, privacy: .public)"
                 )
+            } catch is CancellationError {
+                let message = "Audio-only capture probe cancelled."
+                setupMessage = message
+                coreAudioTapProbeMessage = message
             } catch {
                 let message = "Audio-only capture probe failed: \(error.localizedDescription)"
                 setupMessage = message
@@ -1297,14 +1337,24 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func runCoreAudioTapRepeatedCaptureProbe() {
-        guard !isCoreAudioTapProbeRunning, !recorder.isRecording, !isProcessing else { return }
+        guard !isCoreAudioTapProbeRunning,
+              !isSystemAudioTestRunning,
+              !recorder.isRecording,
+              !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
         let runningMessage = "Audio-only capture probe is running 10 start/stop cycles…"
         setupMessage = runningMessage
         coreAudioTapProbeMessage = runningMessage
-        Task { [weak self] in
+        coreAudioTapProbeTask = Task { [weak self] in
             guard let self else { return }
-            defer { isCoreAudioTapProbeRunning = false }
+            let activity = processActivityManager.beginUserInitiatedActivity(
+                reason: "Measuring repeated FlowDictate audio-only capture"
+            )
+            defer {
+                processActivityManager.endActivity(activity)
+                isCoreAudioTapProbeRunning = false
+                coreAudioTapProbeTask = nil
+            }
             do {
                 let report = try await coreAudioTapCaptureProbe.runRepeated()
                 if report.hasCapturedSignal {
@@ -1332,6 +1382,10 @@ final class DictationCoordinator: ObservableObject {
                 FlowLogger.audio.notice(
                     "Core Audio tap cycle probe completed: cycles=\(report.completedCycleCount, privacy: .public) callbacks=\(report.totalCallbackCount, privacy: .public) signalCallbacks=\(report.totalNonSilentCallbackCount, privacy: .public) hostRegressions=\(report.hostTimeRegressionCount, privacy: .public) sampleRegressions=\(report.sampleTimeRegressionCount, privacy: .public) discontinuities=\(report.sampleDiscontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveSampleGapFrames, privacy: .public) cleanup=\(report.allCleanupSucceeded, privacy: .public) healthy=\(healthy, privacy: .public)"
                 )
+            } catch is CancellationError {
+                let message = "Audio-only cycle probe cancelled."
+                setupMessage = message
+                coreAudioTapProbeMessage = message
             } catch {
                 let message = "Audio-only cycle probe failed: \(error.localizedDescription)"
                 setupMessage = message
@@ -1341,6 +1395,10 @@ final class DictationCoordinator: ObservableObject {
                 )
             }
         }
+    }
+
+    func cancelCoreAudioTapCaptureProbe() {
+        coreAudioTapProbeTask?.cancel()
     }
 
     private func applyRecordingAudioSource(_ source: RecordingAudioSource) {
@@ -1385,35 +1443,56 @@ final class DictationCoordinator: ObservableObject {
         refreshPermissionStatus()
     }
 
-    func testSystemAudio() {
-        guard !isSystemAudioTestRunning, !recorder.isRecording, state.acceptsStart else { return }
+    func testSystemAudio(duration: SystemAudioProbeDuration = .fiveSeconds) {
+        guard !isSystemAudioTestRunning,
+              !isCoreAudioTapProbeRunning,
+              !recorder.isRecording,
+              state.acceptsStart else { return }
         isSystemAudioTestRunning = true
-        let runningMessage = "System Audio test is running for 5 seconds…"
+        let runningMessage = "ScreenCaptureKit probe is running for \(duration.title.lowercased())…"
         setupMessage = runningMessage
         systemAudioTestMessage = runningMessage
         systemAudioTestTask = Task { [weak self] in
             guard let self else { return }
+            let activity = processActivityManager.beginUserInitiatedActivity(
+                reason: "Measuring FlowDictate ScreenCaptureKit system audio"
+            )
             var temporaryURL: URL?
+            var probeArtifactURL: URL?
+            defer {
+                processActivityManager.endActivity(activity)
+            }
             do {
+                let artifactURL = try captureProbeArtifactStore.makeURL()
+                probeArtifactURL = artifactURL
                 sessionRecorder = systemAudioRecorder
-                try await systemAudioRecorder.start()
+                try await systemAudioRecorder.start(at: artifactURL)
                 overlay.updateSource(.systemAudio)
                 overlay.show(status: .recording, reposition: true)
-                try await Task.sleep(for: .seconds(5))
-                temporaryURL = try await systemAudioRecorder.stop().url
+                try await Task.sleep(for: duration.duration)
+                let result = try await systemAudioRecorder.stop()
+                temporaryURL = result.url
                 if let temporaryURL { try validateSystemAudioTestFile(temporaryURL) }
+                let fileSize = temporaryURL.flatMap {
+                    try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize
+                } ?? 0
                 if let report = systemAudioRecorder.lastTimelineReport {
                     let message = String(
-                        format: "System Audio test completed: %d callbacks, %d gap(s), largest gap %d frame(s), timestamps %@.",
+                        format: "ScreenCaptureKit probe completed: %.1f s requested, %.1f s wall, %.1f s audio, %d callbacks, %d gap(s), largest gap %lld frame(s), timestamps %@, sample-rate changes %d, %.1f MB temporary file.",
+                        TimeInterval(duration.rawValue),
+                        result.duration,
+                        report.capturedDuration,
                         report.callbackCount,
                         report.discontinuityCount,
                         report.largestPositiveGapFrames,
-                        report.hasMonotonicTimeline ? "monotonic" : "need review"
+                        report.hasMonotonicTimeline ? "monotonic" : "need review",
+                        report.sampleRateChangeCount,
+                        Double(fileSize) / 1_000_000
                     )
                     setupMessage = message
                     systemAudioTestMessage = message
                     FlowLogger.audio.notice(
-                        "ScreenCaptureKit timeline probe completed: callbacks=\(report.callbackCount, privacy: .public) missingPTS=\(report.missingPresentationTimeCount, privacy: .public) regressions=\(report.presentationTimeRegressionCount, privacy: .public) discontinuities=\(report.discontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveGapFrames, privacy: .public)"
+                        "ScreenCaptureKit timeline probe completed: requested=\(duration.rawValue, privacy: .public)s wall=\(result.duration, privacy: .public)s audio=\(report.capturedDuration, privacy: .public)s callbacks=\(report.callbackCount, privacy: .public) missingPTS=\(report.missingPresentationTimeCount, privacy: .public) regressions=\(report.presentationTimeRegressionCount, privacy: .public) discontinuities=\(report.discontinuityCount, privacy: .public) largestGapFrames=\(report.largestPositiveGapFrames, privacy: .public) sampleRateChanges=\(report.sampleRateChangeCount, privacy: .public) temporaryFileBytes=\(fileSize, privacy: .public)"
                     )
                 } else {
                     let message = "System Audio test completed successfully."
@@ -1433,7 +1512,9 @@ final class DictationCoordinator: ObservableObject {
                 setupMessage = message
                 systemAudioTestMessage = message
             }
-            if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
+            for url in Set([temporaryURL, probeArtifactURL].compactMap { $0 }) {
+                try? captureProbeArtifactStore.removeArtifact(at: url)
+            }
             sessionRecorder = nil
             audioLevel = 0
             overlay.hide()
@@ -1441,6 +1522,10 @@ final class DictationCoordinator: ObservableObject {
             systemAudioTestTask = nil
             refreshPermissionStatus()
         }
+    }
+
+    func cancelSystemAudioTest() {
+        systemAudioTestTask?.cancel()
     }
 
     private func validateSystemAudioTestFile(_ url: URL) throws {

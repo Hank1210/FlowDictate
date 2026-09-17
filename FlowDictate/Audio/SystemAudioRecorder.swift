@@ -30,10 +30,18 @@ enum SystemAudioRecorderError: LocalizedError {
 
 nonisolated struct ScreenCaptureTimelineReport: Sendable, Equatable {
     let callbackCount: Int
+    let frameCount: Int64
+    let sampleRate: Double
+    let sampleRateChangeCount: Int
     let missingPresentationTimeCount: Int
     let presentationTimeRegressionCount: Int
     let discontinuityCount: Int
     let largestPositiveGapFrames: Int64
+
+    var capturedDuration: TimeInterval {
+        guard sampleRate > 0 else { return 0 }
+        return TimeInterval(frameCount) / sampleRate
+    }
 
     var hasMonotonicTimeline: Bool {
         callbackCount > 0
@@ -44,6 +52,9 @@ nonisolated struct ScreenCaptureTimelineReport: Sendable, Equatable {
 
 nonisolated struct ScreenCaptureTimelineAnalyzer: Sendable, Equatable {
     private(set) var callbackCount = 0
+    private(set) var frameCount: Int64 = 0
+    private(set) var sampleRate: Double = 0
+    private(set) var sampleRateChangeCount = 0
     private(set) var missingPresentationTimeCount = 0
     private(set) var presentationTimeRegressionCount = 0
     private(set) var discontinuityCount = 0
@@ -58,10 +69,16 @@ nonisolated struct ScreenCaptureTimelineAnalyzer: Sendable, Equatable {
         sampleRate: Double
     ) {
         callbackCount += 1
-        guard let presentationTimeSeconds,
-              presentationTimeSeconds.isFinite,
-              frameCount > 0,
-              sampleRate > 0 else {
+        guard frameCount > 0, sampleRate > 0 else {
+            missingPresentationTimeCount += 1
+            return
+        }
+        self.frameCount += frameCount
+        if self.sampleRate > 0, abs(self.sampleRate - sampleRate) > 0.5 {
+            sampleRateChangeCount += 1
+        }
+        self.sampleRate = sampleRate
+        guard let presentationTimeSeconds, presentationTimeSeconds.isFinite else {
             missingPresentationTimeCount += 1
             return
         }
@@ -92,6 +109,9 @@ nonisolated struct ScreenCaptureTimelineAnalyzer: Sendable, Equatable {
     var report: ScreenCaptureTimelineReport {
         ScreenCaptureTimelineReport(
             callbackCount: callbackCount,
+            frameCount: frameCount,
+            sampleRate: sampleRate,
+            sampleRateChangeCount: sampleRateChangeCount,
             missingPresentationTimeCount: missingPresentationTimeCount,
             presentationTimeRegressionCount: presentationTimeRegressionCount,
             discontinuityCount: discontinuityCount,
@@ -152,6 +172,10 @@ final class SystemAudioRecorder: NSObject, AudioRecording {
     func selectInputDevice(_ deviceID: AudioDeviceID?) {}
 
     func start() async throws {
+        try await start(at: nil)
+    }
+
+    func start(at outputURL: URL?) async throws {
         guard !isRecording else { throw AudioRecorderError.alreadyRecording }
         lastTimelineReport = nil
         guard permissionService.isAuthorized || permissionService.requestAccess() else {
@@ -167,7 +191,7 @@ final class SystemAudioRecorder: NSObject, AudioRecording {
         }
 
         let id = UUID()
-        let url = try store.makeRecordingURL(id: id, fileExtension: "m4a")
+        let url = try outputURL ?? store.makeRecordingURL(id: id, fileExtension: "m4a")
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = true
