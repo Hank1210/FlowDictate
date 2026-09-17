@@ -1,8 +1,8 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Grundlagen abgeschlossen, Capture noch nicht implementiert
-**Stand:** 15. September 2026
+**Status:** Aktiver Umsetzungsplan; Capture-Spike abgeschlossen, Dual-Capture-Orchestrierung in Arbeit
+**Stand:** 17. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
 **Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
@@ -150,7 +150,7 @@ Recording Source / Consent / Permission Preflight
 |---|---|---|---|
 | 4.1.0 Grundlagen und Consent | `ERLEDIGT` | 4.0.2 | stabiler Sessionvertrag |
 | 4.1.1 Capture-Spike | `ERLEDIGT` | Grundlagen | verbindliche Captureentscheidung |
-| 4.1.2 Dual-Capture-Coordinator | `OFFEN` | Spike-Go | echte Mixed-Aufnahme |
+| 4.1.2 Dual-Capture-Coordinator | `IN ARBEIT` | Spike-Go | echte Mixed-Aufnahme |
 | 4.1.3 Timeline, Sync und Qualität | `OFFEN` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `OFFEN` | finale Trackverträge | recoverbare Transkripte |
 | 4.1.5 Timed Merge | `OFFEN` | Tracktranskripte + Sync | Meeting-Timeline |
@@ -332,7 +332,9 @@ Vor Schritt 4.1.2 liegt eine eindeutige Entscheidung vor:
 
 ## 8. Schritt 4.1.2 – MixedRecordingSessionCoordinator und Dual Capture
 
-**Status:** `OFFEN`
+**Status:** `IN ARBEIT` – testbare Orchestrierungsschicht implementiert; konkrete Trackrecorder und App-Integration stehen noch aus
+
+Der erste Teilstand enthält den actor-basierten Session-Coordinator, die Recorder-/Store-Schnittstellen, eine gemeinsame monotone Startbarriere sowie unabhängige Stop-, Cancel- und Teilfehlerbehandlung. Manifest und Originalpfade werden vor Capturebeginn angelegt; ein zweiter Start wird abgewiesen und Startfehler stoppen beide Recorder. Vier Fake-Recorder-Tests decken Startbarriere, Startausfall, partielle Finalisierung und Cancel mit anschließendem Neustart ab. Die bestehende `captureNotAvailable`-Sperre bleibt bestehen, bis Mikrofon- und Systemaudio-Trackrecorder angeschlossen und real gemeinsam abgenommen sind.
 
 ### 8.1 Voraussichtliche Dateien
 

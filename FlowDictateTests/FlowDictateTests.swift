@@ -811,6 +811,222 @@ struct FlowDictateTests {
         #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     }
 
+    @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedStart-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let microphone = MockMixedTrackRecorder(role: .localSpeaker, events: events)
+        let systemAudio = MockMixedTrackRecorder(role: .systemAudio, events: events)
+        let requestedHostTime: UInt64 = 50_000
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: microphone,
+            systemAudioRecorder: systemAudio,
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            hostTime: { requestedHostTime }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "test-model",
+            language: "de"
+        )
+
+        let session = try await coordinator.start(request)
+        let recordedEvents = await events.values
+        let firstStartIndex = try #require(recordedEvents.firstIndex {
+            if case .start = $0 { true } else { false }
+        })
+
+        #expect(session.status == .recording)
+        #expect(session.tracks.allSatisfy { $0.status == .recording })
+        #expect(session.tracks.map(\.audioRelativePath) == [
+            "tracks/microphone.caf",
+            "tracks/system-audio.caf"
+        ])
+        #expect(recordedEvents[..<firstStartIndex].contains(.prepare(.localSpeaker)))
+        #expect(recordedEvents[..<firstStartIndex].contains(.prepare(.systemAudio)))
+        #expect(await microphone.receivedStartHostTime == requestedHostTime)
+        #expect(await systemAudio.receivedStartHostTime == requestedHostTime)
+        #expect(await coordinator.state == .recording(request.sessionID))
+        #expect(try await store.load(sessionID: request.sessionID) == session)
+    }
+
+    @Test func mixedCoordinatorPersistsPartialSessionWhenOneTrackCannotStop() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedPartial-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let microphone = MockMixedTrackRecorder(role: .localSpeaker, events: events)
+        let systemAudio = MockMixedTrackRecorder(
+            role: .systemAudio,
+            events: events,
+            stopError: .requested("system track finalization failed")
+        )
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: microphone,
+            systemAudioRecorder: systemAudio,
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            hostTime: { 75_000 }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "test-model",
+            language: nil
+        )
+
+        _ = try await coordinator.start(request)
+        let session = try await coordinator.stop()
+        let microphoneTrack = try #require(
+            session.tracks.first(where: { $0.role == .localSpeaker })
+        )
+        let systemAudioTrack = try #require(
+            session.tracks.first(where: { $0.role == .systemAudio })
+        )
+        let sessionDirectory = root.appendingPathComponent(
+            request.sessionID.uuidString,
+            isDirectory: true
+        )
+        let microphoneURL = sessionDirectory.appendingPathComponent(
+            try #require(microphoneTrack.audioRelativePath)
+        )
+        let systemAudioURL = sessionDirectory.appendingPathComponent(
+            try #require(systemAudioTrack.audioRelativePath)
+        )
+
+        #expect(session.status == .partial)
+        #expect(microphoneTrack.status == .finalized)
+        #expect(systemAudioTrack.status == .failed)
+        #expect(systemAudioTrack.errorCategory == .systemAudioInterrupted)
+        #expect(session.lastErrorCategory == .interrupted)
+        #expect(FileManager.default.fileExists(atPath: microphoneURL.path))
+        #expect(FileManager.default.fileExists(atPath: systemAudioURL.path))
+        #expect(try await store.load(sessionID: request.sessionID) == session)
+        #expect(await coordinator.state == .idle)
+    }
+
+    @Test func mixedCoordinatorStartFailureCancelsBothTracksAndPersistsFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedStartFailure-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let microphone = MockMixedTrackRecorder(role: .localSpeaker, events: events)
+        let systemAudio = MockMixedTrackRecorder(
+            role: .systemAudio,
+            events: events,
+            startError: .requested("system source disappeared")
+        )
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: microphone,
+            systemAudioRecorder: systemAudio,
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            hostTime: { 80_000 }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "test-model",
+            language: nil
+        )
+
+        await #expect(
+            throws: MixedRecordingCoordinatorError.trackFailed(
+                role: .systemAudio,
+                phase: .start,
+                message: "system source disappeared"
+            )
+        ) {
+            _ = try await coordinator.start(request)
+        }
+        let session = try #require(try await store.load(sessionID: request.sessionID))
+        let recordedEvents = await events.values
+
+        #expect(session.status == .failed)
+        #expect(session.tracks.first(where: { $0.role == .localSpeaker })?.status == .interrupted)
+        #expect(session.tracks.first(where: { $0.role == .systemAudio })?.status == .unavailable)
+        #expect(recordedEvents.contains(.cancel(.localSpeaker)))
+        #expect(recordedEvents.contains(.cancel(.systemAudio)))
+        #expect(await coordinator.state == .idle)
+    }
+
+    @Test func mixedCoordinatorCancelPreservesTracksAndAllowsAnotherSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedCancel-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let microphone = MockMixedTrackRecorder(
+            role: .localSpeaker,
+            events: events,
+            returnsCaptureOnCancel: true
+        )
+        let systemAudio = MockMixedTrackRecorder(
+            role: .systemAudio,
+            events: events,
+            returnsCaptureOnCancel: true
+        )
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: microphone,
+            systemAudioRecorder: systemAudio,
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            hostTime: { 90_000 }
+        )
+        let firstRequest = MixedRecordingSessionRequest(
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "test-model",
+            language: "en"
+        )
+
+        _ = try await coordinator.start(firstRequest)
+        await #expect(throws: MixedRecordingCoordinatorError.alreadyActive) {
+            _ = try await coordinator.start(
+                MixedRecordingSessionRequest(
+                    providerID: "local",
+                    engineID: "fluid-audio",
+                    modelID: "test-model",
+                    language: nil
+                )
+            )
+        }
+        let cancelled = try await coordinator.cancel()
+        let sessionDirectory = root.appendingPathComponent(
+            firstRequest.sessionID.uuidString,
+            isDirectory: true
+        )
+        let originalURLs = cancelled.tracks.compactMap(\.audioRelativePath).map {
+            sessionDirectory.appendingPathComponent($0)
+        }
+
+        #expect(cancelled.status == .cancelled)
+        #expect(cancelled.tracks.allSatisfy { $0.status == .finalized })
+        #expect(originalURLs.count == 2)
+        #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(try await store.load(sessionID: firstRequest.sessionID) == cancelled)
+        #expect(await coordinator.state == .idle)
+        await #expect(throws: MixedRecordingCoordinatorError.notRecording) {
+            _ = try await coordinator.stop()
+        }
+
+        let secondRequest = MixedRecordingSessionRequest(
+            providerID: "local",
+            engineID: "fluid-audio",
+            modelID: "test-model",
+            language: nil
+        )
+        let restarted = try await coordinator.start(secondRequest)
+        #expect(restarted.status == .recording)
+        _ = try await coordinator.cancel()
+    }
+
     @Test func meetingSessionStoreSurfacesCorruptManifestWithoutReplacingIt() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingCorrupt-\(UUID())", isDirectory: true)
@@ -3043,6 +3259,139 @@ struct FlowDictateTests {
         record.originalTranscript = text
         record.finalText = text
         return record
+    }
+}
+
+private nonisolated enum MixedTrackTestEvent: Sendable, Equatable {
+    case prepare(RecordingTrackRole)
+    case start(RecordingTrackRole, UInt64)
+    case stop(RecordingTrackRole)
+    case cancel(RecordingTrackRole)
+}
+
+private actor MixedTrackTestEventLog {
+    private(set) var values: [MixedTrackTestEvent] = []
+
+    func append(_ event: MixedTrackTestEvent) {
+        values.append(event)
+    }
+}
+
+private nonisolated enum MockMixedTrackError: LocalizedError, Sendable, Equatable {
+    case requested(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .requested(message): message
+        }
+    }
+}
+
+private actor MockMixedTrackRecorder: MixedTrackRecording {
+    nonisolated let role: RecordingTrackRole
+
+    private let events: MixedTrackTestEventLog
+    private let prepareError: MockMixedTrackError?
+    private let startError: MockMixedTrackError?
+    private let stopError: MockMixedTrackError?
+    private let returnsCaptureOnCancel: Bool
+    private var outputURL: URL?
+    private(set) var receivedStartHostTime: UInt64?
+
+    init(
+        role: RecordingTrackRole,
+        events: MixedTrackTestEventLog,
+        prepareError: MockMixedTrackError? = nil,
+        startError: MockMixedTrackError? = nil,
+        stopError: MockMixedTrackError? = nil,
+        returnsCaptureOnCancel: Bool = false
+    ) {
+        self.role = role
+        self.events = events
+        self.prepareError = prepareError
+        self.startError = startError
+        self.stopError = stopError
+        self.returnsCaptureOnCancel = returnsCaptureOnCancel
+    }
+
+    func prepare(outputURL: URL) async throws {
+        await events.append(.prepare(role))
+        if let prepareError { throw prepareError }
+        self.outputURL = outputURL
+        try Data("original-\(role.rawValue)".utf8).write(to: outputURL)
+    }
+
+    func start(requestedHostTime: UInt64) async throws -> MixedTrackStartResult {
+        await events.append(.start(role, requestedHostTime))
+        if let startError { throw startError }
+        guard outputURL != nil else {
+            throw MockMixedTrackError.requested("track was not prepared")
+        }
+        receivedStartHostTime = requestedHostTime
+        let offset = role == .systemAudio ? UInt64(10) : UInt64(0)
+        return MixedTrackStartResult(
+            firstAnchor: TrackTimestampAnchor(
+                hostTime: requestedHostTime + offset,
+                trackFramePosition: 0,
+                sessionTimeMilliseconds: role == .systemAudio ? 1 : 0
+            )
+        )
+    }
+
+    func stop() async throws -> MixedTrackCaptureResult {
+        await events.append(.stop(role))
+        if let stopError { throw stopError }
+        return try captureResult()
+    }
+
+    func cancel() async -> MixedTrackCaptureResult? {
+        await events.append(.cancel(role))
+        defer {
+            outputURL = nil
+            receivedStartHostTime = nil
+        }
+        guard returnsCaptureOnCancel else { return nil }
+        return try? captureResult()
+    }
+
+    private func captureResult() throws -> MixedTrackCaptureResult {
+        guard let outputURL else {
+            throw MockMixedTrackError.requested("track has no output URL")
+        }
+        let byteCount = Int64(
+            try outputURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        )
+        let firstHostTime = receivedStartHostTime ?? 1
+        let roleOffset = role == .systemAudio ? UInt64(10) : UInt64(0)
+        let firstAnchorHostTime = firstHostTime + roleOffset
+        return MixedTrackCaptureResult(
+            formatIdentifier: "lpcm",
+            sampleRate: 48_000,
+            channelCount: 1,
+            firstHostTime: firstAnchorHostTime,
+            lastHostTime: firstAnchorHostTime + 48_000,
+            durationMilliseconds: 1_000,
+            byteCount: byteCount,
+            timestampAnchors: [
+                TrackTimestampAnchor(
+                    hostTime: firstAnchorHostTime,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: role == .systemAudio ? 1 : 0
+                ),
+                TrackTimestampAnchor(
+                    hostTime: firstAnchorHostTime + 48_000,
+                    trackFramePosition: 48_000,
+                    sessionTimeMilliseconds: role == .systemAudio ? 1_001 : 1_000
+                )
+            ],
+            gaps: [],
+            quality: TrackQualityMetrics(
+                peakLevel: 0.5,
+                clippedFrameCount: 0,
+                silentDurationMilliseconds: 0,
+                droppedBufferCount: 0
+            )
+        )
     }
 }
 
