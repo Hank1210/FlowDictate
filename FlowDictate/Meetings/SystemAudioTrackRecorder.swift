@@ -112,7 +112,6 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
             self.tapUID = tapUID
             var tapFormat = try tapFormat(for: tapID)
             guard let sourceFormat = AVAudioFormat(streamDescription: &tapFormat),
-                  sourceFormat.isStandard,
                   sourceFormat.sampleRate > 0,
                   sourceFormat.channelCount > 0,
                   let outputFormat = AVAudioFormat(

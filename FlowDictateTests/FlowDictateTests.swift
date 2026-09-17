@@ -1188,6 +1188,66 @@ struct FlowDictateTests {
         #expect(file.length == 4_800)
     }
 
+    @Test func systemAudioTrackAcceptsInterleavedTapPCM() throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateInterleavedSystemTrack-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let sourceFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: true
+        ))
+        let outputFormat = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        #expect(!sourceFormat.isStandard)
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: sourceFormat,
+            frameCapacity: 4_800
+        ))
+        buffer.frameLength = 4_800
+        let audioBuffer = buffer.mutableAudioBufferList.pointee.mBuffers
+        let samples = try #require(audioBuffer.mData?.assumingMemoryBound(to: Float.self))
+        for frame in 0..<Int(buffer.frameLength) {
+            samples[frame * 2] = 0.25
+            samples[frame * 2 + 1] = 0.25
+        }
+
+        let hostTime = mach_continuous_time()
+        let sink = try SystemAudioTrackCaptureSink(
+            outputURL: outputURL,
+            sourceFormat: sourceFormat,
+            outputFormat: outputFormat
+        )
+        var timeStamp = AVAudioTime(
+            hostTime: hostTime,
+            sampleTime: 0,
+            atRate: 48_000
+        ).audioTimeStamp
+        sink.begin(requestedHostTime: hostTime)
+        withUnsafePointer(to: &timeStamp) { timePointer in
+            sink.append(
+                inputData: UnsafePointer(buffer.audioBufferList),
+                inputTime: timePointer
+            )
+        }
+        sink.endCapture()
+
+        let result = try sink.finish()
+        let file = try AVAudioFile(forReading: outputURL)
+        #expect(result.channelCount == 1)
+        #expect(result.durationMilliseconds >= 99)
+        #expect(result.durationMilliseconds <= 101)
+        #expect(abs((result.quality.peakLevel ?? 0) - 0.25) < 0.01)
+        #expect(file.processingFormat.commonFormat == .pcmFormatFloat32)
+        #expect(file.processingFormat.channelCount == 1)
+        #expect(file.length == 4_800)
+    }
+
     @Test func sharedPCMTrackMetricsDetectGapClippingAndSilence() throws {
         let format = try #require(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
