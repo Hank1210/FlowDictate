@@ -149,7 +149,7 @@ Recording Source / Consent / Permission Preflight
 | Schritt | Status | Voraussetzung | Entsperrt |
 |---|---|---|---|
 | 4.1.0 Grundlagen und Consent | `ERLEDIGT` | 4.0.2 | stabiler Sessionvertrag |
-| 4.1.1 Capture-Spike | `IN ARBEIT` | Grundlagen | verbindliche Captureentscheidung |
+| 4.1.1 Capture-Spike | `ERLEDIGT` | Grundlagen | verbindliche Captureentscheidung |
 | 4.1.2 Dual-Capture-Coordinator | `OFFEN` | Spike-Go | echte Mixed-Aufnahme |
 | 4.1.3 Timeline, Sync und Qualität | `OFFEN` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `OFFEN` | finale Trackverträge | recoverbare Transkripte |
@@ -220,7 +220,7 @@ Das Sessionmodell lässt sich unabhängig von echtem Capture erzeugen, validiere
 
 ## 7. Schritt 4.1.1 – Capture- und Berechtigungs-Spike
 
-**Status:** `IN ARBEIT` – API-/Build-, Signal-, Dauer-, Routenwechsel-, Cancel-, Prozessneustart- und Artefakt-Recovery-Gates beider Backends bestanden; finaler Release-/Community-Paketnachweis ausstehend
+**Status:** `ERLEDIGT` – `GO Core Audio Tap` für macOS 14.2+, ScreenCaptureKit-Kompatibilitätspfad für macOS 14.0/14.1; alle verpflichtenden Spike-Gates bestanden
 
 ### 7.1 Ziel
 
@@ -266,6 +266,8 @@ ScreenCaptureKit bestand Cancel/Recovery ebenfalls: Nach Abbruch wurde der Butto
 Core Audio Tap bestand den kontrollierten Prozessabbruch/Neustart: Die laufende Probe wurde per hartem Prozessende ohne Cleanup unterbrochen, der Debug-Build neu gestartet und unmittelbar danach eine Fünf-Sekunden-Probe mit 470 Callbacks, 0 Gaps, monotonen Zeitstempeln und erfolgreichem Cleanup abgeschlossen. macOS gab Tap und Aggregate Device prozessgebunden frei. Als Gegenprobe folgt ScreenCaptureKit einschließlich Prüfung auf verwaiste temporäre Dateien.
 
 ScreenCaptureKit bestand die Ressourcen-Recovery nach demselben harten Prozessabbruch: Nach Neustart lief eine unmittelbare Fünf-Sekunden-Probe mit 5,3 Sekunden Wall, 5,1 Sekunden Audio, 257 Callbacks, vollständigen monotonen PTS, 0 Gaps und 0 Sample-Rate-Änderungen durch. Der Abbruch hinterließ jedoch im bisherigen Diagnosepfad eine 403.755 Bytes große, unlesbare M4A-Datei im normalen Aufnahmeordner. Probe-Artefakte werden deshalb nun in einem eigenen temporären Verzeichnis erzeugt; reguläres Ende und Cancel entfernen sie direkt, beim Appstart werden ausschließlich eindeutig als Probe markierte Dateien nicht mehr laufender Prozesse entfernt. Normale Nutzeraufnahmen liegen außerhalb dieses Bereichs und werden von dieser Bereinigung nie angefasst. Der manuelle Nachweis des neuen Pfads bestand: Nach `SIGKILL` blieb das 279.536-Byte-Probe-Artefakt zunächst bestehen, wurde beim Neustart automatisch entfernt und eine direkte Fünf-Sekunden-Wiederholung lief mit 5,2 Sekunden Wall, 5,0 Sekunden Audio, 252 Callbacks, 0 Gaps und stabiler Sample-Rate durch. Auch nach dem regulären Ende blieb kein Probe-Artefakt zurück.
+
+Der finale Community-Paketnachweis bestand am 17. September 2026 mit dem aus dem ZIP entpackten, sandboxed und ad-hoc signierten Universal-Release-Build. Das 12-MB-Testpaket enthielt App-Version 4.0.2, Build 27 und die Architekturen `x86_64 arm64`; Signatur, Sandbox-/Audio-Input-Entitlements, `NSAudioCaptureUsageDescription` und SHA-256 `70dc7fcd68e04d1c27db82db5cb3b75ab2daffa147d49f5451f2597420906ae6` wurden unabhängig geprüft. Die reale Audio-only-Probe lieferte 5,0 Sekunden Soll-, Wall- und Audiodauer, 469 Callbacks, davon 229 mit Signal, 0 Gaps, monotone Zeitstempel und vollständiges Cleanup. Universal-Support bleibt erhalten. Ein zusätzlicher AirPlay-Routenwechsel ist ein nicht blockierender Hardeningfall.
 
 ### 7.2 Prüfmatrix
 
@@ -325,6 +327,8 @@ Vor Schritt 4.1.2 liegt eine eindeutige Entscheidung vor:
 - begründete Entscheidung, ob Universal-Support erhalten bleibt.
 
 `NO-GO` gilt, wenn kein öffentlicher API-Pfad getrennte, recoverbare Audiospuren ohne Videodaten und ohne unvertretbare Berechtigungs- oder Stabilitätsprobleme liefert. In diesem Fall wird Scope oder Mindest-macOS-Version ausdrücklich neu entschieden; es gibt keinen stillen Fallback auf einen destruktiven Live-Mix.
+
+**Entscheidung:** `GO Core Audio Tap`. Ab macOS 14.2 verwendet Mixed Recording den öffentlichen Core-Audio-Process-Tap als Systemaudiospur. Auf macOS 14.0/14.1 bleibt ScreenCaptureKit der ausdrücklich gekennzeichnete Kompatibilitätspfad. Mikrofon- und Systemaudiodatei bleiben getrennte Originale. Für den produktiven Startvertrag werden beide Mixed-Originale als segmentierbares CAF mit mono Float32 Linear PCM geschrieben; die native Samplerate wird je Track persistiert, für den nachgewiesenen Systemtap sind das 48 kHz beziehungsweise rund 691,2 MB pro Stunde. Abgeleitete M4A-Dateien dürfen später Speicher und Verarbeitung optimieren, ersetzen aber nie die Originale. Periodische monotone Anker werden in Schritt 4.1.2 gemeinsam mit den Writern implementiert. Universal-Support für `arm64` und `x86_64` bleibt verbindlich.
 
 ## 8. Schritt 4.1.2 – MixedRecordingSessionCoordinator und Dual Capture
 

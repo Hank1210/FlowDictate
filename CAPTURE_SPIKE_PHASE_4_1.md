@@ -1,7 +1,7 @@
 # FlowDictate 4.1 – Capture- und Berechtigungs-Spike
 
-**Status:** In Arbeit; Build-, API-, Kurzzeit-Signal-, Zehn-Zyklen-, Community-Packaging-, Erstberechtigungs- und ScreenCaptureKit-Kurzvergleichs-Gate bestanden
-**Stand:** 15. September 2026
+**Status:** Abgeschlossen; `GO Core Audio Tap` für macOS 14.2+, ScreenCaptureKit-Kompatibilitätspfad für macOS 14.0/14.1
+**Stand:** 17. September 2026
 **Bezug:** Schritt 4.1.1 aus `ARBEITSPLAN_PHASE_4_1.md`
 
 ## Fragestellung
@@ -70,7 +70,7 @@ Debug-Builds unterstützen zusätzlich die Startschalter `--run-core-audio-tap-p
 
 ## Automatischer Nachweis
 
-- vollständige Unit-Testsuite mit 115 von 115 erfolgreichen Tests grün,
+- vollständige Unit-Testsuite mit 122 von 122 erfolgreichen Tests grün,
 - Strategiegrenze macOS 14.1 → ScreenCaptureKit und macOS 14.2+ → Core Audio Tap getestet,
 - backendabhängige Berechtigungsanzeige einschließlich des nicht vorab abfragbaren Tap-Zustands getestet,
 - Probe kompiliert bei Deployment Target macOS 14.0 hinter Availability-Gate,
@@ -156,17 +156,26 @@ Core Audio Tap bestand außerdem einen echten Prozessabbruch/Neustart. Die App w
 
 Auch ScreenCaptureKit gab seine Capture-Ressourcen nach einem harten Prozessabbruch frei. Eine unmittelbar nach App-Neustart gestartete Fünf-Sekunden-Probe lieferte 5,3 Sekunden Wall, 5,1 Sekunden Audio, 257 Callbacks, vollständige monotone PTS, keine Discontinuity und keine Sample-Rate-Änderung. Der bisherige Diagnosepfad hinterließ beim Crash allerdings eine 403.755 Bytes große, nicht lesbare M4A-Datei im normalen Aufnahmeordner. Die Diagnose schreibt deshalb künftig ausschließlich in ein eigenes temporäres Probe-Verzeichnis. Clean Stop und Cancel entfernen das Artefakt direkt; beim nächsten Appstart werden nur eindeutig präfixierte Probe-Dateien gelöscht, deren eingebettete Besitzer-PID nicht mehr läuft. Reguläre Aufnahmeordner und Nutzerdateien sind ausdrücklich nicht Teil dieser Bereinigung. Der neue Startup-Cleanup bestand auch manuell: Nach `SIGKILL` blieb die aktive 279.536-Byte-Probedatei zunächst erhalten, wurde beim App-Neustart automatisch entfernt und eine direkte Fünf-Sekunden-Wiederholung bestand mit 5,2 Sekunden Wall, 5,0 Sekunden Audio, 252 Callbacks, vollständigen monotonen PTS, 0 Gaps und stabiler Sample-Rate. Nach dem sauberen Ende war das Probe-Verzeichnis wieder leer.
 
-## Vorläufige Entscheidung
+## Finaler Community-Paketnachweis
 
-Core Audio Tap ist der bevorzugte 4.1-Kandidat für macOS 14.2 und neuer. ScreenCaptureKit bleibt vorerst der bestehende Single-System-Audio-Pfad und der Kompatibilitätskandidat für macOS 14.0/14.1.
+Der finale Spike-Code wurde mit `FLOWDICTATE_VERSION=4.1.0-spike` über das unveränderte Community-Packaging-Skript als Universal-Release-Build erzeugt. Der Paketname dient ausschließlich der Testabgrenzung; die enthaltene App bleibt auf Version 4.0.2, Build 27.
 
-Diese Entscheidung ist noch nicht final. Vor `GO` fehlen:
+- ZIP: `FlowDictate-4.1.0-spike-Community-macOS.zip`, rund 12 MB,
+- SHA-256: `70dc7fcd68e04d1c27db82db5cb3b75ab2daffa147d49f5451f2597420906ae6`,
+- Architekturen: `x86_64 arm64`,
+- ad-hoc Signatur: gültig und Designated Requirement erfüllt,
+- Sandbox-, Audio-Input-, Dateiauswahl- und Netzwerk-Entitlements vorhanden,
+- `NSAudioCaptureUsageDescription` im entpackten Release-`Info.plist` vorhanden,
+- reale Probe direkt aus der entpackten Community-App: 5,0 Sekunden Soll-, Wall- und Audiodauer, 469 Callbacks, 229 mit Signal, 0 Gaps, monotone Host-/Sample-Time und vollständiges Cleanup.
 
-- optionaler AirPlay-Routenwechsel als zusätzlicher Kompatibilitätsfall,
-- erneuter Universal-Release-/Community-Paketnachweis des finalen Spike-Codes.
+## Finale Entscheidung
 
-## Go-/No-Go-Regel
+`GO Core Audio Tap`: Core Audio Tap ist der verbindliche 4.1-Pfad für Mixed Recording auf macOS 14.2 und neuer. ScreenCaptureKit bleibt der bestehende Single-System-Audio-Pfad und der ausdrücklich gekennzeichnete Kompatibilitätspfad für macOS 14.0/14.1.
 
-`GO Core Audio Tap` wird erst gesetzt, wenn Release-/Community-Build reale Signalbuffer mit monotonen Hosttimes liefert, Cleanup deterministisch ist und die 30-/60-Minuten-Läufe keine nicht erklärten Aussetzer zeigen.
+Die Entscheidung hält Universal-Support für `arm64` und `x86_64` aufrecht. Die Originalspuren bleiben getrennt. Der produktive Mixed-Startvertrag verwendet je Spur segmentierbares CAF mit mono Float32 Linear PCM und persistierter nativer Samplerate; beim nachgewiesenen 48-kHz-Systemtap sind dafür rund 691,2 MB pro Stunde einzuplanen. Abgeleitete M4A-Dateien dürfen Speicher und Verarbeitung optimieren, ersetzen aber nie diese recoverbaren Originale. Ein AirPlay-Routenwechsel bleibt als zusätzlicher, nicht blockierender Hardeningfall dokumentiert.
+
+## Erfüllte Go-/No-Go-Regel
+
+Der Release-/Community-Build lieferte reale Signalbuffer mit monotonen Hosttimes und deterministischem Cleanup. Die korrigierten 5-, 30- und 60-Minuten-Läufe des Core-Audio-Taps blieben lückenfrei; Prozessabbruch, Neustart, Cancel, wiederholter Start/Stop und Ausgaberoutenwechsel bestanden. Damit ist die Go-Regel erfüllt.
 
 Bei `NO-GO` bleibt ScreenCaptureKit der transparent dokumentierte Capturepfad. Es gibt keinen Fallback auf einen destruktiven Live-Mix und keine Behauptung einer schmaleren Berechtigung, die macOS tatsächlich nicht zeigt.
