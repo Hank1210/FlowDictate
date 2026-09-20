@@ -81,6 +81,7 @@ nonisolated struct MeetingAudioTrack: Codable, Sendable, Equatable, Identifiable
     var gaps: [TrackGap]
     var quality: TrackQualityMetrics
     var transcriptionSessionID: UUID?
+    var transcriptRelativePath: String?
     var errorCategory: DictationErrorCategory?
     var errorMessage: String?
 }
@@ -127,6 +128,9 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
     var engineID: String
     var modelID: String
     var language: String?
+    /// Optional only for migration of manifests created by earlier 4.1 test builds.
+    var privacyMode: PrivacyMode?
+    var profileID: UUID?
     var tracks: [MeetingAudioTrack]
     var synchronization: SynchronizationReport?
     var qualityReport: MeetingQualityReport?
@@ -281,6 +285,15 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
         if let path = track.audioRelativePath {
             try validate(relativePath: path)
         }
+        if let path = track.transcriptRelativePath {
+            try validate(relativePath: path)
+            guard path.hasPrefix("transcription/") else {
+                throw MixedRecordingSessionValidationError.invalidTranscriptPath(track.role)
+            }
+            if path == track.audioRelativePath {
+                throw MixedRecordingSessionValidationError.derivedPathOverwritesOriginal
+            }
+        }
         if [.finalized, .transcriptionPending, .transcribing, .transcribed].contains(track.status) {
             guard track.audioRelativePath != nil,
                   track.formatIdentifier?.isEmpty == false,
@@ -289,6 +302,12 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
                   track.durationMilliseconds > 0,
                   track.byteCount > 0 else {
                 throw MixedRecordingSessionValidationError.missingFinalizedTrackMetadata(track.role)
+            }
+        }
+        if track.status == .transcribed {
+            guard track.transcriptionSessionID != nil,
+                  track.transcriptRelativePath != nil else {
+                throw MixedRecordingSessionValidationError.missingTranscriptMetadata(track.role)
             }
         }
     }
@@ -315,6 +334,8 @@ nonisolated enum MixedRecordingSessionValidationError: LocalizedError, Equatable
     case nonMonotonicTimeline(RecordingTrackRole)
     case invalidGap(RecordingTrackRole)
     case missingFinalizedTrackMetadata(RecordingTrackRole)
+    case missingTranscriptMetadata(RecordingTrackRole)
+    case invalidTranscriptPath(RecordingTrackRole)
     case invalidSynchronizationReport
     case invalidQualityReport
     case unsafeRelativePath(String)
@@ -342,6 +363,10 @@ nonisolated enum MixedRecordingSessionValidationError: LocalizedError, Equatable
             "The \(role.rawValue) track contains an invalid gap."
         case let .missingFinalizedTrackMetadata(role):
             "The finalized \(role.rawValue) track is missing required metadata."
+        case let .missingTranscriptMetadata(role):
+            "The transcribed \(role.rawValue) track is missing its transcript metadata."
+        case let .invalidTranscriptPath(role):
+            "The \(role.rawValue) transcript must be stored in the meeting transcription directory."
         case .invalidSynchronizationReport:
             "The meeting session contains invalid synchronization metrics."
         case .invalidQualityReport:

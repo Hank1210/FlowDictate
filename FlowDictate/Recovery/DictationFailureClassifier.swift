@@ -1,6 +1,6 @@
 import Foundation
 
-enum DictationFailureClassifier {
+nonisolated enum DictationFailureClassifier {
     static func category(for error: Error) -> DictationErrorCategory {
         if let error = error as? SystemAudioRecorderError {
             return switch error {

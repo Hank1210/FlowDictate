@@ -717,6 +717,8 @@ struct FlowDictateTests {
         session.finalTranscript = "[You] Hello\n[System Audio] Hi"
         session.completionMode = .allTracks
         session.tracks[0].status = .transcribed
+        session.tracks[0].transcriptionSessionID = UUID()
+        session.tracks[0].transcriptRelativePath = "transcription/localSpeaker-transcript.json"
         session.tracks[1].status = .failed
 
         #expect(throws: MixedRecordingSessionValidationError.invalidCompletion) {
@@ -1049,6 +1051,177 @@ struct FlowDictateTests {
 
         #expect(try await store.load(sessionID: session.id)?.status == .cancelled)
         #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    @Test func trackTranscriptionRunnerPersistsIndependentResultsAndFrozenConfiguration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackTranscription-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let executor = MockTrackTranscriptionExecutor(behaviors: [
+            .localSpeaker: [.success("Local speaker transcript")],
+            .systemAudio: [.success("System Audio transcript")]
+        ])
+        let runner = TrackTranscriptionRunner(
+            store: fixture.store,
+            executor: executor,
+            now: { Date(timeIntervalSince1970: 1_800_000_100) }
+        )
+
+        let result = try await runner.run(sessionID: fixture.session.id)
+        let requests = await executor.requests
+
+        #expect(result.status == .merging)
+        #expect(result.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(requests.map(\.role) == [.localSpeaker, .systemAudio])
+        #expect(Set(requests.map(\.transcriptionSessionID)).count == 2)
+        #expect(requests.allSatisfy {
+            $0.providerID == fixture.session.providerID
+                && $0.engineID == fixture.session.engineID
+                && $0.modelID == fixture.session.modelID
+                && $0.language == fixture.session.language
+                && $0.privacyMode == fixture.session.privacyMode
+                && $0.profileID == fixture.session.profileID
+        })
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for track in result.tracks {
+            let relativePath = try #require(track.transcriptRelativePath)
+            let artifact = try decoder.decode(
+                MeetingTrackTranscript.self,
+                from: Data(contentsOf: fixture.paths.sessionDirectory.appendingPathComponent(relativePath))
+            )
+            #expect(artifact.meetingSessionID == result.id)
+            #expect(artifact.trackID == track.id)
+            #expect(artifact.role == track.role)
+            #expect(artifact.transcriptionSessionID == track.transcriptionSessionID)
+            #expect(artifact.segmentCount == 2)
+            #expect(artifact.completedSegmentCount == 2)
+        }
+    }
+
+    @Test func trackTranscriptionFailureDoesNotDiscardOtherTrackAndRetrySkipsSuccess() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackRetry-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let executor = MockTrackTranscriptionExecutor(behaviors: [
+            .localSpeaker: [.success("Kept microphone transcript")],
+            .systemAudio: [.networkFailure, .success("Recovered System Audio transcript")]
+        ])
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        let partial = try await runner.run(sessionID: fixture.session.id)
+        let firstMicrophone = try #require(
+            partial.tracks.first(where: { $0.role == .localSpeaker })
+        )
+        let firstSystemAudio = try #require(
+            partial.tracks.first(where: { $0.role == .systemAudio })
+        )
+        #expect(partial.status == .partial)
+        #expect(firstMicrophone.status == .transcribed)
+        #expect(firstSystemAudio.status == .failed)
+        #expect(firstSystemAudio.errorCategory == .network)
+        #expect(FileManager.default.fileExists(atPath: fixture.paths.sessionDirectory
+            .appendingPathComponent(try #require(firstMicrophone.transcriptRelativePath)).path))
+
+        let recovered = try await runner.run(sessionID: fixture.session.id)
+        let requests = await executor.requests
+        let recoveredSystemAudio = try #require(
+            recovered.tracks.first(where: { $0.role == .systemAudio })
+        )
+
+        #expect(recovered.status == .merging)
+        #expect(recovered.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(requests.map(\.role) == [.localSpeaker, .systemAudio, .systemAudio])
+        #expect(requests[1].transcriptionSessionID == requests[2].transcriptionSessionID)
+        #expect(recoveredSystemAudio.transcriptionSessionID == firstSystemAudio.transcriptionSessionID)
+        #expect(recovered.tracks.first(where: { $0.role == .localSpeaker })?.transcriptionSessionID
+            == firstMicrophone.transcriptionSessionID)
+    }
+
+    @Test func cancellingTrackTranscriptionPreservesCompletedTrackAndResumeIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackCancel-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let executor = MockTrackTranscriptionExecutor(behaviors: [
+            .localSpeaker: [.success("Completed before cancellation")],
+            .systemAudio: [.cancellation]
+        ])
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await runner.run(sessionID: fixture.session.id)
+        }
+        let paused = try #require(try await fixture.store.load(sessionID: fixture.session.id))
+        let microphone = try #require(
+            paused.tracks.first(where: { $0.role == .localSpeaker })
+        )
+        let systemAudio = try #require(
+            paused.tracks.first(where: { $0.role == .systemAudio })
+        )
+
+        #expect(paused.status == .paused)
+        #expect(microphone.status == .transcribed)
+        #expect(systemAudio.status == .interrupted)
+        #expect(systemAudio.errorCategory == .interrupted)
+        #expect(microphone.transcriptRelativePath != nil)
+        #expect(systemAudio.transcriptionSessionID != nil)
+    }
+
+    @MainActor
+    @Test func longFormTrackExecutorUsesExistingPipelineWithoutUserHistoryRows() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackAdapter-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let provider = MockTranscriptionProvider()
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { request in
+            #expect(request.providerID == TranscriptionProviderID.local.rawValue)
+            #expect(request.privacyMode == .offline)
+            return provider
+        }
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        let result = try await runner.run(sessionID: fixture.session.id)
+        let isolatedHistoryURL = fixture.paths.transcriptionDirectory
+            .appendingPathComponent("track-workflows/records.json")
+
+        #expect(result.status == .merging)
+        #expect(result.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(provider.transcribeCount == 2)
+        #expect(FileManager.default.fileExists(atPath: isolatedHistoryURL.path))
+    }
+
+    @MainActor
+    @Test func longFormTrackExecutorBlocksCloudBeforeResolvingProviderWhenOffline() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackPrivacy-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        var session = fixture.session
+        session.providerID = TranscriptionProviderID.openAI.rawValue
+        session.engineID = TranscriptionProviderRegistry.openAI.capabilities.engineID
+        session.modelID = "gpt-4o-mini-transcribe"
+        session.privacyMode = .offline
+        try await fixture.store.save(session)
+        let provider = MockTranscriptionProvider()
+        let resolver = TrackProviderResolverProbe(provider: provider)
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { request in
+            await resolver.resolve(request)
+        }
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        let result = try await runner.run(sessionID: session.id)
+
+        #expect(result.status == .failed)
+        #expect(result.tracks.allSatisfy {
+            $0.status == .failed && $0.errorCategory == .networkBlocked
+        })
+        #expect(await resolver.resolveCount == 0)
+        #expect(provider.transcribeCount == 0)
     }
 
     @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
@@ -3665,6 +3838,27 @@ struct FlowDictateTests {
         return store
     }
 
+    private func makeTrackTranscriptionFixture(
+        rootURL: URL
+    ) async throws -> (
+        store: MeetingSessionStore,
+        session: MixedRecordingSession,
+        paths: MeetingSessionPaths
+    ) {
+        let store = MeetingSessionStore(rootURL: rootURL)
+        var session = makeValidMixedRecordingSession()
+        session.status = .queued
+        let paths = try await store.prepareSession(id: session.id)
+        for track in session.tracks {
+            let relativePath = try #require(track.audioRelativePath)
+            try Data("audio-\(track.role.rawValue)".utf8).write(
+                to: paths.sessionDirectory.appendingPathComponent(relativePath)
+            )
+        }
+        try await store.create(session)
+        return (store, session, paths)
+    }
+
     private func makeSynchronizationTrack(
         role: RecordingTrackRole,
         startMilliseconds: Int64,
@@ -3704,6 +3898,7 @@ struct FlowDictateTests {
                 droppedBufferCount: Int64(gaps.count)
             ),
             transcriptionSessionID: nil,
+            transcriptRelativePath: nil,
             errorCategory: nil,
             errorMessage: nil
         )
@@ -3861,6 +4056,7 @@ struct FlowDictateTests {
             gaps: [],
             quality: baseQuality,
             transcriptionSessionID: nil,
+            transcriptRelativePath: nil,
             errorCategory: nil,
             errorMessage: nil
         )
@@ -3891,6 +4087,7 @@ struct FlowDictateTests {
             gaps: [],
             quality: baseQuality,
             transcriptionSessionID: nil,
+            transcriptRelativePath: nil,
             errorCategory: nil,
             errorMessage: nil
         )
@@ -3906,6 +4103,8 @@ struct FlowDictateTests {
             engineID: "fluid-audio",
             modelID: "parakeet-tdt-0.6b-v3-coreml",
             language: "en",
+            privacyMode: .offline,
+            profileID: UUID(uuidString: "50000000-0000-0000-0000-000000000005"),
             tracks: [microphone, systemAudio],
             synchronization: SynchronizationReport(
                 quality: .good,
@@ -3940,6 +4139,59 @@ struct FlowDictateTests {
         record.originalTranscript = text
         record.finalText = text
         return record
+    }
+}
+
+private actor TrackProviderResolverProbe {
+    private let provider: any TranscriptionProvider
+    private(set) var resolveCount = 0
+
+    init(provider: any TranscriptionProvider) {
+        self.provider = provider
+    }
+
+    func resolve(_ request: TrackTranscriptionRequest) -> any TranscriptionProvider {
+        resolveCount += 1
+        return provider
+    }
+}
+
+private nonisolated enum MockTrackTranscriptionBehavior: Sendable {
+    case success(String)
+    case networkFailure
+    case cancellation
+}
+
+private actor MockTrackTranscriptionExecutor: TrackTranscriptionExecuting {
+    private var behaviors: [RecordingTrackRole: [MockTrackTranscriptionBehavior]]
+    private(set) var requests: [TrackTranscriptionRequest] = []
+
+    init(behaviors: [RecordingTrackRole: [MockTrackTranscriptionBehavior]]) {
+        self.behaviors = behaviors
+    }
+
+    func transcribe(_ request: TrackTranscriptionRequest) async throws -> TrackTranscriptionOutput {
+        requests.append(request)
+        guard var queued = behaviors[request.role], !queued.isEmpty else {
+            throw MockMixedTrackError.requested("No track transcription behavior was configured")
+        }
+        let behavior = queued.removeFirst()
+        behaviors[request.role] = queued
+
+        switch behavior {
+        case let .success(text):
+            return TrackTranscriptionOutput(
+                transcript: text,
+                providerID: request.providerID,
+                modelID: request.modelID,
+                segmentCount: 2,
+                completedSegmentCount: 2
+            )
+        case .networkFailure:
+            throw URLError(.notConnectedToInternet)
+        case .cancellation:
+            throw CancellationError()
+        }
     }
 }
 

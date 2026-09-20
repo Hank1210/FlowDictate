@@ -48,6 +48,8 @@ nonisolated struct MixedRecordingSessionRequest: Sendable, Equatable {
     var engineID: String
     var modelID: String
     var language: String?
+    var privacyMode: PrivacyMode?
+    var profileID: UUID?
 
     init(
         sessionID: UUID = UUID(),
@@ -55,7 +57,9 @@ nonisolated struct MixedRecordingSessionRequest: Sendable, Equatable {
         providerID: String,
         engineID: String,
         modelID: String,
-        language: String?
+        language: String?,
+        privacyMode: PrivacyMode? = nil,
+        profileID: UUID? = nil
     ) {
         self.sessionID = sessionID
         self.recordID = recordID
@@ -63,6 +67,8 @@ nonisolated struct MixedRecordingSessionRequest: Sendable, Equatable {
         self.engineID = engineID
         self.modelID = modelID
         self.language = language
+        self.privacyMode = privacyMode
+        self.profileID = profileID
     }
 }
 
@@ -366,6 +372,7 @@ actor MixedRecordingSessionCoordinator {
                 gaps: [],
                 quality: emptyQuality,
                 transcriptionSessionID: nil,
+                transcriptRelativePath: nil,
                 errorCategory: nil,
                 errorMessage: nil
             ),
@@ -385,6 +392,7 @@ actor MixedRecordingSessionCoordinator {
                 gaps: [],
                 quality: emptyQuality,
                 transcriptionSessionID: nil,
+                transcriptRelativePath: nil,
                 errorCategory: nil,
                 errorMessage: nil
             )
@@ -401,6 +409,8 @@ actor MixedRecordingSessionCoordinator {
             engineID: request.engineID,
             modelID: request.modelID,
             language: request.language,
+            privacyMode: request.privacyMode,
+            profileID: request.profileID,
             tracks: tracks,
             synchronization: nil,
             qualityReport: nil,

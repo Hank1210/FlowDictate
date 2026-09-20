@@ -1,7 +1,7 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture-Spike abgeschlossen, Dual-Capture-Orchestrierung in Arbeit
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung und Derived Tracks abgeschlossen, Track-Processing in Arbeit
 **Stand:** 17. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
@@ -150,9 +150,9 @@ Recording Source / Consent / Permission Preflight
 |---|---|---|---|
 | 4.1.0 Grundlagen und Consent | `ERLEDIGT` | 4.0.2 | stabiler Sessionvertrag |
 | 4.1.1 Capture-Spike | `ERLEDIGT` | Grundlagen | verbindliche Captureentscheidung |
-| 4.1.2 Dual-Capture-Coordinator | `IN ARBEIT` | Spike-Go | echte Mixed-Aufnahme |
-| 4.1.3 Timeline, Sync und Qualität | `OFFEN` | reale Trackanker | ausgerichtete Arbeitsdaten |
-| 4.1.4 Track-Processing und Recovery | `OFFEN` | finale Trackverträge | recoverbare Transkripte |
+| 4.1.2 Dual-Capture-Coordinator | `ERLEDIGT` | Spike-Go | echte Mixed-Aufnahme |
+| 4.1.3 Timeline, Sync und Qualität | `ERLEDIGT` | reale Trackanker | ausgerichtete Arbeitsdaten |
+| 4.1.4 Track-Processing und Recovery | `IN ARBEIT` | finale Trackverträge | recoverbare Transkripte |
 | 4.1.5 Timed Merge | `OFFEN` | Tracktranskripte + Sync | Meeting-Timeline |
 | 4.1.6 UX, History und Migration | `OFFEN` | stabile Zustände | vollständiger Nutzerablauf |
 | 4.1.7 Hardening und Langzeittests | `OFFEN` | End-to-End-Pfad | Releasekandidat |
@@ -449,7 +449,13 @@ Synthetische Fixtures mit bekanntem Offset, Drift und Gaps werden innerhalb der 
 
 ## 10. Schritt 4.1.4 – Track-Transkription, Persistenz und Recovery
 
-**Status:** `OFFEN`
+**Status:** `IN ARBEIT` – persistierter Track-Runner und Adapter zur bestehenden Single-File-/Long-Form-Pipeline implementiert; Zwei-Track-Mehrsegment-Restart-Gate und produktive Queue-Anbindung stehen noch aus
+
+Der erste Teilstand friert Provider, Engine, Modell, Sprache, Privacy-Modus und Profil im Meetingmanifest ein und vergibt pro Track eine stabile Transkriptions-ID. `TrackTranscriptionRunner` verarbeitet beide Spuren unabhängig, persistiert jeden Zustandswechsel atomar, bewahrt erfolgreiche Trackresultate bei Fehler, Abbruch und Retry und schreibt validierte Transcript-Artefakte ausschließlich unter `transcription/`. Ein Teilfehler löscht weder Originalaudio noch das Ergebnis der anderen Spur; der Merge wird erst nach zwei erfolgreichen Trackabschlüssen freigegeben. Ältere 4.1-Testmanifeste ohne Privacy-Feld werden anhand des eingefrorenen Providers konservativ migriert.
+
+`LongFormTrackTranscriptionExecutor` bindet die Trackjobs an den vorhandenen `TranscriptionRunner` und dessen segmentierbare, wiederaufnehmbare Long-Form-Session an. Die internen Track-Workflow-Records liegen innerhalb der Meeting-Session und erscheinen nicht als künstliche Einträge in der normalen Nutzer-History. Offline-Policy wird vor der Providerauflösung erzwungen; es gibt keinen stillen Cloudfallback. Tests decken eingefrorene Konfiguration, isolierte Trackfehler, Retry ohne Wiederholung erfolgreicher Tracks, Cancellation/Resume-Identität, den realen Pipelineadapter und das Blockieren von OpenAI im Offline-Modus ab. Vollständige Regression am 20. September 2026: 145/145 Tests bestanden.
+
+Für den Abschluss dieses Schritts fehlen noch die produktive Provider-/Queue-Anbindung, die Aufnahmesperre während der Meetingverarbeitung sowie ein Zwei-Track-Mehrsegment-Test mit Neustart innerhalb bereits erfolgreicher Segmente für Local und OpenAI-Testdouble.
 
 ### 10.1 Voraussichtliche Dateien
 

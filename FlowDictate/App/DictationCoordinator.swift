@@ -1367,7 +1367,9 @@ final class DictationCoordinator: ObservableObject {
                         providerID: provider.rawValue,
                         engineID: engineID,
                         modelID: modelID,
-                        language: settings.transcriptionLanguage.apiValue
+                        language: settings.transcriptionLanguage.apiValue,
+                        privacyMode: settings.privacyMode,
+                        profileID: nil
                     )
                 )
                 latestOutputURL = try meetingSessionDirectory(for: session.id)
