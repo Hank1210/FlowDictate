@@ -826,6 +826,114 @@ struct FlowDictateTests {
         #expect(quality.completeTrackRoles == [.localSpeaker])
     }
 
+    @Test func derivedTrackRendererAlignsImpulsesWithoutChangingOriginals() async throws {
+        let fixture = try makeDerivedTrackFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let renderer = DerivedTrackRenderer()
+
+        let result = try await renderer.render(
+            session: fixture.session,
+            sessionDirectory: fixture.directory
+        )
+        let microphone = try #require(
+            result.tracks.first(where: { $0.role == .localSpeaker })
+        )
+        let systemAudio = try #require(
+            result.tracks.first(where: { $0.role == .systemAudio })
+        )
+        let microphoneDerivedURL = fixture.directory.appendingPathComponent(
+            microphone.relativePath
+        )
+        let systemDerivedURL = fixture.directory.appendingPathComponent(
+            systemAudio.relativePath
+        )
+
+        #expect(microphone.prependedSilenceMilliseconds == 100)
+        #expect(systemAudio.prependedSilenceMilliseconds == 0)
+        #expect(abs(try peakFrame(in: microphoneDerivedURL) - 4_800) <= 128)
+        #expect(abs(try peakFrame(in: systemDerivedURL) - 4_800) <= 128)
+        #expect(
+            try Data(contentsOf: fixture.microphoneURL) == fixture.microphoneOriginal
+        )
+        #expect(
+            try Data(contentsOf: fixture.systemAudioURL) == fixture.systemAudioOriginal
+        )
+    }
+
+    @Test func derivedTrackRendererInsertsGapsWithoutApplyingGlobalDrift() async throws {
+        var fixture = try makeDerivedTrackFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        fixture.session.synchronization?.estimatedDriftPartsPerMillion = 1_000
+        let microphoneIndex = try #require(
+            fixture.session.tracks.firstIndex(where: { $0.role == .localSpeaker })
+        )
+        fixture.session.tracks[microphoneIndex].gaps = [
+            TrackGap(
+                id: UUID(),
+                startMilliseconds: 250,
+                endMilliseconds: 300,
+                reason: .droppedBuffers
+            )
+        ]
+
+        let result = try await DerivedTrackRenderer().render(
+            session: fixture.session,
+            sessionDirectory: fixture.directory
+        )
+        let microphone = try #require(
+            result.tracks.first(where: { $0.role == .localSpeaker })
+        )
+
+        #expect(microphone.insertedGapDurationMilliseconds == 50)
+        #expect(microphone.appliedDriftPartsPerMillion == nil)
+        #expect(microphone.durationMilliseconds == 650)
+        #expect(
+            try Data(contentsOf: fixture.microphoneURL) == fixture.microphoneOriginal
+        )
+    }
+
+    @Test func derivedTrackRendererAppliesDriftOnlyToDerivedTrack() async throws {
+        var fixture = try makeDerivedTrackFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        fixture.session.synchronization?.estimatedDriftPartsPerMillion = 1_000
+
+        let result = try await DerivedTrackRenderer().render(
+            session: fixture.session,
+            sessionDirectory: fixture.directory
+        )
+        let microphone = try #require(
+            result.tracks.first(where: { $0.role == .localSpeaker })
+        )
+
+        #expect(microphone.appliedDriftPartsPerMillion == 1_000)
+        #expect(microphone.durationMilliseconds >= 600)
+        #expect(microphone.durationMilliseconds <= 602)
+        #expect(
+            try Data(contentsOf: fixture.microphoneURL) == fixture.microphoneOriginal
+        )
+    }
+
+    @Test func derivedTrackRendererRejectsAnyOriginalAsDestination() async throws {
+        let fixture = try makeDerivedTrackFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let renderer = DerivedTrackRenderer(destinationPaths: [
+            .localSpeaker: "tracks/microphone.caf",
+            .systemAudio: "derived/aligned-system-audio.caf"
+        ])
+
+        await #expect(
+            throws: DerivedTrackRendererError.destinationOverwritesOriginal(.localSpeaker)
+        ) {
+            _ = try await renderer.render(
+                session: fixture.session,
+                sessionDirectory: fixture.directory
+            )
+        }
+        #expect(
+            try Data(contentsOf: fixture.microphoneURL) == fixture.microphoneOriginal
+        )
+    }
+
     @Test func meetingSessionStoreCreatesLayoutAndRoundTripsManifest() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingStore-\(UUID())", isDirectory: true)
@@ -3599,6 +3707,123 @@ struct FlowDictateTests {
             errorCategory: nil,
             errorMessage: nil
         )
+    }
+
+    private func makeDerivedTrackFixture() throws -> (
+        directory: URL,
+        session: MixedRecordingSession,
+        microphoneURL: URL,
+        systemAudioURL: URL,
+        microphoneOriginal: Data,
+        systemAudioOriginal: Data
+    ) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateDerivedTracks-\(UUID())", isDirectory: true)
+        let tracksDirectory = directory.appendingPathComponent("tracks", isDirectory: true)
+        let derivedDirectory = directory.appendingPathComponent("derived", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: tracksDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: derivedDirectory,
+            withIntermediateDirectories: true
+        )
+        let microphoneURL = tracksDirectory.appendingPathComponent("microphone.caf")
+        let systemAudioURL = tracksDirectory.appendingPathComponent("system-audio.caf")
+        try writeImpulseCAF(url: microphoneURL, impulseFrame: 0)
+        try writeImpulseCAF(url: systemAudioURL, impulseFrame: 4_800)
+        let microphoneOriginal = try Data(contentsOf: microphoneURL)
+        let systemAudioOriginal = try Data(contentsOf: systemAudioURL)
+
+        var session = makeValidMixedRecordingSession()
+        session.status = .queued
+        session.synchronization = SynchronizationReport(
+            quality: .good,
+            initialOffsetMilliseconds: 100,
+            estimatedDriftPartsPerMillion: nil,
+            residualDriftMilliseconds: nil,
+            analyzedAnchorCount: 2
+        )
+        session.qualityReport = MeetingQualityReport(
+            synchronizationQuality: .good,
+            completeTrackRoles: [.localSpeaker, .systemAudio],
+            totalGapCount: 0,
+            totalGapDurationMilliseconds: 0,
+            totalClippedFrameCount: 0
+        )
+        for index in session.tracks.indices {
+            let isMicrophone = session.tracks[index].role == .localSpeaker
+            session.tracks[index].audioRelativePath = isMicrophone
+                ? "tracks/microphone.caf"
+                : "tracks/system-audio.caf"
+            session.tracks[index].formatIdentifier = "lpcm"
+            session.tracks[index].sampleRate = 48_000
+            session.tracks[index].channelCount = 1
+            session.tracks[index].durationMilliseconds = 500
+            session.tracks[index].byteCount = Int64(
+                isMicrophone ? microphoneOriginal.count : systemAudioOriginal.count
+            )
+            session.tracks[index].timestampAnchors = [
+                TrackTimestampAnchor(
+                    hostTime: isMicrophone ? 1_100 : 1_000,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: isMicrophone ? 100 : 0
+                )
+            ]
+            session.tracks[index].gaps = []
+        }
+        return (
+            directory,
+            session,
+            microphoneURL,
+            systemAudioURL,
+            microphoneOriginal,
+            systemAudioOriginal
+        )
+    }
+
+    private func writeImpulseCAF(url: URL, impulseFrame: Int) throws {
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let frameCount: AVAudioFrameCount = 24_000
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: frameCount
+        ))
+        buffer.frameLength = frameCount
+        let samples = try #require(buffer.floatChannelData?[0])
+        samples.initialize(repeating: 0, count: Int(frameCount))
+        samples[impulseFrame] = 0.75
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        try file.write(from: buffer)
+    }
+
+    private func peakFrame(in url: URL) throws -> Int {
+        let file = try AVAudioFile(forReading: url)
+        let capacity = AVAudioFrameCount(file.length)
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: capacity
+        ))
+        try file.read(into: buffer)
+        let samples = try #require(buffer.floatChannelData?[0])
+        var peakIndex = 0
+        var peak: Float = 0
+        for index in 0..<Int(buffer.frameLength) where abs(samples[index]) > peak {
+            peak = abs(samples[index])
+            peakIndex = index
+        }
+        return peakIndex
     }
 
     private func makeValidMixedRecordingSession() -> MixedRecordingSession {
