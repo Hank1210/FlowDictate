@@ -332,7 +332,7 @@ Vor Schritt 4.1.2 liegt eine eindeutige Entscheidung vor:
 
 ## 8. Schritt 4.1.2 – MixedRecordingSessionCoordinator und Dual Capture
 
-**Status:** `IN ARBEIT` – Orchestrierung, beide produktiven Trackrecorder und ein capture-only App-Testpfad implementiert; reale gemeinsame Abnahme und anschließende produktive Verarbeitung stehen noch aus
+**Status:** `ERLEDIGT` – Orchestrierung, beide produktiven Trackrecorder, Recovery und reale gemeinsame Kurzabnahme bestanden; die produktive Freischaltung bleibt bis zur Processing-Integration gesperrt
 
 Der erste Teilstand enthält den actor-basierten Session-Coordinator, die Recorder-/Store-Schnittstellen, eine gemeinsame monotone Startbarriere sowie unabhängige Stop-, Cancel- und Teilfehlerbehandlung. Manifest und Originalpfade werden vor Capturebeginn angelegt; ein zweiter Start wird abgewiesen und Startfehler stoppen beide Recorder. Vier Fake-Recorder-Tests decken Startbarriere, Startausfall, partielle Finalisierung und Cancel mit anschließendem Neustart ab.
 
@@ -399,11 +399,13 @@ Bestehende Single-Track-Recorder werden wiederverwendet oder durch Adapter einge
 
 ### 8.5 Exit
 
-Eine kurze reale Mixed Session erzeugt genau zwei getrennte, lesbare Originaldateien und ein valides Manifest. Start-, Stop-, Cancel- und Einspur-Ausfalltests sind grün. Erst dann wird die bisherige `captureNotAvailable`-Sperre entfernt.
+Eine kurze reale Mixed Session erzeugt genau zwei getrennte, lesbare Originaldateien und ein valides Manifest. Start-, Stop-, Cancel- und Einspur-Ausfalltests sind grün. Dieses Capture-Gate ist erfüllt; die bisherige `captureNotAvailable`-Sperre bleibt bewusst bis zur vollständigen Processing- und Merge-Integration bestehen.
 
 ## 9. Schritt 4.1.3 – Timeline, Synchronisierung und Qualitätsbericht
 
-**Status:** `OFFEN`
+**Status:** `IN ARBEIT` – Offset-, Drift- und aggregierte Qualitätsanalyse implementiert und in Stop/Cancel-Persistenz integriert; Derived-Rendering und Audiofixtures stehen noch aus
+
+Der erste Teilstand definiert den Startversatz eindeutig als `Mikrofon minus Systemaudio`, schätzt relative lineare Clock-Drift erst über mindestens 30 Sekunden und berechnet die maximale Residualabweichung aus den periodischen Ankern. Sessions mit Gaps erhalten absichtlich keinen globalen Driftwert, damit fehlende oder nichtlineare Abschnitte nicht durch Resampling kaschiert werden. Konfigurierbare Grenzwerte unterscheiden `good`, `degraded` und `unreliable`; unvollständige Sessions bleiben `notAnalyzed`. Der `MeetingQualityAnalyzer` aggregiert vollständige Rollen, Gapanzahl/-dauer und geclippte Frames ohne Inhaltsdaten. Stop und Cancel persistieren beide Reports zusammen mit den finalisierten Originalspuren. Synthetische Tests decken positive und negative Offsets, positive und negative Drift, Gaps, nichtlineare Sprünge und Einspur-Ausfall ab. Vollständige Regression am 20. September 2026: 136/136 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen; Debug-Builds für `arm64` und `x86_64` waren erfolgreich.
 
 ### 9.1 Voraussichtliche Dateien
 

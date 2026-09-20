@@ -727,6 +727,105 @@ struct FlowDictateTests {
         #expect(try session.validated() == session)
     }
 
+    @Test func synchronizationAnalyzerReconstructsOffsetAndRelativeDrift() throws {
+        let analyzer = SynchronizationAnalyzer()
+        let systemAudio = makeSynchronizationTrack(
+            role: .systemAudio,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 30_000, 60_000]
+        )
+        let delayedMicrophone = makeSynchronizationTrack(
+            role: .localSpeaker,
+            startMilliseconds: 50,
+            anchorSessionTimes: [50, 30_053, 60_056]
+        )
+
+        let positive = analyzer.analyze(tracks: [delayedMicrophone, systemAudio])
+        #expect(positive.quality == .good)
+        #expect(positive.initialOffsetMilliseconds == 50)
+        #expect(abs(try #require(positive.estimatedDriftPartsPerMillion) - 100) < 0.01)
+        #expect((positive.residualDriftMilliseconds ?? 1) < 0.01)
+        #expect(positive.analyzedAnchorCount == 6)
+
+        let earlyMicrophone = makeSynchronizationTrack(
+            role: .localSpeaker,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 29_997, 59_994]
+        )
+        let delayedSystemAudio = makeSynchronizationTrack(
+            role: .systemAudio,
+            startMilliseconds: 50,
+            anchorSessionTimes: [50, 30_050, 60_050]
+        )
+        let negative = analyzer.analyze(tracks: [earlyMicrophone, delayedSystemAudio])
+        #expect(negative.quality == .good)
+        #expect(negative.initialOffsetMilliseconds == -50)
+        #expect(abs(try #require(negative.estimatedDriftPartsPerMillion) + 100) < 0.01)
+    }
+
+    @Test func synchronizationAnalyzerDoesNotHideGapsBehindGlobalDrift() {
+        let analyzer = SynchronizationAnalyzer()
+        let microphone = makeSynchronizationTrack(
+            role: .localSpeaker,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 30_000, 60_000],
+            gaps: [
+                TrackGap(
+                    id: UUID(),
+                    startMilliseconds: 10_000,
+                    endMilliseconds: 12_000,
+                    reason: .droppedBuffers
+                )
+            ]
+        )
+        let systemAudio = makeSynchronizationTrack(
+            role: .systemAudio,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 30_000, 60_000]
+        )
+
+        let report = analyzer.analyze(tracks: [microphone, systemAudio])
+        let quality = MeetingQualityAnalyzer().analyze(
+            tracks: [microphone, systemAudio],
+            synchronization: report
+        )
+
+        #expect(report.quality == .degraded)
+        #expect(report.estimatedDriftPartsPerMillion == nil)
+        #expect(report.residualDriftMilliseconds == nil)
+        #expect(quality.completeTrackRoles == [.localSpeaker, .systemAudio])
+        #expect(quality.totalGapCount == 1)
+        #expect(quality.totalGapDurationMilliseconds == 2_000)
+    }
+
+    @Test func synchronizationAnalyzerFlagsNonlinearAndIncompleteTimelines() {
+        let analyzer = SynchronizationAnalyzer()
+        let systemAudio = makeSynchronizationTrack(
+            role: .systemAudio,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 30_000, 60_000]
+        )
+        let nonlinearMicrophone = makeSynchronizationTrack(
+            role: .localSpeaker,
+            startMilliseconds: 0,
+            anchorSessionTimes: [0, 30_000, 61_000]
+        )
+        let nonlinear = analyzer.analyze(tracks: [nonlinearMicrophone, systemAudio])
+        #expect(nonlinear.quality == .unreliable)
+        #expect((nonlinear.residualDriftMilliseconds ?? 0) > 100)
+
+        var failedSystemAudio = systemAudio
+        failedSystemAudio.status = .failed
+        let incomplete = analyzer.analyze(tracks: [nonlinearMicrophone, failedSystemAudio])
+        let quality = MeetingQualityAnalyzer().analyze(
+            tracks: [nonlinearMicrophone, failedSystemAudio],
+            synchronization: incomplete
+        )
+        #expect(incomplete.quality == .notAnalyzed)
+        #expect(incomplete.initialOffsetMilliseconds == nil)
+        #expect(quality.completeTrackRoles == [.localSpeaker])
+    }
+
     @Test func meetingSessionStoreCreatesLayoutAndRoundTripsManifest() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingStore-\(UUID())", isDirectory: true)
@@ -937,6 +1036,8 @@ struct FlowDictateTests {
         #expect(systemAudioTrack.status == .failed)
         #expect(systemAudioTrack.errorCategory == .systemAudioInterrupted)
         #expect(session.lastErrorCategory == .interrupted)
+        #expect(session.synchronization?.quality == .notAnalyzed)
+        #expect(session.qualityReport?.completeTrackRoles == [.localSpeaker])
         #expect(FileManager.default.fileExists(atPath: microphoneURL.path))
         #expect(FileManager.default.fileExists(atPath: systemAudioURL.path))
         #expect(try await store.load(sessionID: request.sessionID) == session)
@@ -1041,6 +1142,9 @@ struct FlowDictateTests {
 
         #expect(cancelled.status == .cancelled)
         #expect(cancelled.tracks.allSatisfy { $0.status == .finalized })
+        #expect(cancelled.synchronization?.quality == .good)
+        #expect(cancelled.synchronization?.initialOffsetMilliseconds == -1)
+        #expect(cancelled.qualityReport?.completeTrackRoles == [.localSpeaker, .systemAudio])
         #expect(originalURLs.count == 2)
         #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
         #expect(try await store.load(sessionID: firstRequest.sessionID) == cancelled)
@@ -3451,6 +3555,50 @@ struct FlowDictateTests {
             .appendingPathComponent("FlowDictateRecordings-\(UUID())", isDirectory: true)
         try? store.configure(directory: directory)
         return store
+    }
+
+    private func makeSynchronizationTrack(
+        role: RecordingTrackRole,
+        startMilliseconds: Int64,
+        anchorSessionTimes: [Int64],
+        gaps: [TrackGap] = []
+    ) -> MeetingAudioTrack {
+        let sampleRate = 48_000.0
+        let anchorIntervalMilliseconds: Int64 = 30_000
+        let anchors = anchorSessionTimes.enumerated().map { index, sessionTime in
+            TrackTimestampAnchor(
+                hostTime: UInt64(1_000_000 + index * 1_000_000),
+                trackFramePosition: Int64(index) * Int64(sampleRate)
+                    * anchorIntervalMilliseconds / 1_000,
+                sessionTimeMilliseconds: sessionTime
+            )
+        }
+        return MeetingAudioTrack(
+            id: UUID(),
+            role: role,
+            status: .finalized,
+            audioRelativePath: role == .localSpeaker
+                ? "tracks/microphone.caf"
+                : "tracks/system-audio.caf",
+            formatIdentifier: "lpcm",
+            sampleRate: sampleRate,
+            channelCount: 1,
+            firstHostTime: UInt64(max(0, startMilliseconds)) + 1_000_000,
+            lastHostTime: UInt64(max(0, startMilliseconds)) + 3_000_000,
+            durationMilliseconds: 60_000,
+            byteCount: 11_520_000,
+            timestampAnchors: anchors,
+            gaps: gaps,
+            quality: TrackQualityMetrics(
+                peakLevel: 0.5,
+                clippedFrameCount: 0,
+                silentDurationMilliseconds: 0,
+                droppedBufferCount: Int64(gaps.count)
+            ),
+            transcriptionSessionID: nil,
+            errorCategory: nil,
+            errorMessage: nil
+        )
     }
 
     private func makeValidMixedRecordingSession() -> MixedRecordingSession {

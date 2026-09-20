@@ -110,6 +110,8 @@ actor MixedRecordingSessionCoordinator {
     private let microphoneRecorder: any MixedTrackRecording
     private let systemAudioRecorder: any MixedTrackRecording
     private let store: any MixedRecordingSessionStoring
+    private let synchronizationAnalyzer: SynchronizationAnalyzer
+    private let qualityAnalyzer: MeetingQualityAnalyzer
     private let now: @Sendable () -> Date
     private let hostTime: @Sendable () -> UInt64
 
@@ -121,12 +123,16 @@ actor MixedRecordingSessionCoordinator {
         microphoneRecorder: any MixedTrackRecording,
         systemAudioRecorder: any MixedTrackRecording,
         store: any MixedRecordingSessionStoring,
+        synchronizationAnalyzer: SynchronizationAnalyzer = SynchronizationAnalyzer(),
+        qualityAnalyzer: MeetingQualityAnalyzer = MeetingQualityAnalyzer(),
         now: @escaping @Sendable () -> Date = Date.init,
         hostTime: @escaping @Sendable () -> UInt64 = { mach_continuous_time() }
     ) {
         self.microphoneRecorder = microphoneRecorder
         self.systemAudioRecorder = systemAudioRecorder
         self.store = store
+        self.synchronizationAnalyzer = synchronizationAnalyzer
+        self.qualityAnalyzer = qualityAnalyzer
         self.now = now
         self.hostTime = hostTime
     }
@@ -270,6 +276,7 @@ actor MixedRecordingSessionCoordinator {
 
         applyStop(microphoneOutcome, role: .localSpeaker, to: &session)
         applyStop(systemAudioOutcome, role: .systemAudio, to: &session)
+        applyAnalysis(to: &session)
         let successfulTrackCount = [microphoneOutcome, systemAudioOutcome].reduce(0) {
             if case .success = $1 { $0 + 1 } else { $0 }
         }
@@ -317,6 +324,7 @@ actor MixedRecordingSessionCoordinator {
 
         applyCancellation(microphoneResult, role: .localSpeaker, to: &session)
         applyCancellation(systemAudioResult, role: .systemAudio, to: &session)
+        applyAnalysis(to: &session)
         session.status = .cancelled
         session.updatedAt = now()
         do {
@@ -465,6 +473,15 @@ actor MixedRecordingSessionCoordinator {
         track.quality = result.quality
         track.errorCategory = nil
         track.errorMessage = nil
+    }
+
+    private func applyAnalysis(to session: inout MixedRecordingSession) {
+        let synchronization = synchronizationAnalyzer.analyze(tracks: session.tracks)
+        session.synchronization = synchronization
+        session.qualityReport = qualityAnalyzer.analyze(
+            tracks: session.tracks,
+            synchronization: synchronization
+        )
     }
 
     private func failStart(
