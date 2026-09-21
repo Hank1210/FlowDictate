@@ -2697,17 +2697,26 @@ final class DictationCoordinator: ObservableObject {
             }
             state = .inserting
             overlay.show(status: .inserting)
+            var insertionWasDispatched = false
             do {
                 try await makeInserter(preference: preference).insert(text, into: target)
+                insertionWasDispatched = true
                 try await meetingTranscriptInsertionGate.markCompleted(sessionID: session.id)
-                try await syncLatestMeetingSessionIfAvailable(sessionID: session.id)
-                await refreshHistory()
                 presentSuccessfulInsertion(message: "Meeting transcript inserted")
                 allowsRecordingDuringCompletionPersistence = false
             } catch {
-                try? await meetingTranscriptInsertionGate.markDeferred(sessionID: session.id)
+                // Once text may have reached another application, keep the
+                // durable `attempting` boundary if completion persistence
+                // fails. Recovery must require review instead of authorizing a
+                // second automatic paste.
+                if !insertionWasDispatched {
+                    try? await meetingTranscriptInsertionGate.markDeferred(
+                        sessionID: session.id
+                    )
+                }
                 throw error
             }
+            refreshMeetingHistoryAfterCompletedInsertion(sessionID: session.id)
         case .alreadyCompleted:
             state = .idle
             overlay.hide()
@@ -2725,6 +2734,28 @@ final class DictationCoordinator: ObservableObject {
     private func syncLatestMeetingSessionIfAvailable(sessionID: UUID) async throws {
         if let latest = try await meetingSessionStore.load(sessionID: sessionID) {
             try await meetingHistorySynchronizer.sync(latest)
+        }
+    }
+
+    /// The session manifest is the exactly-once authority. History already
+    /// contains the completed transcript at this point, so reflecting the
+    /// insertion result must not hold the visible `Inserting` state or turn a
+    /// successful external paste back into a retryable operation.
+    private func refreshMeetingHistoryAfterCompletedInsertion(sessionID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let started = ContinuousClock.now
+            do {
+                try await syncLatestMeetingSessionIfAvailable(sessionID: sessionID)
+                await refreshHistory()
+                FlowLogger.app.info(
+                    "Meeting insertion History refresh completed in \(String(describing: started.duration(to: .now)), privacy: .public)"
+                )
+            } catch {
+                FlowLogger.app.error(
+                    "Meeting insertion completed, but the deferred History refresh failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 

@@ -3190,6 +3190,7 @@ struct FlowDictateTests {
         #expect(await workflow.runCount == 1)
         #expect(await insertionGate.beginCount == 1)
         #expect(await insertionGate.completedCount == 1)
+        #expect(await insertionGate.deferredCount == 0)
         #expect(harness.recorder.startCount == 0)
         #expect(harness.provider.transcribeCount == 0)
         #expect(harness.inserter.insertCount == 1)
@@ -3253,6 +3254,55 @@ struct FlowDictateTests {
         #expect(await workflow.runCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func completedExternalMixedInsertionIsNeverDowngradedWhenGatePersistenceFails() async throws {
+        var recording = makeValidMixedRecordingSession()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        var queued = makeValidMixedRecordingSession()
+        queued.status = .queued
+        var completed = queued
+        completed.status = .completed
+        completed.mergedTimelineRelativePath = "transcription/merged-timeline.json"
+        completed.finalTranscript = "[You] Persist conservatively"
+        completed.completionMode = .allTracks
+        completed.transcriptInsertionState = .ready
+        completed.transcriptInsertionAttemptCount = 0
+        for index in completed.tracks.indices {
+            completed.tracks[index].status = .transcribed
+            completed.tracks[index].transcriptionSessionID = UUID()
+            completed.tracks[index].transcriptRelativePath = "transcription/track-\(index).json"
+        }
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: recording,
+            stopResult: queued
+        )
+        let insertionGate = StubMeetingTranscriptInsertionGate(
+            beginDecision: .authorized(completed.finalTranscript!),
+            failMarkCompleted: true
+        )
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            meetingProcessingWorkflow: StubMeetingProcessingWorkflow(result: completed),
+            meetingTranscriptInsertionGate: insertionGate
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        #expect(harness.inserter.insertCount == 1)
+        #expect(await insertionGate.completedCount == 1)
+        #expect(await insertionGate.deferredCount == 0)
+        guard case .failed = harness.coordinator.state else {
+            Issue.record("Expected uncertain insertion persistence to require recovery")
+            return
+        }
     }
 
     @MainActor
@@ -5614,12 +5664,17 @@ private actor StubMeetingProcessingWorkflow: MeetingProcessingRunning {
 
 private actor StubMeetingTranscriptInsertionGate: MeetingTranscriptInsertionGating {
     private let beginDecision: MeetingTranscriptInsertionDecision
+    private let failMarkCompleted: Bool
     private(set) var beginCount = 0
     private(set) var completedCount = 0
     private(set) var deferredCount = 0
 
-    init(beginDecision: MeetingTranscriptInsertionDecision) {
+    init(
+        beginDecision: MeetingTranscriptInsertionDecision,
+        failMarkCompleted: Bool = false
+    ) {
         self.beginDecision = beginDecision
+        self.failMarkCompleted = failMarkCompleted
     }
 
     func begin(
@@ -5632,6 +5687,9 @@ private actor StubMeetingTranscriptInsertionGate: MeetingTranscriptInsertionGati
 
     func markCompleted(sessionID: UUID) async throws {
         completedCount += 1
+        if failMarkCompleted {
+            throw MockMixedTrackError.requested("Insertion completion persistence failed")
+        }
     }
 
     func markDeferred(sessionID: UUID) async throws {
