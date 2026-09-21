@@ -1,7 +1,7 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing und zeitbasierter Merge abgeschlossen, vollständige UX und History als nächster Schritt
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing und zeitbasierter Merge abgeschlossen, UX und History in Arbeit
 **Stand:** 21. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
@@ -106,9 +106,9 @@ Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
 - produktive Hotkey-Anbindung des vollständigen Mixed-Workflows,
 - Dual-Level-Overlay und Warnzustände während echter Mixed-Aufnahmen,
-- Historyschema 7 und Meeting-Detailansicht,
-- Resume-, Retry-, Copy-, Export- und Delete-Aktionen in der Nutzeroberfläche,
-- Migration und Retention für sichtbare Meeting-History,
+- produktive Anbindung der neuen Meeting-History an den vollständigen Mixed-Workflow,
+- Trackwiedergabe sowie Resume-, Retry- und bestätigte Delete-Aktionen in der Nutzeroberfläche,
+- Retention für sichtbare Meeting-History,
 - reale Langzeit-, Performance- und Recoverynachweise für vollständige End-to-End-Sessions.
 
 Der Capture-, Synchronisierungs-, Track-Processing- und Merge-Unterbau ist vorhanden. Die sichtbare Auswahl `.mixed` bleibt für normale Diktation trotzdem technisch gesperrt, bis Schritt 4.1.6 den vollständigen Nutzerablauf, Statusdarstellung und Recoveryzugang integriert.
@@ -150,7 +150,7 @@ Recording Source / Consent / Permission Preflight
 | 4.1.3 Timeline, Sync und Qualität | `ERLEDIGT` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `ERLEDIGT` | finale Trackverträge | recoverbare Transkripte |
 | 4.1.5 Timed Merge | `ERLEDIGT` | Tracktranskripte + Sync | Meeting-Timeline |
-| 4.1.6 UX, History und Migration | `OFFEN` | stabile Zustände | vollständiger Nutzerablauf |
+| 4.1.6 UX, History und Migration | `IN ARBEIT` | stabile Zustände | vollständiger Nutzerablauf |
 | 4.1.7 Hardening und Langzeittests | `OFFEN` | End-to-End-Pfad | Releasekandidat |
 | 4.1.8 Dokumentation und Release-Gate | `OFFEN` | alle Gates grün | Freigabeentscheidung |
 
@@ -543,7 +543,11 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 ## 12. Schritt 4.1.6 – Vollständige UX, History und Migration
 
-**Status:** `OFFEN`
+**Status:** `IN ARBEIT` – Schema 7, additive Meetingzusammenfassung, einmaliges Migrationsbackup und erster nativer History-Detailstatus sind implementiert; produktiver Mixed-Start, Live-Overlay sowie Trackaktionen/Recoveryzugang bleiben offen
+
+**Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Trackwiedergabe, Resume/Retry, bestätigtes Löschen und die produktive Erzeugung/Aktualisierung des History-Eintrags folgen im nächsten Teil dieses Schritts.
+
+Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Der 1.000-Record-Test enthält 100 Meetingzusammenfassungen. Debug-Builds für `arm64` und `x86_64` waren erfolgreich.
 
 ### 12.1 Recording Source und Start
 

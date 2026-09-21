@@ -274,6 +274,9 @@ actor DictationHistoryStore {
             if snapshot.envelope.schemaVersion < 6 {
                 backupNames.append("dictations-pre-4.0.json")
             }
+            if snapshot.envelope.schemaVersion < 7 {
+                backupNames.append("dictations-pre-4.1.json")
+            }
             let fileURL = fileURL
             let fileManager = SerialFileManagerReference(fileManager)
             let data = snapshot.data

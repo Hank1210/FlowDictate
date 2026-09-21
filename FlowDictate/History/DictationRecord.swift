@@ -109,6 +109,7 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     var audioSource: RecordingAudioSource = .microphone
     var audioSampleRate: Double = 0
     var audioChannelCount: Int = 0
+    var meetingSummary: MeetingHistorySummary? = nil
     var originalTranscript: String?
     var correctedTranscript: String? = nil
     var correctionSummary: CorrectionSummary? = nil
@@ -170,6 +171,11 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
     }
 
     nonisolated var isAutomaticallyProtected: Bool {
+        if let meetingSummary {
+            return ![MeetingSessionStatus.completed, .cancelled].contains(
+                meetingSummary.status
+            )
+        }
         if let jobStatus,
            ![DictationJobStatus.completed, .cancelled, .insertionDeferred].contains(jobStatus) {
             return true
@@ -281,6 +287,7 @@ extension DictationRecord {
     private enum CodingKeys: String, CodingKey {
         case id, createdAt, recordingStartedAt, recordingEndedAt, duration, status
         case audioRelativePath, audioFileSize, audioSource, audioSampleRate, audioChannelCount
+        case meetingSummary
         case originalTranscript, correctedTranscript, correctionSummary, formattedTranscript
         case dictionaryTranscript, finalText, writingStyleID, processingStatus
         case enhancementProviderID, enhancementModelID, enhancementAttemptCount
@@ -308,6 +315,10 @@ extension DictationRecord {
             ?? .microphone
         audioSampleRate = try values.decodeIfPresent(Double.self, forKey: .audioSampleRate) ?? 0
         audioChannelCount = try values.decodeIfPresent(Int.self, forKey: .audioChannelCount) ?? 0
+        meetingSummary = try values.decodeIfPresent(
+            MeetingHistorySummary.self,
+            forKey: .meetingSummary
+        )?.validated()
         originalTranscript = try values.decodeIfPresent(String.self, forKey: .originalTranscript)
         correctedTranscript = try values.decodeIfPresent(String.self, forKey: .correctedTranscript)
         correctionSummary = try values.decodeIfPresent(CorrectionSummary.self, forKey: .correctionSummary)

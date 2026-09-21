@@ -941,6 +941,16 @@ final class DictationCoordinator: ObservableObject {
         do { NSWorkspace.shared.activateFileViewerSelecting([try audioURL(for: record)]) }
         catch { fail(error, retainedAudioURL: nil) }
     }
+    func revealMeetingSession(for record: DictationRecord) {
+        guard let summary = record.meetingSummary else { return }
+        do {
+            NSWorkspace.shared.activateFileViewerSelecting([
+                try meetingSessionDirectory(for: summary.sessionID)
+            ])
+        } catch {
+            fail(error, retainedAudioURL: nil)
+        }
+    }
     func playAudio(for record: DictationRecord) {
         do { audioPlayer = try AVAudioPlayer(contentsOf: audioURL(for: record)); audioPlayer?.play() }
         catch { fail(error, retainedAudioURL: nil) }

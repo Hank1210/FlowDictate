@@ -3381,6 +3381,48 @@ struct FlowDictateTests {
         #expect(try await reloaded.record(id: record.id)?.status == .completed)
     }
 
+    @Test func meetingHistorySummaryRoundTripsWithoutReplacingSessionManifest() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingHistory-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("dictations.json")
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.finalTranscript = "[You] Hello\n[System Audio] Welcome"
+        session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        session.completionMode = .allTracks
+        session.transcriptInsertionState = .ready
+        session.transcriptInsertionAttemptCount = 0
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let record = try DictationRecord.meetingSession(
+            session,
+            targetBundleIdentifier: "com.example.Editor",
+            targetApplicationName: "Editor"
+        )
+        let store = DictationHistoryStore(fileURL: fileURL)
+        try await store.upsert(record)
+
+        let restored = try #require(
+            try await DictationHistoryStore(fileURL: fileURL).record(id: session.recordID)
+        )
+        let summary = try #require(restored.meetingSummary)
+        #expect(restored.audioSource == .mixed)
+        #expect(restored.finalText == session.finalTranscript)
+        #expect(restored.audioRelativePath == "MeetingSessions/\(session.id.uuidString)")
+        #expect(summary.sessionID == session.id)
+        #expect(summary.status == .completed)
+        #expect(summary.completeTrackCount == 2)
+        #expect(summary.tracks.map(\.role) == [.localSpeaker, .systemAudio])
+        #expect(summary.synchronizationQuality == .good)
+        #expect(summary.insertionState == .ready)
+        #expect(!restored.isAutomaticallyProtected)
+    }
+
     @Test func phaseTwoHistoryWithoutArchivedAtStillDecodes() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateLegacyHistory-\(UUID())", isDirectory: true)
@@ -3563,13 +3605,24 @@ struct FlowDictateTests {
         #expect(try await store.record(id: record.id) != nil)
     }
 
-    @Test func historyStoreHandlesOneThousandPhaseThreeSizedRecords() async throws {
+    @Test func historyStoreHandlesOneThousandRecordsIncludingMeetingSummaries() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateHistoryPerformance-\(UUID()).json")
         defer { try? FileManager.default.removeItem(at: fileURL) }
         let now = Date()
         let longText = String(repeating: "FlowDictate phase three transcript. ", count: 30)
-        let records = (0..<1_000).map { index -> DictationRecord in
+        let records = try (0..<1_000).map { index -> DictationRecord in
+            if index.isMultiple(of: 10) {
+                var session = makeValidMixedRecordingSession()
+                session.id = UUID()
+                session.recordID = UUID()
+                session.createdAt = now.addingTimeInterval(Double(-index))
+                session.updatedAt = session.createdAt.addingTimeInterval(20)
+                session.status = .paused
+                session.lastErrorCategory = .interrupted
+                session.lastErrorMessage = "Resume from History."
+                return try DictationRecord.meetingSession(session)
+            }
             var record = DictationRecord.newRecording(
                 id: UUID(), startedAt: now.addingTimeInterval(Double(-index)),
                 endedAt: now.addingTimeInterval(Double(-index)), duration: 20,
@@ -3592,6 +3645,7 @@ struct FlowDictateTests {
         let start = clock.now
         let store = DictationHistoryStore(fileURL: fileURL)
         #expect(try await store.all().count == 1_000)
+        #expect(try await store.all().filter { $0.meetingSummary != nil }.count == 100)
         var newest = records[0]
         newest.updatedAt = Date()
         try await store.upsert(newest)
@@ -4287,6 +4341,9 @@ struct FlowDictateTests {
         #expect(FileManager.default.fileExists(
             atPath: directory.appendingPathComponent("dictations-pre-4.0.json").path
         ))
+        #expect(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("dictations-pre-4.1.json").path
+        ))
 
         let futureURL = directory.appendingPathComponent("future.json")
         try JSONSerialization.data(
@@ -4302,6 +4359,43 @@ struct FlowDictateTests {
                 return
             }
         }
+    }
+
+    @Test func schemaSixHistoryCreatesOneTimePhaseFourOneBackup() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSchemaSeven-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("dictations.json")
+        let backupURL = directory.appendingPathComponent("dictations-pre-4.1.json")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let recordData = try encoder.encode(makeTranscribedRecord(text: "Schema six"))
+        var recordObject = try #require(
+            JSONSerialization.jsonObject(with: recordData) as? [String: Any]
+        )
+        recordObject.removeValue(forKey: "meetingSummary")
+        let legacy = try JSONSerialization.data(
+            withJSONObject: ["schemaVersion": 6, "records": [recordObject]]
+        )
+        try legacy.write(to: fileURL)
+
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let migrated = try #require(try await store.all().first)
+        #expect(migrated.finalText == "Schema six")
+        #expect(migrated.meetingSummary == nil)
+        #expect(try Data(contentsOf: backupURL) == legacy)
+        #expect(!FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("dictations-pre-4.0.json").path
+        ))
+
+        let backup = try Data(contentsOf: backupURL)
+        _ = try await DictationHistoryStore(fileURL: fileURL).all()
+        #expect(try Data(contentsOf: backupURL) == backup)
+        let persisted = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
+        )
+        #expect(persisted["schemaVersion"] as? Int == 7)
     }
 
     private func makePhaseFourJob(

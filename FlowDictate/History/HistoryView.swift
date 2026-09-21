@@ -86,6 +86,9 @@ struct HistoryView: View {
                         }
                         Text(record.previewText).lineLimit(2)
                         HStack {
+                            if record.meetingSummary != nil {
+                                Label("Meeting", systemImage: "waveform")
+                            }
                             Text(record.createdAt, style: .date)
                             if let app = record.targetApplicationName { Text("• \(app)") }
                             Text("• \(record.duration, format: .number.precision(.fractionLength(1))) s")
@@ -147,7 +150,15 @@ struct HistoryView: View {
                     .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
                 }
 
-                transcriptStages(record)
+                if let meeting = record.meetingSummary {
+                    meetingSummary(meeting)
+                }
+
+                if record.meetingSummary != nil {
+                    transcriptBox("MEETING TIMELINE", text: record.finalText)
+                } else {
+                    transcriptStages(record)
+                }
 
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                     GridRow { Text("Recorded").foregroundStyle(.secondary); Text(record.createdAt.formatted()) }
@@ -200,41 +211,59 @@ struct HistoryView: View {
                     }
                 }
                 HStack(alignment: .top) {
-                    if record.jobStatus == .queued {
-                        Button("Cancel Queued Dictation", role: .destructive) {
-                            coordinator.cancelQueuedDictation(record)
+                    if record.meetingSummary != nil {
+                        Button("Show Session in Finder") {
+                            coordinator.revealMeetingSession(for: record)
                         }
-                    }
-                    Button("Play Audio") { coordinator.playAudio(for: record) }.disabled(record.audioFileSize == 0)
-                    Button("Show in Finder") { coordinator.revealAudio(for: record) }.disabled(record.audioFileSize == 0)
-                    Menu("Copy") {
-                        Button("Copy Original") { coordinator.copyOriginalText(from: record) }
-                            .disabled(record.originalTranscript == nil)
-                        Button("Copy Final") { coordinator.copyText(from: record) }
+                        Button("Copy Timeline") { coordinator.copyText(from: record) }
                             .disabled(!record.canInsert)
-                    }
-                    Button("Export Text…") { coordinator.exportText(from: record) }.disabled(!record.canInsert)
-                    Button("Insert at Cursor") { coordinator.reinsert(record) }.disabled(!record.canInsert)
-                    Button(record.transcriptionSessionID == nil ? "Retry Transcription" : "Continue Transcription") {
-                        coordinator.retryTranscription(record)
-                    }
-                        .disabled(!record.canRetry || retryingRecordIDs.contains(record.id))
-                }
-                HStack {
-                    if record.processingStatus == .enhancementFailed {
-                        Button("Use Local Text") { coordinator.insertLocallyProcessedText(record) }
-                        Button("Use Original") { coordinator.insertOriginalText(record) }
-                        Button("Retry Enhancement") { coordinator.retryEnhancement(record) }
-                            .disabled(!record.canRetryEnhancement || retryingEnhancementRecordIDs.contains(record.id))
-                    }
-                    Menu("Process with Style") {
-                        ForEach(writingStyles.filter(\.isEnabled)) { style in
-                            Button(style.name) { coordinator.reprocess(record, writingStyleID: style.id) }
+                        Button("Export Timeline…") { coordinator.exportText(from: record) }
+                            .disabled(!record.canInsert)
+                        Button("Insert at Cursor") { coordinator.reinsert(record) }
+                            .disabled(!record.canInsert)
+                    } else {
+                        if record.jobStatus == .queued {
+                            Button("Cancel Queued Dictation", role: .destructive) {
+                                coordinator.cancelQueuedDictation(record)
+                            }
                         }
+                        Button("Play Audio") { coordinator.playAudio(for: record) }
+                            .disabled(record.audioFileSize == 0)
+                        Button("Show in Finder") { coordinator.revealAudio(for: record) }
+                            .disabled(record.audioFileSize == 0)
+                        Menu("Copy") {
+                            Button("Copy Original") { coordinator.copyOriginalText(from: record) }
+                                .disabled(record.originalTranscript == nil)
+                            Button("Copy Final") { coordinator.copyText(from: record) }
+                                .disabled(!record.canInsert)
+                        }
+                        Button("Export Text…") { coordinator.exportText(from: record) }
+                            .disabled(!record.canInsert)
+                        Button("Insert at Cursor") { coordinator.reinsert(record) }
+                            .disabled(!record.canInsert)
+                        Button(record.transcriptionSessionID == nil ? "Retry Transcription" : "Continue Transcription") {
+                            coordinator.retryTranscription(record)
+                        }
+                            .disabled(!record.canRetry || retryingRecordIDs.contains(record.id))
                     }
-                    .disabled(record.originalTranscript == nil)
-                    Button("Reapply Local Rules") { coordinator.reapplyLocalRules(record) }
+                }
+                if record.meetingSummary == nil {
+                    HStack {
+                        if record.processingStatus == .enhancementFailed {
+                            Button("Use Local Text") { coordinator.insertLocallyProcessedText(record) }
+                            Button("Use Original") { coordinator.insertOriginalText(record) }
+                            Button("Retry Enhancement") { coordinator.retryEnhancement(record) }
+                                .disabled(!record.canRetryEnhancement || retryingEnhancementRecordIDs.contains(record.id))
+                        }
+                        Menu("Process with Style") {
+                            ForEach(writingStyles.filter(\.isEnabled)) { style in
+                                Button(style.name) { coordinator.reprocess(record, writingStyleID: style.id) }
+                            }
+                        }
                         .disabled(record.originalTranscript == nil)
+                        Button("Reapply Local Rules") { coordinator.reapplyLocalRules(record) }
+                            .disabled(record.originalTranscript == nil)
+                    }
                 }
                 Divider()
                 Button("Delete History Entry", role: .destructive) {
@@ -242,6 +271,63 @@ struct HistoryView: View {
                 }
             }.padding(24)
         }
+    }
+
+    private func meetingSummary(_ meeting: MeetingHistorySummary) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Microphone + System Audio", systemImage: "waveform")
+                    .font(.headline)
+                Spacer()
+                Text(meeting.statusTitle)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(meeting.tracks) { track in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Label(track.title, systemImage: track.statusSymbolName)
+                        .frame(width: 150, alignment: .leading)
+                    Text(track.statusTitle)
+                    Spacer()
+                    Text(track.durationMilliseconds.formattedDuration)
+                        .monospacedDigit()
+                    if track.gapCount > 0 {
+                        Label("\(track.gapCount) gap(s)", systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.orange)
+                    }
+                    if track.clippedFrameCount > 0 {
+                        Label("Clipping", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+                .font(.callout)
+                .accessibilityElement(children: .combine)
+            }
+
+            Divider()
+            HStack(spacing: 18) {
+                Label(
+                    "Synchronization: \(meeting.synchronizationTitle)",
+                    systemImage: meeting.synchronizationSymbolName
+                )
+                if meeting.totalGapCount > 0 {
+                    Label("\(meeting.totalGapCount) total gap(s)", systemImage: "exclamationmark.circle")
+                }
+                if meeting.totalClippedFrameCount > 0 {
+                    Label("Clipping detected", systemImage: "exclamationmark.triangle.fill")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(
+                meeting.synchronizationQuality == .unreliable ? Color.red : Color.secondary
+            )
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Meeting recording details")
     }
 
     private func transcriptStages(_ record: DictationRecord) -> some View {
@@ -296,5 +382,12 @@ struct HistoryView: View {
         case .cancelled: .secondary
         default: .orange
         }
+    }
+}
+
+private extension Int64 {
+    var formattedDuration: String {
+        let totalSeconds = (self > 0 ? self : 0) / 1_000
+        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 }
