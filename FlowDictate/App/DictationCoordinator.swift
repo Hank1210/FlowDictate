@@ -598,6 +598,11 @@ final class DictationCoordinator: ObservableObject {
             state = .finalizing
             audioLevel = 0
             overlay.show(status: .finalizing)
+        } else if state.acceptsStart {
+            // A success/error banner can outlive its timer when AppKit's main
+            // run loop is busy. Never let that stale result cover the next
+            // recording interaction.
+            overlay.hide()
         }
         activeDictationTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2573,6 +2578,16 @@ final class DictationCoordinator: ObservableObject {
             )
             try await meetingHistorySynchronizer.sync(completed)
             await refreshHistory()
+            guard completed.status == .completed else {
+                latestOutputNotice =
+                    "Meeting processing paused. Review the preserved session in History."
+                failMessage(
+                    completed.lastErrorMessage
+                        ?? "Meeting processing paused. Review the preserved session in History.",
+                    retainedAudioURL: latestOutputURL
+                )
+                return
+            }
             try await completeMixedTranscriptInsertion(
                 session: completed,
                 target: target,

@@ -3298,6 +3298,47 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func pausedMixedProcessingStaysRecoverableWithoutAttemptingInsertion() async throws {
+        var recording = makeValidMixedRecordingSession()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        var queued = makeValidMixedRecordingSession()
+        queued.status = .queued
+        var paused = queued
+        paused.status = .paused
+        paused.lastErrorMessage = "One track still needs transcription."
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: recording,
+            stopResult: queued
+        )
+        let workflow = StubMeetingProcessingWorkflow(result: paused)
+        let insertionGate = StubMeetingTranscriptInsertionGate(beginDecision: .deferred)
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            meetingProcessingWorkflow: workflow,
+            meetingTranscriptInsertionGate: insertionGate
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+
+        #expect(await workflow.runCount == 1)
+        #expect(await insertionGate.beginCount == 0)
+        #expect(harness.inserter.insertCount == 0)
+        guard case let .failed(message, retainedAudioURL) = harness.coordinator.state else {
+            Issue.record("Expected paused mixed processing to remain recoverable")
+            return
+        }
+        #expect(message == paused.lastErrorMessage)
+        #expect(retainedAudioURL?.lastPathComponent == paused.id.uuidString)
+        #expect(harness.coordinator.latestOutputNotice?.contains("History") == true)
+    }
+
+    @MainActor
     @Test func tooShortRecordingFailsBeforeTranscriptionProvider() async throws {
         let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
         harness.coordinator.settings.dictationActivationMode = .pressAndHold
@@ -3392,6 +3433,27 @@ struct FlowDictateTests {
         #expect(harness.coordinator.state == .recording)
         #expect(harness.overlay.presentations.last == .recording)
         #expect(harness.overlay.hideCount == 0)
+    }
+
+    @MainActor
+    @Test func acceptedNewHotkeyClearsPendingSuccessOverlayImmediately() async throws {
+        let harness = makeCoordinatorHarness()
+
+        await harness.coordinator.toggleDictation()
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.overlay.hideCount == 0)
+
+        harness.coordinator.requestToggle()
+
+        #expect(harness.overlay.hideCount == 1)
+        for _ in 0..<50 where harness.recorder.startCount < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.recorder.startCount == 2)
+        #expect(harness.coordinator.state == .recording)
+
+        await harness.coordinator.toggleDictation()
     }
 
     @MainActor
