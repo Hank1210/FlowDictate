@@ -543,15 +543,17 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 ## 12. Schritt 4.1.6 – Vollständige UX, History und Migration
 
-**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung und getrennte Live-Pegel sind implementiert; produktiver Mixed-Start sowie Trackaktionen/Recoveryzugang bleiben offen
+**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel und der produktive Mixed-Hotkey-Pfad einschließlich erster realer End-to-End-Abnahme sind implementiert; weitere manuelle Recovery-Gates sowie Trackaktionen bleiben offen
 
-**Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Trackwiedergabe, Resume/Retry, bestätigtes Löschen und die produktive Erzeugung/Aktualisierung des History-Eintrags folgen im nächsten Teil dieses Schritts.
+**Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Trackwiedergabe, Resume/Retry und bestätigtes Löschen folgen in einem weiteren Teil dieses Schritts; die produktive Erzeugung und Aktualisierung des History-Eintrags ist im vierten Zwischenstand angeschlossen.
 
 Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Der 1.000-Record-Test enthält 100 Meetingzusammenfassungen. Debug-Builds für `arm64` und `x86_64` waren erfolgreich.
 
 **Zweiter Zwischenstand 21. September 2026:** Ein eigener `MeetingProcessingWorkflow` verbindet die bereits recoverbare Tracktranskription und den deterministischen Merge mit der Nutzer-History an dauerhaften Stufengrenzen. Fehler synchronisieren den zuletzt persistierten Manifestzustand, statt einen optimistischen UI-Status zu behaupten. Beim App-Start werden ausschließlich Sessions normalisiert, die bereits über eine Meetingreferenz mit der aktiven History verbunden sind. Dadurch bleiben der fünfsekündige Capture-Test und andere nicht verknüpfte Diagnosemanifeste weiterhin bewusst außerhalb der Nutzer-History. Ziel-App-Metadaten bleiben bei späteren Manifestupdates erhalten; kompakt archivierte Transkripte werden beim Neustart nicht aus dem Manifest rehydriert. Drei neue Tests sichern die vollständige Workflow-Synchronisierung, die Trennung zwischen produktiven und diagnostischen Sessions sowie die Archivgrenze. Vollständige serielle Regression: 161/161 Tests bestanden.
 
 **Dritter Zwischenstand 21. September 2026:** Beide Mixed-Trackrecorder veröffentlichen nun unabhängig berechnete und auf zehn Aktualisierungen pro Sekunde begrenzte RMS-Pegel. Das Recording-Overlay zeigt sie als getrennte, text- und symbolbeschriftete Zeilen `Mic` und `System`; VoiceOver erhält je Spur einen Namen und Prozentwert, Reduced Motion bleibt berücksichtigt. Der technische Mixed-Test führt denselben produktiven Pegelpfad aus, während die Originalspuren weiterhin getrennt geschrieben werden. Automatisierte Regression: 161/161 Tests bestanden. Ein realer Fünf-Sekunden-Lauf finalisierte Mikrofon mit 5,4 Sekunden, 0 Gaps und Peak 0,152 sowie Systemaudio mit 5,5 Sekunden, 0 Gaps und Peak 0,675. Zwei Originalspuren und Manifest wurden gespeichert; Transkription blieb erwartungsgemäß aus. Die manuelle Sichtprüfung bestätigte außerdem beide beschrifteten Overlayzeilen und ihre unabhängig unterschiedlichen Reaktionen. Damit ist der Dual-Level-Nachweis vollständig bestanden.
+
+**Vierter Zwischenstand 21. September 2026:** Die technische Mixed-Sperre ist entfernt und der produktive Ablauf ist an Toggle sowie Press & Hold angeschlossen. Eine gestartete Session wird sofort mit der Nutzer-History verknüpft, damit ein Prozessabbruch bereits während der Aufnahme recoverbar bleibt. Stop finalisiert beide Originalspuren, synchronisiert die Qualitätsdaten, übergibt die Session an die exklusive Meeting-Processing-Lane, transkribiert die Tracks mit der eingefrorenen Provider-/Privacy-Konfiguration, merged die Timeline und führt automatische Einfügung ausschließlich über das persistierte Exactly-once-Gate aus. Ein nicht mehr verfügbares Ziel bleibt als Deferred Insertion in History; es gibt keinen Mixed-zu-Mikrofon- oder Local-zu-Cloud-Fallback. Cancel bewahrt finalisierbare Originalspuren und startet weder Processing noch Insertion. Drei neue Coordinator-Tests prüfen Toggle bis zur genau einmaligen Einfügung, Press-&-Hold-Release und Cancel. Vollständige Regression: 164/164 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen; Debug-Builds für `arm64` und `x86_64` waren erfolgreich. Die erste reale produktive End-to-End-Session bestand anschließend Dual Capture, Verarbeitung, Merge und die erfolgreiche Einfügung eines rollenmarkierten Transkripts. Separate manuelle Press-&-Hold-, Cancel- und Recovery-Abnahmen bleiben Teil der folgenden UX-/Hardening-Gates.
 
 ### 12.1 Recording Source und Start
 
@@ -792,10 +794,9 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Nach Review und Commit der bereits vorhandenen Grundlagen beginnt ausschließlich Schritt 4.1.1:
+Nach der erfolgreichen ersten produktiven End-to-End-Session folgen die verbleibenden manuellen und UI-Gates:
 
-1. aktuelle Apple-API- und Permissionannahmen für macOS 14+ gegen Primärdokumentation prüfen,
-2. einen isolierten Core-Audio-/System-Audio-Tap-Prototyp mit dem bestehenden ScreenCaptureKit-Pfad vergleichen,
-3. Timestamp-, Format-, Recovery- und Ressourcenmessungen durchführen,
-4. Captureentscheidung als Go-/No-Go festhalten,
-5. erst danach den produktiven `MixedRecordingSessionCoordinator` bauen.
+1. denselben produktiven Ablauf per Press & Hold prüfen,
+2. Cancel in einer laufenden Mixed Session prüfen und den Erhalt beider Originalspuren bestätigen,
+3. Deferred Insertion bei nicht mehr verfügbarem Ziel sowie Restart-Recovery manuell prüfen,
+4. anschließend die noch fehlenden History-Aktionen für Trackwiedergabe, Resume/Retry und bestätigtes Löschen implementieren.

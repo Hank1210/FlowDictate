@@ -12,6 +12,10 @@ nonisolated protocol MeetingTranscriptMerging: Sendable {
 
 extension MeetingTranscriptMergeRunner: MeetingTranscriptMerging {}
 
+nonisolated protocol MeetingProcessingRunning: Sendable {
+    func run(sessionID: UUID) async throws -> MixedRecordingSession
+}
+
 /// Mirrors durable meeting state into the compact user History record. The
 /// session manifest remains authoritative for paths, per-track transcripts and
 /// recovery; diagnostic capture sessions are never discovered or imported.
@@ -118,3 +122,5 @@ actor MeetingProcessingWorkflow {
         }
     }
 }
+
+extension MeetingProcessingWorkflow: MeetingProcessingRunning {}

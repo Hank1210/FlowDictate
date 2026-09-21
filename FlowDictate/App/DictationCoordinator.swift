@@ -133,6 +133,8 @@ final class DictationCoordinator: ObservableObject {
     private let coreAudioTapCaptureProbe = CoreAudioTapCaptureProbe()
     private let meetingSessionStore: MeetingSessionStore
     private let meetingHistorySynchronizer: MeetingHistorySynchronizer
+    private let injectedMeetingProcessingWorkflow: (any MeetingProcessingRunning)?
+    private let meetingTranscriptInsertionGate: any MeetingTranscriptInsertionGating
     private let mixedRecordingCoordinatorFactory:
         @MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating
     private let mixedCaptureTestDuration: Duration
@@ -149,6 +151,8 @@ final class DictationCoordinator: ObservableObject {
     private var systemAudioTestTask: Task<Void, Never>?
     private var coreAudioTapProbeTask: Task<Void, Never>?
     private var mixedCaptureTestTask: Task<Void, Never>?
+    private var activeMixedRecordingCoordinator:
+        (any MixedRecordingSessionCoordinating)?
     private var mixedMicrophoneLevel: Float = 0
     private var mixedSystemAudioLevel: Float = 0
     private var localModelInstallTask: Task<Void, Never>?
@@ -253,6 +257,9 @@ final class DictationCoordinator: ObservableObject {
         meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil,
         mixedRecordingCoordinatorFactory:
             (@MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating)? = nil,
+        meetingProcessingWorkflow: (any MeetingProcessingRunning)? = nil,
+        meetingTranscriptInsertionGate:
+            (any MeetingTranscriptInsertionGating)? = nil,
         mixedCaptureTestDuration: Duration = .seconds(5),
         livePreviewAvailabilityProvider:
             (@MainActor (TranscriptionLanguage, SpeechPermissionState) -> LivePreviewAvailability)? = nil,
@@ -300,6 +307,9 @@ final class DictationCoordinator: ObservableObject {
             sessionStore: resolvedMeetingSessionStore,
             historyStore: historyStore
         )
+        injectedMeetingProcessingWorkflow = meetingProcessingWorkflow
+        self.meetingTranscriptInsertionGate = meetingTranscriptInsertionGate
+            ?? MeetingTranscriptInsertionGate(store: resolvedMeetingSessionStore)
         self.mixedRecordingCoordinatorFactory = mixedRecordingCoordinatorFactory
             ?? { inputDeviceID in
                 MixedRecordingSessionCoordinator(
@@ -409,8 +419,11 @@ final class DictationCoordinator: ObservableObject {
         default: "Start Dictation"
         }
     }
-    var isRecording: Bool { recorder.isRecording }
-    var canCancel: Bool { state == .recording && recorder.isRecording }
+    private var isCaptureActive: Bool {
+        recorder.isRecording || activeMixedRecordingCoordinator != nil
+    }
+    var isRecording: Bool { isCaptureActive }
+    var canCancel: Bool { state == .recording && isCaptureActive }
     var isProcessing: Bool {
         switch state {
         case .finalizing, .transcribing, .enhancing, .inserting: true
@@ -418,7 +431,7 @@ final class DictationCoordinator: ObservableObject {
         }
     }
     var canStartNewRecording: Bool {
-        !recorder.isRecording
+        !isCaptureActive
             && !transcriptionRestartRequired
             && state.acceptsStart
             && !isPreviewTestRunning
@@ -437,7 +450,7 @@ final class DictationCoordinator: ObservableObject {
             )
     }
     var canPerformPrimaryAction: Bool {
-        recorder.isRecording ? state == .recording : canStartNewRecording
+        isCaptureActive ? state == .recording : canStartNewRecording
     }
     var hasCurrentMeetingRecordingConsent: Bool {
         settings.hasAcceptedCurrentMeetingRecordingConsent
@@ -577,9 +590,9 @@ final class DictationCoordinator: ObservableObject {
         }
         lastHotKeyDate = now
         FlowLogger.hotkey.info(
-            "Accepted toggle request; recording=\(self.recorder.isRecording, privacy: .public)"
+            "Accepted toggle request; recording=\(self.isCaptureActive, privacy: .public)"
         )
-        if recorder.isRecording {
+        if isCaptureActive {
             // Acknowledge the shortcut immediately. System Audio may need a moment
             // to close a long M4A, but the user should never have to press twice.
             state = .finalizing
@@ -611,11 +624,15 @@ final class DictationCoordinator: ObservableObject {
             for task in retryTranscriptionTasks.values { task.cancel() }
             return
         }
-        guard recorder.isRecording else { return }
+        guard isCaptureActive else { return }
         Task { await cancelRecording() }
     }
 
     private func cancelRecording() async {
+        if let mixedCoordinator = activeMixedRecordingCoordinator {
+            await cancelMixedRecording(using: mixedCoordinator)
+            return
+        }
         do {
             let recording = try await recorder.stop()
             recorder.previewBufferHandler = nil
@@ -673,7 +690,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func selectInputDevice(uid: String?) {
-        guard !recorder.isRecording else { return }
+        guard !isCaptureActive else { return }
         settings.inputDeviceUID = uid
         objectWillChange.send()
     }
@@ -681,7 +698,7 @@ final class DictationCoordinator: ObservableObject {
     func refreshInputDevices() {
         // Core Audio device enumeration can briefly contend with the active input graph.
         // Keep the running recording untouched when Settings becomes active.
-        guard !recorder.isRecording else { return }
+        guard !isCaptureActive else { return }
         do {
             inputDevices = try audioDeviceService.inputDevices()
             if let uid = settings.inputDeviceUID, !inputDevices.contains(where: { $0.uid == uid }) {
@@ -694,7 +711,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func restoreRecordingOverlayAfterSettingsActivation() {
-        guard recorder.isRecording else { return }
+        guard isCaptureActive else { return }
         // Opening a Settings scene can reorder auxiliary AppKit panels. Reassert the
         // existing overlay without restarting the recorder or Speech recognition.
         overlay.show(status: .recording, level: audioLevel, reposition: false)
@@ -1169,7 +1186,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func restoreLastDictation() {
-        guard !recorder.isRecording, !isHandlingToggle, state.acceptsStart else {
+        guard !isCaptureActive, !isHandlingToggle, state.acceptsStart else {
             setupMessage = "Finish the current dictation before restoring an earlier one."
             return
         }
@@ -1237,7 +1254,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func testLivePreview() {
-        guard !isPreviewTestRunning, !recorder.isRecording, state.acceptsStart else { return }
+        guard !isPreviewTestRunning, !isCaptureActive, state.acceptsStart else { return }
         guard settings.livePreviewEnabled else {
             setupMessage = "Enable Live Preview before starting the test."
             return
@@ -1307,7 +1324,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func selectRecordingAudioSource(_ source: RecordingAudioSource) {
-        guard !recorder.isRecording,
+        guard !isCaptureActive,
               !isProcessing,
               !isSystemAudioTestRunning,
               !isCoreAudioTapProbeRunning,
@@ -1508,7 +1525,7 @@ final class DictationCoordinator: ObservableObject {
         guard !isCoreAudioTapProbeRunning,
               !isSystemAudioTestRunning,
               !isMixedCaptureTestRunning,
-              !recorder.isRecording,
+              !isCaptureActive,
               !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
         let runningMessage = "Audio-only capture probe is running for \(duration.title.lowercased()). Play System Audio…"
@@ -1570,7 +1587,7 @@ final class DictationCoordinator: ObservableObject {
         guard !isCoreAudioTapProbeRunning,
               !isSystemAudioTestRunning,
               !isMixedCaptureTestRunning,
-              !recorder.isRecording,
+              !isCaptureActive,
               !isProcessing else { return }
         isCoreAudioTapProbeRunning = true
         let runningMessage = "Audio-only capture probe is running 10 start/stop cycles…"
@@ -1678,7 +1695,7 @@ final class DictationCoordinator: ObservableObject {
         guard !isSystemAudioTestRunning,
               !isCoreAudioTapProbeRunning,
               !isMixedCaptureTestRunning,
-              !recorder.isRecording,
+              !isCaptureActive,
               state.acceptsStart else { return }
         isSystemAudioTestRunning = true
         let runningMessage = "ScreenCaptureKit probe is running for \(duration.title.lowercased())…"
@@ -1786,7 +1803,8 @@ final class DictationCoordinator: ObservableObject {
               !isMixedCaptureTestRunning else { return }
         isHandlingToggle = true
         defer { isHandlingToggle = false }
-        if recorder.isRecording { await stopAndTranscribe() }
+        if activeMixedRecordingCoordinator != nil { await stopMixedRecordingAndProcess() }
+        else if recorder.isRecording { await stopAndTranscribe() }
         else if canStartNewRecording { await startRecording() }
     }
 
@@ -2271,7 +2289,7 @@ final class DictationCoordinator: ObservableObject {
         guard !holdHotKeyIsDown else { return }
         holdReleaseTask?.cancel()
         holdHotKeyIsDown = true
-        guard !recorder.isRecording else { return }
+        guard !isCaptureActive else { return }
         requestToggle()
     }
 
@@ -2285,7 +2303,7 @@ final class DictationCoordinator: ObservableObject {
             // and stop as soon as the recorder has actually entered recording state.
             for _ in 0..<80 {
                 guard !Task.isCancelled, !self.holdHotKeyIsDown else { return }
-                if self.recorder.isRecording, !self.isHandlingToggle {
+                if self.isCaptureActive, !self.isHandlingToggle {
                     await self.toggleDictation()
                     return
                 }
@@ -2313,12 +2331,6 @@ final class DictationCoordinator: ObservableObject {
                 presentMeetingRecordingConsent()
                 return
             }
-            fail(
-                MixedRecordingError.captureNotAvailable,
-                retainedAudioURL: nil,
-                message: "Synchronized Microphone + System Audio capture is not available yet in this 4.1 development build."
-            )
-            return
         }
         refreshConfigurationStatus()
         guard recordingLocationConfigured else {
@@ -2390,15 +2402,25 @@ final class DictationCoordinator: ObservableObject {
             return
         }
         do {
-            if settings.recordingAudioSource == .microphone {
+            if settings.recordingAudioSource == .microphone
+                || settings.recordingAudioSource == .mixed {
                 try await permissionManager.ensureMicrophoneAccess()
             }
             try permissionManager.ensureEventPostingAccess()
             sessionConfiguration = configuration
             refreshPermissionStatus()
-            if settings.livePreviewEnabled, speechPermissionState == .notDetermined {
+            if settings.recordingAudioSource == .microphone,
+               settings.livePreviewEnabled,
+               speechPermissionState == .notDetermined {
                 speechPermissionState = await permissionManager.requestSpeechRecognitionAccess()
                 refreshLivePreviewAvailability()
+            }
+            if settings.recordingAudioSource == .mixed {
+                try await startMixedRecording(
+                    target: target,
+                    configuration: configuration
+                )
+                return
             }
             sessionRecorder = settings.recordingAudioSource == .systemAudio
                 ? systemAudioRecorder
@@ -2414,7 +2436,8 @@ final class DictationCoordinator: ObservableObject {
             state = .recording
             overlay.updateSource(settings.recordingAudioSource)
             overlay.show(status: .recording, reposition: true)
-        } catch AudioDeviceServiceError.selectedDeviceUnavailable {
+        } catch AudioDeviceServiceError.selectedDeviceUnavailable
+            where settings.recordingAudioSource == .microphone {
             settings.inputDeviceUID = nil
             recorder.selectInputDevice(nil)
             do {
@@ -2437,6 +2460,256 @@ final class DictationCoordinator: ObservableObject {
             await releaseQueueReservation()
             refreshPermissionStatus()
             fail(error, retainedAudioURL: nil)
+        }
+    }
+
+    private func startMixedRecording(
+        target: FocusTarget,
+        configuration: EffectiveDictationConfiguration
+    ) async throws {
+        let inputDeviceID: AudioDeviceID?
+        do {
+            inputDeviceID = try audioDeviceService.deviceID(
+                forUID: settings.inputDeviceUID
+            )
+        } catch AudioDeviceServiceError.selectedDeviceUnavailable {
+            settings.inputDeviceUID = nil
+            inputDeviceID = nil
+        }
+
+        let coordinator = mixedRecordingCoordinatorFactory(inputDeviceID)
+        resetMixedCaptureLevels()
+        await coordinator.setLevelHandler { [weak self] role, level in
+            Task { @MainActor [weak self] in
+                self?.updateMixedCaptureLevel(level, for: role)
+            }
+        }
+
+        do {
+            let session = try await coordinator.start(
+                MixedRecordingSessionRequest(
+                    providerID: configuration.providerID.rawValue,
+                    engineID: configuration.engineID,
+                    modelID: configuration.transcriptionModel,
+                    language: configuration.language.apiValue,
+                    privacyMode: configuration.privacyMode,
+                    profileID: configuration.profileID
+                )
+            )
+            activeMixedRecordingCoordinator = coordinator
+            latestOutputURL = try meetingSessionDirectory(for: session.id)
+            do {
+                try await meetingHistorySynchronizer.sync(
+                    session,
+                    targetBundleIdentifier: target.bundleIdentifier,
+                    targetApplicationName: target.localizedName
+                )
+            } catch {
+                _ = try? await coordinator.cancel()
+                activeMixedRecordingCoordinator = nil
+                await coordinator.setLevelHandler(nil)
+                resetMixedCaptureLevels()
+                throw error
+            }
+            overlayDismissTask?.cancel()
+            allowsRecordingDuringCompletionPersistence = false
+            focusTarget = target
+            lastExternalFocusTarget = target
+            state = .recording
+            overlay.updateSource(.mixed)
+            overlay.show(status: .recording, reposition: true)
+            await refreshHistory()
+        } catch {
+            await coordinator.setLevelHandler(nil)
+            throw error
+        }
+    }
+
+    private func stopMixedRecordingAndProcess() async {
+        guard let coordinator = activeMixedRecordingCoordinator,
+              let configuration = sessionConfiguration else { return }
+        state = .finalizing
+        audioLevel = 0
+        overlay.show(status: .finalizing)
+        let target = focusTarget
+        let finalized: MixedRecordingSession
+        do {
+            finalized = try await coordinator.stop()
+            activeMixedRecordingCoordinator = nil
+            await coordinator.setLevelHandler(nil)
+            resetMixedCaptureLevels()
+            latestOutputURL = try meetingSessionDirectory(for: finalized.id)
+            try await meetingHistorySynchronizer.sync(
+                finalized,
+                targetBundleIdentifier: target?.bundleIdentifier,
+                targetApplicationName: target?.localizedName
+            )
+            await refreshHistory()
+        } catch {
+            activeMixedRecordingCoordinator = nil
+            await coordinator.setLevelHandler(nil)
+            resetMixedCaptureLevels()
+            await releaseQueueReservation()
+            fail(error, retainedAudioURL: latestOutputURL)
+            return
+        }
+
+        await releaseQueueReservation()
+        guard finalized.status == .queued else {
+            fail(
+                MixedRecordingError.captureNotAvailable,
+                retainedAudioURL: latestOutputURL,
+                message: finalized.lastErrorMessage
+                    ?? "The mixed recording was preserved, but both tracks are required before automatic processing can continue."
+            )
+            return
+        }
+
+        state = .transcribing
+        overlay.show(status: .processing)
+        do {
+            let completed = try await makeMeetingProcessingWorkflow().run(
+                sessionID: finalized.id
+            )
+            try await meetingHistorySynchronizer.sync(completed)
+            await refreshHistory()
+            try await completeMixedTranscriptInsertion(
+                session: completed,
+                target: target,
+                preference: configuration.insertionPreference
+            )
+            focusTarget = nil
+            sessionConfiguration = nil
+            endCriticalInteractionActivityIfNeeded()
+            if state == .success { state = .idle }
+        } catch is CancellationError {
+            focusTarget = nil
+            sessionConfiguration = nil
+            endCriticalInteractionActivityIfNeeded()
+            state = .idle
+            overlay.hide()
+            await refreshHistory()
+        } catch {
+            if let latest = try? await meetingSessionStore.load(sessionID: finalized.id) {
+                _ = try? await meetingHistorySynchronizer.sync(latest)
+            }
+            await refreshHistory()
+            fail(error, retainedAudioURL: latestOutputURL)
+        }
+    }
+
+    private func cancelMixedRecording(
+        using coordinator: any MixedRecordingSessionCoordinating
+    ) async {
+        state = .finalizing
+        audioLevel = 0
+        overlay.show(status: .finalizing)
+        let target = focusTarget
+        do {
+            let cancelled = try await coordinator.cancel()
+            activeMixedRecordingCoordinator = nil
+            await coordinator.setLevelHandler(nil)
+            resetMixedCaptureLevels()
+            latestOutputURL = try meetingSessionDirectory(for: cancelled.id)
+            try await meetingHistorySynchronizer.sync(
+                cancelled,
+                targetBundleIdentifier: target?.bundleIdentifier,
+                targetApplicationName: target?.localizedName
+            )
+            focusTarget = nil
+            sessionConfiguration = nil
+            state = .idle
+            overlay.hide()
+            await releaseQueueReservation()
+            endCriticalInteractionActivityIfNeeded()
+            await refreshHistory()
+        } catch {
+            activeMixedRecordingCoordinator = nil
+            await coordinator.setLevelHandler(nil)
+            resetMixedCaptureLevels()
+            await releaseQueueReservation()
+            fail(error, retainedAudioURL: latestOutputURL)
+        }
+    }
+
+    private func makeMeetingProcessingWorkflow() -> any MeetingProcessingRunning {
+        if let injectedMeetingProcessingWorkflow {
+            return injectedMeetingProcessingWorkflow
+        }
+        let executor = LongFormTrackTranscriptionExecutor { [weak self] request in
+            guard let self,
+                  let providerID = TranscriptionProviderID(rawValue: request.providerID) else {
+                throw TranscriptionProviderError.providerUnavailable(
+                    reason: "The frozen meeting transcription provider is unavailable."
+                )
+            }
+            return try await self.activeProvider(
+                providerID: providerID,
+                model: request.modelID,
+                policy: NetworkPolicy(
+                    mode: request.privacyMode,
+                    cloudEnhancementEnabled: false
+                )
+            )
+        }
+        return MeetingProcessingWorkflow(
+            sessionStore: meetingSessionStore,
+            trackRunner: TrackTranscriptionRunner(
+                store: meetingSessionStore,
+                executor: executor,
+                processingQueue: processingQueue
+            ),
+            mergeRunner: MeetingTranscriptMergeRunner(store: meetingSessionStore),
+            historySynchronizer: meetingHistorySynchronizer
+        )
+    }
+
+    private func completeMixedTranscriptInsertion(
+        session: MixedRecordingSession,
+        target: FocusTarget?,
+        preference: InsertionPreference
+    ) async throws {
+        let targetIsAvailable = target?.isAvailable == true
+        let decision = try await meetingTranscriptInsertionGate.begin(
+            sessionID: session.id,
+            targetIsAvailable: targetIsAvailable
+        )
+        try await syncLatestMeetingSessionIfAvailable(sessionID: session.id)
+        switch decision {
+        case let .authorized(text):
+            guard let target else {
+                throw TextInsertionError.targetUnavailable
+            }
+            state = .inserting
+            overlay.show(status: .inserting)
+            do {
+                try await makeInserter(preference: preference).insert(text, into: target)
+                try await meetingTranscriptInsertionGate.markCompleted(sessionID: session.id)
+                try await syncLatestMeetingSessionIfAvailable(sessionID: session.id)
+                await refreshHistory()
+                presentSuccessfulInsertion(message: "Meeting transcript inserted")
+                allowsRecordingDuringCompletionPersistence = false
+            } catch {
+                try? await meetingTranscriptInsertionGate.markDeferred(sessionID: session.id)
+                throw error
+            }
+        case .alreadyCompleted:
+            state = .idle
+            overlay.hide()
+        case .deferred:
+            latestOutputNotice = "Meeting transcript is ready in History. Automatic insertion was deferred because the original target is unavailable."
+            state = .idle
+            overlay.hide()
+        case .requiresReview:
+            latestOutputNotice = "Meeting transcript insertion needs review in History before it can be repeated."
+            state = .idle
+            overlay.hide()
+        }
+    }
+
+    private func syncLatestMeetingSessionIfAvailable(sessionID: UUID) async throws {
+        if let latest = try await meetingSessionStore.load(sessionID: sessionID) {
+            try await meetingHistorySynchronizer.sync(latest)
         }
     }
 

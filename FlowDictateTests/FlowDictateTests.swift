@@ -3140,6 +3140,164 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func mixedToggleRunsCaptureProcessingAndInsertionExactlyOnce() async throws {
+        var recording = makeValidMixedRecordingSession()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        var queued = makeValidMixedRecordingSession()
+        queued.status = .queued
+        var completed = queued
+        completed.status = .completed
+        completed.mergedTimelineRelativePath = "transcription/merged-timeline.json"
+        completed.finalTranscript = "[You] Hello\n[System Audio] Welcome"
+        completed.completionMode = .allTracks
+        completed.transcriptInsertionState = .ready
+        completed.transcriptInsertionAttemptCount = 0
+        for index in completed.tracks.indices {
+            completed.tracks[index].status = .transcribed
+            completed.tracks[index].transcriptionSessionID = UUID()
+            completed.tracks[index].transcriptRelativePath = index == 0
+                ? "transcription/microphone.json"
+                : "transcription/system-audio.json"
+        }
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: recording,
+            stopResult: queued
+        )
+        let workflow = StubMeetingProcessingWorkflow(result: completed)
+        let insertionGate = StubMeetingTranscriptInsertionGate(
+            beginDecision: .authorized(completed.finalTranscript!)
+        )
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            meetingProcessingWorkflow: workflow,
+            meetingTranscriptInsertionGate: insertionGate
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.coordinator.isRecording)
+
+        await harness.coordinator.toggleDictation()
+
+        #expect(await mixedCoordinator.startCount == 1)
+        #expect(await mixedCoordinator.stopCount == 1)
+        #expect(await mixedCoordinator.cancelCount == 0)
+        #expect(await workflow.runCount == 1)
+        #expect(await insertionGate.beginCount == 1)
+        #expect(await insertionGate.completedCount == 1)
+        #expect(harness.recorder.startCount == 0)
+        #expect(harness.provider.transcribeCount == 0)
+        #expect(harness.inserter.insertCount == 1)
+        #expect(harness.inserter.insertedText == completed.finalTranscript)
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.processActivityManager.beginCount == 1)
+        #expect(harness.processActivityManager.endCount == 1)
+    }
+
+    @MainActor
+    @Test func mixedPressAndHoldReleaseStopsAndProcessesOnce() async throws {
+        var recording = makeValidMixedRecordingSession()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        var queued = makeValidMixedRecordingSession()
+        queued.status = .queued
+        var completed = queued
+        completed.status = .completed
+        completed.mergedTimelineRelativePath = "transcription/merged-timeline.json"
+        completed.finalTranscript = "[You] Held shortcut"
+        completed.completionMode = .allTracks
+        completed.transcriptInsertionState = .ready
+        completed.transcriptInsertionAttemptCount = 0
+        for index in completed.tracks.indices {
+            completed.tracks[index].status = .transcribed
+            completed.tracks[index].transcriptionSessionID = UUID()
+            completed.tracks[index].transcriptRelativePath = "transcription/track-\(index).json"
+        }
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: recording,
+            stopResult: queued
+        )
+        let workflow = StubMeetingProcessingWorkflow(result: completed)
+        let insertionGate = StubMeetingTranscriptInsertionGate(
+            beginDecision: .authorized(completed.finalTranscript!)
+        )
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            meetingProcessingWorkflow: workflow,
+            meetingTranscriptInsertionGate: insertionGate
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+        harness.coordinator.settings.dictationActivationMode = .pressAndHold
+
+        harness.dictationHotKeyRegistrar.press()
+        for _ in 0..<80 where !harness.coordinator.isRecording {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(harness.coordinator.isRecording)
+
+        harness.dictationHotKeyRegistrar.release()
+        for _ in 0..<120 where harness.inserter.insertCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await mixedCoordinator.startCount == 1)
+        #expect(await mixedCoordinator.stopCount == 1)
+        #expect(await workflow.runCount == 1)
+        #expect(harness.inserter.insertCount == 1)
+        #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func cancellingMixedRecordingPreservesSessionWithoutProcessing() async throws {
+        var recording = makeValidMixedRecordingSession()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        var queued = makeValidMixedRecordingSession()
+        queued.status = .queued
+        var cancelled = queued
+        cancelled.status = .cancelled
+        let mixedCoordinator = MockMixedRecordingSessionCoordinator(
+            startResult: recording,
+            stopResult: queued,
+            cancelResult: cancelled
+        )
+        let workflow = StubMeetingProcessingWorkflow(result: queued)
+        let insertionGate = StubMeetingTranscriptInsertionGate(beginDecision: .deferred)
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            mixedRecordingCoordinatorFactory: { _ in mixedCoordinator },
+            meetingProcessingWorkflow: workflow,
+            meetingTranscriptInsertionGate: insertionGate
+        )
+        harness.coordinator.settings.acceptCurrentMeetingRecordingConsent()
+
+        await harness.coordinator.toggleDictation()
+        harness.coordinator.requestCancel()
+        for _ in 0..<80 {
+            if await mixedCoordinator.cancelCount > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await mixedCoordinator.cancelCount == 1)
+        #expect(await mixedCoordinator.stopCount == 0)
+        #expect(await workflow.runCount == 0)
+        #expect(await insertionGate.beginCount == 0)
+        #expect(harness.inserter.insertCount == 0)
+        #expect(harness.coordinator.state == .idle)
+        #expect(harness.overlay.hideCount == 1)
+    }
+
+    @MainActor
     @Test func tooShortRecordingFailsBeforeTranscriptionProvider() async throws {
         let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
         harness.coordinator.settings.dictationActivationMode = .pressAndHold
@@ -4626,6 +4784,9 @@ struct FlowDictateTests {
         meetingRecordingConsentPresenter: (any MeetingRecordingConsentPresenting)? = nil,
         mixedRecordingCoordinatorFactory:
             (@MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating)? = nil,
+        meetingProcessingWorkflow: (any MeetingProcessingRunning)? = nil,
+        meetingTranscriptInsertionGate:
+            (any MeetingTranscriptInsertionGating)? = nil,
         mixedCaptureTestDuration: Duration = .seconds(5)
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
@@ -4689,6 +4850,8 @@ struct FlowDictateTests {
             processActivityManager: processActivityManager,
             meetingRecordingConsentPresenter: meetingRecordingConsentPresenter,
             mixedRecordingCoordinatorFactory: mixedRecordingCoordinatorFactory,
+            meetingProcessingWorkflow: meetingProcessingWorkflow,
+            meetingTranscriptInsertionGate: meetingTranscriptInsertionGate,
             mixedCaptureTestDuration: mixedCaptureTestDuration,
             livePreviewAvailabilityProvider: livePreviewAvailabilityProvider ?? { _, _ in
                 .available(localeIdentifier: "de-DE")
@@ -5335,14 +5498,20 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
 private actor MockMixedRecordingSessionCoordinator: MixedRecordingSessionCoordinating {
     private let startResult: MixedRecordingSession
     private let stopResult: MixedRecordingSession
+    private let cancelResult: MixedRecordingSession
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var cancelCount = 0
     private var levelHandler: MixedRecordingLevelHandler?
 
-    init(startResult: MixedRecordingSession, stopResult: MixedRecordingSession) {
+    init(
+        startResult: MixedRecordingSession,
+        stopResult: MixedRecordingSession,
+        cancelResult: MixedRecordingSession? = nil
+    ) {
         self.startResult = startResult
         self.stopResult = stopResult
+        self.cancelResult = cancelResult ?? stopResult
     }
 
     func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async {
@@ -5363,7 +5532,48 @@ private actor MockMixedRecordingSessionCoordinator: MixedRecordingSessionCoordin
 
     func cancel() async throws -> MixedRecordingSession {
         cancelCount += 1
-        return stopResult
+        return cancelResult
+    }
+}
+
+private actor StubMeetingProcessingWorkflow: MeetingProcessingRunning {
+    private let result: MixedRecordingSession
+    private(set) var runCount = 0
+
+    init(result: MixedRecordingSession) {
+        self.result = result
+    }
+
+    func run(sessionID: UUID) async throws -> MixedRecordingSession {
+        runCount += 1
+        return result
+    }
+}
+
+private actor StubMeetingTranscriptInsertionGate: MeetingTranscriptInsertionGating {
+    private let beginDecision: MeetingTranscriptInsertionDecision
+    private(set) var beginCount = 0
+    private(set) var completedCount = 0
+    private(set) var deferredCount = 0
+
+    init(beginDecision: MeetingTranscriptInsertionDecision) {
+        self.beginDecision = beginDecision
+    }
+
+    func begin(
+        sessionID: UUID,
+        targetIsAvailable: Bool
+    ) async throws -> MeetingTranscriptInsertionDecision {
+        beginCount += 1
+        return beginDecision
+    }
+
+    func markCompleted(sessionID: UUID) async throws {
+        completedCount += 1
+    }
+
+    func markDeferred(sessionID: UUID) async throws {
+        deferredCount += 1
     }
 }
 

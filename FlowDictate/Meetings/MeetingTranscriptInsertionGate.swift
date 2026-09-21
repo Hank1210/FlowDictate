@@ -24,6 +24,15 @@ nonisolated enum MeetingTranscriptInsertionError: LocalizedError, Equatable {
     }
 }
 
+nonisolated protocol MeetingTranscriptInsertionGating: Sendable {
+    func begin(
+        sessionID: UUID,
+        targetIsAvailable: Bool
+    ) async throws -> MeetingTranscriptInsertionDecision
+    func markCompleted(sessionID: UUID) async throws
+    func markDeferred(sessionID: UUID) async throws
+}
+
 /// Persists the insertion boundary before external UI automation begins. If
 /// FlowDictate stops after that boundary, a restart reports `requiresReview`
 /// instead of risking a duplicate paste.
@@ -113,3 +122,5 @@ actor MeetingTranscriptInsertionGate {
         session.updatedAt = max(now(), session.updatedAt)
     }
 }
+
+extension MeetingTranscriptInsertionGate: MeetingTranscriptInsertionGating {}
