@@ -28,6 +28,7 @@ final class TranscriptionRunner {
     init(
         historyStore: DictationHistoryStore,
         sessionStore: TranscriptionSessionStore = TranscriptionSessionStore(),
+        longFormConfiguration: LongFormConfiguration = .default,
         sleeper: @escaping Sleeper = { try await Task.sleep(for: $0) }
     ) {
         self.historyStore = historyStore
@@ -35,6 +36,7 @@ final class TranscriptionRunner {
         longFormRunner = LongFormTranscriptionRunner(
             historyStore: historyStore,
             sessionStore: sessionStore,
+            configuration: longFormConfiguration,
             sleeper: sleeper
         )
     }

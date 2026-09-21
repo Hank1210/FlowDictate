@@ -1,7 +1,7 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung und Derived Tracks abgeschlossen, Track-Processing in Arbeit
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Derived Tracks und Track-Processing abgeschlossen, zeitbasierter Merge als nächster Schritt
 **Stand:** 17. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
@@ -152,7 +152,7 @@ Recording Source / Consent / Permission Preflight
 | 4.1.1 Capture-Spike | `ERLEDIGT` | Grundlagen | verbindliche Captureentscheidung |
 | 4.1.2 Dual-Capture-Coordinator | `ERLEDIGT` | Spike-Go | echte Mixed-Aufnahme |
 | 4.1.3 Timeline, Sync und Qualität | `ERLEDIGT` | reale Trackanker | ausgerichtete Arbeitsdaten |
-| 4.1.4 Track-Processing und Recovery | `IN ARBEIT` | finale Trackverträge | recoverbare Transkripte |
+| 4.1.4 Track-Processing und Recovery | `ERLEDIGT` | finale Trackverträge | recoverbare Transkripte |
 | 4.1.5 Timed Merge | `OFFEN` | Tracktranskripte + Sync | Meeting-Timeline |
 | 4.1.6 UX, History und Migration | `OFFEN` | stabile Zustände | vollständiger Nutzerablauf |
 | 4.1.7 Hardening und Langzeittests | `OFFEN` | End-to-End-Pfad | Releasekandidat |
@@ -449,13 +449,13 @@ Synthetische Fixtures mit bekanntem Offset, Drift und Gaps werden innerhalb der 
 
 ## 10. Schritt 4.1.4 – Track-Transkription, Persistenz und Recovery
 
-**Status:** `IN ARBEIT` – persistierter Track-Runner und Adapter zur bestehenden Single-File-/Long-Form-Pipeline implementiert; Zwei-Track-Mehrsegment-Restart-Gate und produktive Queue-Anbindung stehen noch aus
+**Status:** `ERLEDIGT` – persistierter Track-Runner, bestehende Single-File-/Long-Form-Pipeline, Provider-/Privacy-Vertrag und exklusive 4.0-Queue-Anbindung sind integriert und durch Mehrsegment-Recoverytests abgesichert
 
 Der erste Teilstand friert Provider, Engine, Modell, Sprache, Privacy-Modus und Profil im Meetingmanifest ein und vergibt pro Track eine stabile Transkriptions-ID. `TrackTranscriptionRunner` verarbeitet beide Spuren unabhängig, persistiert jeden Zustandswechsel atomar, bewahrt erfolgreiche Trackresultate bei Fehler, Abbruch und Retry und schreibt validierte Transcript-Artefakte ausschließlich unter `transcription/`. Ein Teilfehler löscht weder Originalaudio noch das Ergebnis der anderen Spur; der Merge wird erst nach zwei erfolgreichen Trackabschlüssen freigegeben. Ältere 4.1-Testmanifeste ohne Privacy-Feld werden anhand des eingefrorenen Providers konservativ migriert.
 
-`LongFormTrackTranscriptionExecutor` bindet die Trackjobs an den vorhandenen `TranscriptionRunner` und dessen segmentierbare, wiederaufnehmbare Long-Form-Session an. Die internen Track-Workflow-Records liegen innerhalb der Meeting-Session und erscheinen nicht als künstliche Einträge in der normalen Nutzer-History. Offline-Policy wird vor der Providerauflösung erzwungen; es gibt keinen stillen Cloudfallback. Tests decken eingefrorene Konfiguration, isolierte Trackfehler, Retry ohne Wiederholung erfolgreicher Tracks, Cancellation/Resume-Identität, den realen Pipelineadapter und das Blockieren von OpenAI im Offline-Modus ab. Vollständige Regression am 20. September 2026: 145/145 Tests bestanden.
+`LongFormTrackTranscriptionExecutor` bindet die Trackjobs an den vorhandenen `TranscriptionRunner` und dessen segmentierbare, wiederaufnehmbare Long-Form-Session an. Die internen Track-Workflow-Records liegen innerhalb der Meeting-Session und erscheinen nicht als künstliche Einträge in der normalen Nutzer-History. Offline-Policy wird vor der Providerauflösung erzwungen; es gibt keinen stillen Cloudfallback. Ein fehlendes lokales Modell pausiert die Session fortsetzbar, startet den zweiten Track nicht zwecklos und gibt den Processing-Slot kontrolliert frei.
 
-Für den Abschluss dieses Schritts fehlen noch die produktive Provider-/Queue-Anbindung, die Aufnahmesperre während der Meetingverarbeitung sowie ein Zwei-Track-Mehrsegment-Test mit Neustart innerhalb bereits erfolgreicher Segmente für Local und OpenAI-Testdouble.
+Meetingverarbeitung verwendet exklusiv dieselbe persistente Processing-Lane wie normale 4.0-Diktate. Währenddessen werden neue Recording-Reservierungen abgewiesen; ein Meeting startet seinerseits nicht neben einem aktiven, reservierten oder wartenden Diktat. Slotfreigabe ist bei Erfolg, Teilfehler, Pause und Cancellation abgesichert. Ein realer Zwei-Track-Mehrsegment-Test erzeugt je Spur ein erfolgreiches und ein fehlgeschlagenes Segment, erstellt anschließend neue Runner-/Executor-Instanzen wie nach einem App-Neustart und bestätigt für Local sowie OpenAI-Testdouble, dass nur das jeweils fehlende Segment erneut verarbeitet wird. Vollständige serielle Regression am 21. September 2026: 149/149 Tests bestanden; Debug-Builds für `arm64` und `x86_64` waren erfolgreich. Die produktive Mixed-Hotkey-Freischaltung bleibt absichtlich bis zum validierten Timed Merge und der vollständigen UX gesperrt.
 
 ### 10.1 Voraussichtliche Dateien
 

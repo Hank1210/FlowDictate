@@ -1101,6 +1101,34 @@ struct FlowDictateTests {
         }
     }
 
+    @Test func trackTranscriptionOwnsExclusiveQueueLaneAndReleasesIt() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackQueue-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(
+            rootURL: root.appendingPathComponent("meetings", isDirectory: true)
+        )
+        let jobStore = DictationJobStore(
+            directory: root.appendingPathComponent("jobs", isDirectory: true)
+        )
+        let queue = DictationProcessingQueue(store: jobStore)
+        let executor = QueueAssertingTrackTranscriptionExecutor(queue: queue)
+        let runner = TrackTranscriptionRunner(
+            store: fixture.store,
+            executor: executor,
+            processingQueue: queue
+        )
+
+        let result = try await runner.run(sessionID: fixture.session.id)
+
+        #expect(result.status == .merging)
+        #expect(await executor.blockedReservationCount == 2)
+        #expect(try await queue.snapshot().totalActiveCount == 0)
+        _ = try await queue.reserveRecordingSlot()
+        #expect(try await queue.snapshot().reservationCount == 1)
+        _ = try await queue.releaseRecordingSlot()
+    }
+
     @Test func trackTranscriptionFailureDoesNotDiscardOtherTrackAndRetrySkipsSuccess() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackRetry-\(UUID())", isDirectory: true)
@@ -1196,6 +1224,142 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func twoTrackLongFormRestartSkipsSuccessfulSegmentsForLocalAndOpenAI() async throws {
+        let scenarios: [(
+            name: String,
+            providerID: String,
+            engineID: String,
+            modelID: String,
+            privacyMode: PrivacyMode,
+            resultProviderID: String
+        )] = [
+            (
+                "local",
+                TranscriptionProviderID.local.rawValue,
+                TranscriptionProviderRegistry.local.capabilities.engineID,
+                "parakeet-tdt-0.6b-v3-coreml",
+                .offline,
+                TranscriptionProviderID.local.rawValue
+            ),
+            (
+                "openai",
+                TranscriptionProviderID.openAI.rawValue,
+                TranscriptionProviderRegistry.openAI.capabilities.engineID,
+                "gpt-4o-mini-transcribe",
+                .cloudTranscription,
+                "OpenAI"
+            )
+        ]
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+
+        for scenario in scenarios {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "FlowDictateTrackLongForm-\(scenario.name)-\(UUID())",
+                isDirectory: true
+            )
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fixture = try await makeLongFormTrackTranscriptionFixture(
+                rootURL: root,
+                providerID: scenario.providerID,
+                engineID: scenario.engineID,
+                modelID: scenario.modelID,
+                privacyMode: scenario.privacyMode
+            )
+            let firstMicrophone = SequenceTranscriptionProvider(
+                texts: ["Microphone shared boundary phrase."],
+                providerID: scenario.resultProviderID,
+                modelID: scenario.modelID
+            )
+            let firstSystemAudio = SequenceTranscriptionProvider(
+                texts: ["System Audio shared boundary phrase."],
+                providerID: scenario.resultProviderID,
+                modelID: scenario.modelID
+            )
+            let firstExecutor = LongFormTrackTranscriptionExecutor(
+                maximumAttempts: 1,
+                longFormConfiguration: configuration
+            ) { request in
+                request.role == .localSpeaker ? firstMicrophone : firstSystemAudio
+            }
+            let firstRunner = TrackTranscriptionRunner(
+                store: fixture.store,
+                executor: firstExecutor
+            )
+
+            let failed = try await firstRunner.run(sessionID: fixture.session.id)
+            #expect(failed.status == .failed)
+            #expect(failed.tracks.allSatisfy { $0.status == .failed })
+            #expect(firstMicrophone.requestCount == 2)
+            #expect(firstSystemAudio.requestCount == 2)
+            #expect(firstMicrophone.transcribeCount == 1)
+            #expect(firstSystemAudio.transcribeCount == 1)
+
+            let longFormStore = TranscriptionSessionStore(
+                rootURL: fixture.paths.transcriptionDirectory
+                    .appendingPathComponent("track-workflows/long-form", isDirectory: true)
+            )
+            for track in failed.tracks {
+                let workflowID = try #require(track.transcriptionSessionID)
+                let manifest = try #require(
+                    try await longFormStore.load(recordID: workflowID)
+                )
+                #expect(manifest.segments.count == 2)
+                #expect(manifest.completedSegmentCount == 1)
+                #expect(manifest.segments[0].status == .succeeded)
+            }
+
+            // New executor and runner instances model an app restart. Both use
+            // only one result: repeating segment zero would make this run fail.
+            let resumedMicrophone = SequenceTranscriptionProvider(
+                texts: ["shared boundary phrase. Microphone end."],
+                providerID: scenario.resultProviderID,
+                modelID: scenario.modelID
+            )
+            let resumedSystemAudio = SequenceTranscriptionProvider(
+                texts: ["shared boundary phrase. System Audio end."],
+                providerID: scenario.resultProviderID,
+                modelID: scenario.modelID
+            )
+            let resumedExecutor = LongFormTrackTranscriptionExecutor(
+                maximumAttempts: 1,
+                longFormConfiguration: configuration
+            ) { request in
+                request.role == .localSpeaker ? resumedMicrophone : resumedSystemAudio
+            }
+            let resumedRunner = TrackTranscriptionRunner(
+                store: fixture.store,
+                executor: resumedExecutor
+            )
+
+            let completed = try await resumedRunner.run(sessionID: fixture.session.id)
+            #expect(completed.status == .merging)
+            #expect(completed.tracks.allSatisfy { $0.status == .transcribed })
+            #expect(resumedMicrophone.requestCount == 1)
+            #expect(resumedSystemAudio.requestCount == 1)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            for track in completed.tracks {
+                let relativePath = try #require(track.transcriptRelativePath)
+                let artifact = try decoder.decode(
+                    MeetingTrackTranscript.self,
+                    from: Data(contentsOf: fixture.paths.sessionDirectory
+                        .appendingPathComponent(relativePath))
+                )
+                #expect(artifact.segmentCount == 2)
+                #expect(artifact.completedSegmentCount == 2)
+            }
+        }
+    }
+
+    @MainActor
     @Test func longFormTrackExecutorBlocksCloudBeforeResolvingProviderWhenOffline() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackPrivacy-\(UUID())", isDirectory: true)
@@ -1222,6 +1386,50 @@ struct FlowDictateTests {
         })
         #expect(await resolver.resolveCount == 0)
         #expect(provider.transcribeCount == 0)
+    }
+
+    @MainActor
+    @Test func missingLocalModelPausesMeetingWithoutCloudFallback() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackMissingModel-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(
+            rootURL: root.appendingPathComponent("meetings", isDirectory: true)
+        )
+        let queue = DictationProcessingQueue(
+            store: DictationJobStore(
+                directory: root.appendingPathComponent("jobs", isDirectory: true)
+            )
+        )
+        var resolutionCount = 0
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) {
+            _ -> any TranscriptionProvider in
+            resolutionCount += 1
+            throw TranscriptionProviderError.localModelMissing(
+                modelID: fixture.session.modelID
+            )
+        }
+        let runner = TrackTranscriptionRunner(
+            store: fixture.store,
+            executor: executor,
+            processingQueue: queue
+        )
+
+        let paused = try await runner.run(sessionID: fixture.session.id)
+        let microphone = try #require(
+            paused.tracks.first(where: { $0.role == .localSpeaker })
+        )
+        let systemAudio = try #require(
+            paused.tracks.first(where: { $0.role == .systemAudio })
+        )
+
+        #expect(paused.status == .paused)
+        #expect(paused.lastErrorCategory == .localModelMissing)
+        #expect(microphone.status == .transcriptionPending)
+        #expect(microphone.errorCategory == .localModelMissing)
+        #expect(systemAudio.status == .finalized)
+        #expect(resolutionCount == 1)
+        #expect(try await queue.snapshot().totalActiveCount == 0)
     }
 
     @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
@@ -3579,6 +3787,30 @@ struct FlowDictateTests {
         #expect(second.queueSequence == 2)
     }
 
+    @Test func meetingQueueLaneRejectsQueuedDictationsAndNewRecordings() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingQueue-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DictationJobStore(directory: directory)
+        let queue = DictationProcessingQueue(store: store)
+        let meetingID = UUID()
+
+        let active = try await queue.beginMeetingProcessing(sessionID: meetingID)
+        #expect(active.processingCount == 1)
+        await #expect(throws: DictationQueueError.self) {
+            _ = try await queue.reserveRecordingSlot()
+        }
+        #expect(try await queue.next() == nil)
+
+        let released = await queue.finishMeetingProcessing(sessionID: meetingID)
+        #expect(released.totalActiveCount == 0)
+        _ = try await queue.reserveRecordingSlot()
+        _ = try await queue.commit(makePhaseFourJob(sequence: 1))
+        await #expect(throws: DictationQueueError.self) {
+            _ = try await queue.beginMeetingProcessing(sessionID: UUID())
+        }
+    }
+
     @Test func queuedJobCanBeCancelledWithoutDeletingItsHistoryAudio() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateQueueCancel-\(UUID())", isDirectory: true)
@@ -3854,6 +4086,54 @@ struct FlowDictateTests {
             try Data("audio-\(track.role.rawValue)".utf8).write(
                 to: paths.sessionDirectory.appendingPathComponent(relativePath)
             )
+        }
+        try await store.create(session)
+        return (store, session, paths)
+    }
+
+    private func makeLongFormTrackTranscriptionFixture(
+        rootURL: URL,
+        providerID: String,
+        engineID: String,
+        modelID: String,
+        privacyMode: PrivacyMode
+    ) async throws -> (
+        store: MeetingSessionStore,
+        session: MixedRecordingSession,
+        paths: MeetingSessionPaths
+    ) {
+        let store = MeetingSessionStore(rootURL: rootURL)
+        var session = makeValidMixedRecordingSession()
+        session.status = .queued
+        session.providerID = providerID
+        session.engineID = engineID
+        session.modelID = modelID
+        session.privacyMode = privacyMode
+        let paths = try await store.prepareSession(id: session.id)
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 16_000,
+            channels: 1
+        ))
+        let frameCount: AVAudioFrameCount = 80_000
+
+        for index in session.tracks.indices {
+            let relativePath = try #require(session.tracks[index].audioRelativePath)
+            let url = paths.sessionDirectory.appendingPathComponent(relativePath)
+            do {
+                let file = try AVAudioFile(forWriting: url, settings: format.settings)
+                let buffer = try #require(AVAudioPCMBuffer(
+                    pcmFormat: format,
+                    frameCapacity: frameCount
+                ))
+                buffer.frameLength = frameCount
+                try file.write(from: buffer)
+            }
+            session.tracks[index].durationMilliseconds = 5_000
+            session.tracks[index].byteCount = Int64(
+                try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            )
+            session.tracks[index].sampleRate = 16_000
+            session.tracks[index].channelCount = 1
         }
         try await store.create(session)
         return (store, session, paths)
@@ -4195,6 +4475,34 @@ private actor MockTrackTranscriptionExecutor: TrackTranscriptionExecuting {
     }
 }
 
+private actor QueueAssertingTrackTranscriptionExecutor: TrackTranscriptionExecuting {
+    private let queue: DictationProcessingQueue
+    private(set) var blockedReservationCount = 0
+
+    init(queue: DictationProcessingQueue) {
+        self.queue = queue
+    }
+
+    func transcribe(_ request: TrackTranscriptionRequest) async throws -> TrackTranscriptionOutput {
+        do {
+            _ = try await queue.reserveRecordingSlot()
+            _ = try await queue.releaseRecordingSlot()
+            throw MockMixedTrackError.requested(
+                "A new recording reservation was accepted during meeting processing"
+            )
+        } catch DictationQueueError.meetingProcessingBusy {
+            blockedReservationCount += 1
+        }
+        return TrackTranscriptionOutput(
+            transcript: "\(request.role.rawValue) transcript",
+            providerID: request.providerID,
+            modelID: request.modelID,
+            segmentCount: 1,
+            completedSegmentCount: 1
+        )
+    }
+}
+
 private nonisolated enum MixedTrackTestEvent: Sendable, Equatable {
     case prepare(RecordingTrackRole)
     case start(RecordingTrackRole, UInt64)
@@ -4462,17 +4770,27 @@ private nonisolated final class RetryingMockTranscriptionProvider: Transcription
 
 private nonisolated final class SequenceTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     private let texts: [String]
+    private let providerID: String
+    private let modelID: String
     private(set) var transcribeCount = 0
     private(set) var requestCount = 0
 
-    init(texts: [String]) { self.texts = texts }
+    init(
+        texts: [String],
+        providerID: String = "Test",
+        modelID: String = "test"
+    ) {
+        self.texts = texts
+        self.providerID = providerID
+        self.modelID = modelID
+    }
 
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
         requestCount += 1
         guard transcribeCount < texts.count else { throw TranscriptionProviderError.emptyTranscript }
         let text = texts[transcribeCount]
         transcribeCount += 1
-        return TranscriptionResult(text: text, provider: "Test", model: "test")
+        return TranscriptionResult(text: text, provider: providerID, model: modelID)
     }
 }
 

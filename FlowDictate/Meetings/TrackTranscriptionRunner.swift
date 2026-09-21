@@ -43,6 +43,13 @@ nonisolated protocol TrackTranscriptionSessionStoring: Sendable {
 
 extension MeetingSessionStore: TrackTranscriptionSessionStoring {}
 
+nonisolated protocol MeetingProcessingQueueing: Sendable {
+    func beginMeetingProcessing(sessionID: UUID) async throws -> DictationQueueSnapshot
+    func finishMeetingProcessing(sessionID: UUID) async -> DictationQueueSnapshot
+}
+
+extension DictationProcessingQueue: MeetingProcessingQueueing {}
+
 nonisolated struct MeetingTrackTranscript: Codable, Sendable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -98,17 +105,20 @@ nonisolated enum TrackTranscriptionRunnerError: LocalizedError, Equatable {
 actor TrackTranscriptionRunner {
     private let store: any TrackTranscriptionSessionStoring
     private let executor: any TrackTranscriptionExecuting
+    private let processingQueue: (any MeetingProcessingQueueing)?
     private let fileManager: FileManager
     private let now: @Sendable () -> Date
 
     init(
         store: any TrackTranscriptionSessionStoring,
         executor: any TrackTranscriptionExecuting,
+        processingQueue: (any MeetingProcessingQueueing)? = nil,
         fileManager: FileManager = .default,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.executor = executor
+        self.processingQueue = processingQueue
         self.fileManager = fileManager
         self.now = now
     }
@@ -116,6 +126,24 @@ actor TrackTranscriptionRunner {
     /// Runs each non-terminal track independently. Track-level failures are
     /// persisted and do not prevent the other track from completing.
     func run(sessionID: UUID) async throws -> MixedRecordingSession {
+        if let processingQueue {
+            _ = try await processingQueue.beginMeetingProcessing(sessionID: sessionID)
+        }
+        do {
+            let result = try await runAdmitted(sessionID: sessionID)
+            if let processingQueue {
+                _ = await processingQueue.finishMeetingProcessing(sessionID: sessionID)
+            }
+            return result
+        } catch {
+            if let processingQueue {
+                _ = await processingQueue.finishMeetingProcessing(sessionID: sessionID)
+            }
+            throw error
+        }
+    }
+
+    private func runAdmitted(sessionID: UUID) async throws -> MixedRecordingSession {
         guard var session = try await store.load(sessionID: sessionID) else {
             throw TrackTranscriptionRunnerError.sessionNotFound(sessionID)
         }
@@ -219,11 +247,19 @@ actor TrackTranscriptionRunner {
                 throw CancellationError()
             } catch {
                 let underlyingError = (error as? TranscriptionRunFailure)?.underlyingError ?? error
-                session.tracks[index].status = .failed
-                session.tracks[index].errorCategory = DictationFailureClassifier.category(
-                    for: underlyingError
-                )
+                let category = DictationFailureClassifier.category(for: underlyingError)
+                session.tracks[index].errorCategory = category
                 session.tracks[index].errorMessage = underlyingError.localizedDescription
+                if category == .localModelMissing {
+                    session.tracks[index].status = .transcriptionPending
+                    session.status = .paused
+                    session.lastErrorCategory = category
+                    session.lastErrorMessage = underlyingError.localizedDescription
+                    updateTimestamp(&session)
+                    try await store.save(session)
+                    return session
+                }
+                session.tracks[index].status = .failed
                 updateTimestamp(&session)
                 try await store.save(session)
             }

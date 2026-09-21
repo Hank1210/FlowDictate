@@ -82,6 +82,7 @@ nonisolated enum DictationQueueError: LocalizedError {
     case full(maximumWaiting: Int)
     case reservationMissing
     case jobNotCancellable
+    case meetingProcessingBusy
     case unsupportedSchema(Int)
 
     var errorDescription: String? {
@@ -92,6 +93,8 @@ nonisolated enum DictationQueueError: LocalizedError {
             "The recording could not be added because its queue reservation was lost. The audio was kept."
         case .jobNotCancellable:
             "This dictation has already started processing and can no longer be cancelled as a waiting job."
+        case .meetingProcessingBusy:
+            "Meeting processing is active or another dictation is waiting. Wait for it to finish before starting a new recording."
         case let .unsupportedSchema(schema):
             "A dictation job uses unsupported schema version \(schema)."
         }

@@ -5,6 +5,7 @@ actor DictationProcessingQueue {
     private let store: DictationJobStore
     private var reservations = 0
     private var activeJobID: UUID?
+    private var activeMeetingSessionID: UUID?
 
     init(store: DictationJobStore, maximumWaitingJobs: Int = 5) {
         self.store = store
@@ -12,6 +13,9 @@ actor DictationProcessingQueue {
     }
 
     func reserveRecordingSlot() async throws -> DictationQueueSnapshot {
+        guard activeMeetingSessionID == nil else {
+            throw DictationQueueError.meetingProcessingBusy
+        }
         let jobs = try await store.all()
         let queued = jobs.filter { $0.status == .queued }.count
         let processing = activeJobID == nil ? 0 : 1
@@ -40,7 +44,7 @@ actor DictationProcessingQueue {
     }
 
     func next() async throws -> DictationJob? {
-        guard activeJobID == nil else { return nil }
+        guard activeJobID == nil, activeMeetingSessionID == nil else { return nil }
         guard var job = try await store.all().first(where: { $0.status == .queued }) else { return nil }
         job.status = .preparing
         job.updatedAt = Date()
@@ -71,10 +75,38 @@ actor DictationProcessingQueue {
         return try await snapshot()
     }
 
+    /// Meeting track processing owns the same exclusive resource lane as a
+    /// normal transcription job. It starts only when no recording reservation,
+    /// queued dictation, or active job exists.
+    func beginMeetingProcessing(sessionID: UUID) async throws -> DictationQueueSnapshot {
+        let jobs = try await store.all()
+        guard activeMeetingSessionID == nil,
+              activeJobID == nil,
+              reservations == 0,
+              !jobs.contains(where: { $0.status == .queued }) else {
+            throw DictationQueueError.meetingProcessingBusy
+        }
+        activeMeetingSessionID = sessionID
+        return try await snapshot()
+    }
+
+    /// Idempotent for stale cleanup calls, but never releases another meeting's
+    /// slot when an old task completes late.
+    func finishMeetingProcessing(sessionID: UUID) async -> DictationQueueSnapshot {
+        if activeMeetingSessionID == sessionID {
+            activeMeetingSessionID = nil
+        }
+        return (try? await snapshot()) ?? DictationQueueSnapshot(
+            processingCount: activeJobID == nil && activeMeetingSessionID == nil ? 0 : 1,
+            queuedCount: 0,
+            reservationCount: reservations
+        )
+    }
+
     func snapshot() async throws -> DictationQueueSnapshot {
         let jobs = try await store.all()
         return DictationQueueSnapshot(
-            processingCount: activeJobID == nil ? 0 : 1,
+            processingCount: activeJobID == nil && activeMeetingSessionID == nil ? 0 : 1,
             queuedCount: jobs.filter { $0.status == .queued }.count,
             reservationCount: reservations
         )

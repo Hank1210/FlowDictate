@@ -23,6 +23,15 @@ final class SystemProcessActivityManager: ProcessActivityManaging {
     }
 }
 
+/// Prevents a freshly signed XCTest host from presenting a macOS Keychain
+/// authorization dialog before the test bundle can materialize. Normal app
+/// launches continue to use `KeychainCredentialStore`.
+private struct TestHostCredentialStore: CredentialStoring {
+    func readAPIKey() throws -> String? { nil }
+    func saveAPIKey(_ value: String) throws {}
+    func deleteAPIKey() throws {}
+}
+
 @MainActor
 final class DictationCoordinator: ObservableObject {
     static let currentOnboardingVersion = FlowDictateVersion.onboardingSchema
@@ -177,6 +186,10 @@ final class DictationCoordinator: ObservableObject {
         let environment = ProcessInfo.processInfo.environment
         let isUITesting = environment["FLOWDICTATE_UI_TESTING"] == "1"
             || environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+        let credentialStore: any CredentialStoring = isUITesting
+            ? TestHostCredentialStore()
+            : KeychainCredentialStore()
         let settings = AppSettings()
         let locationStore = RecordingLocationStore()
         let audioStore = AudioStore(locationStore: locationStore)
@@ -189,7 +202,7 @@ final class DictationCoordinator: ObservableObject {
             recorder: MicrophoneRecorder(store: audioStore),
             provider: nil,
             inserter: nil,
-            credentialStore: KeychainCredentialStore(),
+            credentialStore: credentialStore,
             audioDeviceService: AudioDeviceService(),
             launchAtLogin: LaunchAtLoginManager(automaticallyEnableOnFirstLaunch: !isUITesting),
             overlay: RecordingOverlayController(),

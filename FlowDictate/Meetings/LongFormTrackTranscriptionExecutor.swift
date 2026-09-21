@@ -10,14 +10,17 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
 
     private let providerResolver: ProviderResolver
     private let maximumAttempts: Int
+    private let longFormConfiguration: LongFormConfiguration
     private let now: @Sendable () -> Date
 
     init(
         maximumAttempts: Int = 3,
+        longFormConfiguration: LongFormConfiguration = .default,
         now: @escaping @Sendable () -> Date = Date.init,
         providerResolver: @escaping ProviderResolver
     ) {
         self.maximumAttempts = max(1, maximumAttempts)
+        self.longFormConfiguration = longFormConfiguration
         self.now = now
         self.providerResolver = providerResolver
     }
@@ -65,7 +68,8 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
         let provider = try await providerResolver(request)
         let runner = TranscriptionRunner(
             historyStore: historyStore,
-            sessionStore: sessionStore
+            sessionStore: sessionStore,
+            longFormConfiguration: longFormConfiguration
         )
         let existing = try await historyStore.record(id: request.transcriptionSessionID)
         let record = existing ?? makeRecord(request)
