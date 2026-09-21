@@ -9,9 +9,16 @@ nonisolated protocol MixedRecordingSessionStoring: Sendable {
 
 extension MeetingSessionStore: MixedRecordingSessionStoring {}
 
+typealias MixedTrackLevelHandler = @Sendable (Float) -> Void
+typealias MixedRecordingLevelHandler = @Sendable (
+    RecordingTrackRole,
+    Float
+) -> Void
+
 nonisolated protocol MixedTrackRecording: Sendable {
     var role: RecordingTrackRole { get }
 
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async
     func prepare(outputURL: URL) async throws
     func start(requestedHostTime: UInt64) async throws -> MixedTrackStartResult
     func stop() async throws -> MixedTrackCaptureResult
@@ -19,6 +26,7 @@ nonisolated protocol MixedTrackRecording: Sendable {
 }
 
 nonisolated protocol MixedRecordingSessionCoordinating: Sendable {
+    func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async
     func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession
     func stop() async throws -> MixedRecordingSession
     func cancel() async throws -> MixedRecordingSession
@@ -141,6 +149,16 @@ actor MixedRecordingSessionCoordinator {
         self.qualityAnalyzer = qualityAnalyzer
         self.now = now
         self.hostTime = hostTime
+    }
+
+    func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async {
+        async let microphoneUpdate: Void = microphoneRecorder.setLevelHandler { level in
+            handler?(.localSpeaker, level)
+        }
+        async let systemAudioUpdate: Void = systemAudioRecorder.setLevelHandler { level in
+            handler?(.systemAudio, level)
+        }
+        _ = await (microphoneUpdate, systemAudioUpdate)
     }
 
     func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession {

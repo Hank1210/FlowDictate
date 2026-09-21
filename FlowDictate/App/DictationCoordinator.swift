@@ -149,6 +149,8 @@ final class DictationCoordinator: ObservableObject {
     private var systemAudioTestTask: Task<Void, Never>?
     private var coreAudioTapProbeTask: Task<Void, Never>?
     private var mixedCaptureTestTask: Task<Void, Never>?
+    private var mixedMicrophoneLevel: Float = 0
+    private var mixedSystemAudioLevel: Float = 0
     private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
@@ -1367,6 +1369,7 @@ final class DictationCoordinator: ObservableObject {
                 isMixedCaptureTestRunning = false
                 mixedCaptureTestTask = nil
                 audioLevel = 0
+                resetMixedCaptureLevels()
                 overlay.hide()
                 refreshPermissionStatus()
             }
@@ -1386,6 +1389,12 @@ final class DictationCoordinator: ObservableObject {
 
                 let createdCoordinator = mixedRecordingCoordinatorFactory(inputDeviceID)
                 coordinator = createdCoordinator
+                resetMixedCaptureLevels()
+                await createdCoordinator.setLevelHandler { [weak self] role, level in
+                    Task { @MainActor [weak self] in
+                        self?.updateMixedCaptureLevel(level, for: role)
+                    }
+                }
                 let provider = settings.transcriptionProviderID
                 let engineID = provider == .local
                     ? TranscriptionProviderRegistry.local.capabilities.engineID
@@ -1445,6 +1454,28 @@ final class DictationCoordinator: ObservableObject {
 
     func cancelMixedCaptureTest() {
         mixedCaptureTestTask?.cancel()
+    }
+
+    private func updateMixedCaptureLevel(
+        _ level: Float,
+        for role: RecordingTrackRole
+    ) {
+        switch role {
+        case .localSpeaker:
+            mixedMicrophoneLevel = level
+        case .systemAudio:
+            mixedSystemAudioLevel = level
+        }
+        overlay.updateMeetingLevels(
+            microphone: mixedMicrophoneLevel,
+            systemAudio: mixedSystemAudioLevel
+        )
+    }
+
+    private func resetMixedCaptureLevels() {
+        mixedMicrophoneLevel = 0
+        mixedSystemAudioLevel = 0
+        overlay.updateMeetingLevels(microphone: 0, systemAudio: 0)
     }
 
     private func meetingSessionDirectory(for id: UUID) throws -> URL {

@@ -72,11 +72,17 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
     private var aggregateUID: String?
     private var callbackQueue: DispatchQueue?
     private var sink: SystemAudioTrackCaptureSink?
+    private var levelHandler: MixedTrackLevelHandler?
     private var deviceStarted = false
     private var precomputedStopStatus: OSStatus?
 
     init(firstBufferTimeout: Duration = .seconds(2)) {
         self.firstBufferTimeout = firstBufferTimeout
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
+        levelHandler = handler
+        sink?.setLevelHandler(handler)
     }
 
     func prepare(outputURL: URL) async throws {
@@ -125,7 +131,8 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
             let sink = try SystemAudioTrackCaptureSink(
                 outputURL: outputURL,
                 sourceFormat: sourceFormat,
-                outputFormat: outputFormat
+                outputFormat: outputFormat,
+                levelHandler: levelHandler
             )
             self.sink = sink
 
@@ -473,15 +480,19 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
     private var failure: SystemAudioTrackRecorderError?
     private var hasBegun = false
     private var acceptsAudio = false
+    private var levelHandler: MixedTrackLevelHandler?
+    private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
     init(
         outputURL: URL,
         sourceFormat: AVAudioFormat,
-        outputFormat: AVAudioFormat
+        outputFormat: AVAudioFormat,
+        levelHandler: MixedTrackLevelHandler? = nil
     ) throws {
         self.outputURL = outputURL
         self.sourceFormat = sourceFormat
         self.outputFormat = outputFormat
+        self.levelHandler = levelHandler
         converter = sourceFormat == outputFormat
             ? nil
             : AVAudioConverter(from: sourceFormat, to: outputFormat)
@@ -497,6 +508,12 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             interleaved: false
         )
         metrics = PCMTrackMetrics(sampleRate: outputFormat.sampleRate)
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) {
+        lock.lock()
+        levelHandler = handler
+        lock.unlock()
     }
 
     func begin(requestedHostTime: UInt64) {
@@ -536,11 +553,19 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
                 sampleRate: sourceFormat.sampleRate
             )
             metrics.record(buffer: outputBuffer, time: audioTime)
+            publishLevelIfNeeded(from: outputBuffer)
         } catch let error as SystemAudioTrackRecorderError {
             failure = error
         } catch {
             failure = .writerFailed(error.localizedDescription)
         }
+    }
+
+    private func publishLevelIfNeeded(from buffer: AVAudioPCMBuffer) {
+        guard levelUpdateGate.shouldPublish(at: ProcessInfo.processInfo.systemUptime) else {
+            return
+        }
+        levelHandler?(AudioLevelMeter.normalizedRMS(buffer))
     }
 
     func waitForFirstAnchor(timeout: Duration) async throws -> TrackTimestampAnchor {

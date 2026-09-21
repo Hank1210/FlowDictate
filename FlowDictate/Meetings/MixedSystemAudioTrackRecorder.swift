@@ -22,6 +22,10 @@ actor SystemAudioTrackRecorder: MixedTrackRecording {
         }
     }
 
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
+        await implementation.setLevelHandler(handler)
+    }
+
     func prepare(outputURL: URL) async throws {
         try await implementation.prepare(outputURL: outputURL)
     }

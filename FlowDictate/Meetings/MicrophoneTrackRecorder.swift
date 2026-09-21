@@ -42,6 +42,7 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     private let firstBufferTimeout: Duration
     private var engine: AVAudioEngine?
     private var sink: MicrophoneTrackCaptureSink?
+    private var levelHandler: MixedTrackLevelHandler?
     private var hasInstalledTap = false
     private var isRecording = false
 
@@ -51,6 +52,11 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     ) {
         self.inputDeviceID = inputDeviceID
         self.firstBufferTimeout = firstBufferTimeout
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
+        levelHandler = handler
+        sink?.setLevelHandler(handler)
     }
 
     func prepare(outputURL: URL) async throws {
@@ -96,7 +102,8 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
         let sink = try MicrophoneTrackCaptureSink(
             outputURL: outputURL,
             sourceFormat: sourceFormat,
-            outputFormat: outputFormat
+            outputFormat: outputFormat,
+            levelHandler: levelHandler
         )
         inputNode.installTap(onBus: 0, bufferSize: 4_096, format: sourceFormat) {
             buffer,
@@ -175,15 +182,19 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
     private var metrics: PCMTrackMetrics
     private var failure: MicrophoneTrackRecorderError?
     private var hasBegun = false
+    private var levelHandler: MixedTrackLevelHandler?
+    private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
     init(
         outputURL: URL,
         sourceFormat: AVAudioFormat,
-        outputFormat: AVAudioFormat
+        outputFormat: AVAudioFormat,
+        levelHandler: MixedTrackLevelHandler? = nil
     ) throws {
         self.outputURL = outputURL
         self.sourceFormat = sourceFormat
         self.outputFormat = outputFormat
+        self.levelHandler = levelHandler
         converter = sourceFormat == outputFormat
             ? nil
             : AVAudioConverter(from: sourceFormat, to: outputFormat)
@@ -199,6 +210,12 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
             interleaved: false
         )
         metrics = PCMTrackMetrics(sampleRate: outputFormat.sampleRate)
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) {
+        lock.lock()
+        levelHandler = handler
+        lock.unlock()
     }
 
     func begin(requestedHostTime: UInt64) {
@@ -221,11 +238,19 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
             guard outputBuffer.frameLength > 0 else { return }
             try file.write(from: outputBuffer)
             metrics.record(buffer: outputBuffer, time: time)
+            publishLevelIfNeeded(from: outputBuffer)
         } catch let error as MicrophoneTrackRecorderError {
             failure = error
         } catch {
             failure = .writerFailed(error.localizedDescription)
         }
+    }
+
+    private func publishLevelIfNeeded(from buffer: AVAudioPCMBuffer) {
+        guard levelUpdateGate.shouldPublish(at: ProcessInfo.processInfo.systemUptime) else {
+            return
+        }
+        levelHandler?(AudioLevelMeter.normalizedRMS(buffer))
     }
 
     func waitForFirstAnchor(timeout: Duration) async throws -> TrackTimestampAnchor {

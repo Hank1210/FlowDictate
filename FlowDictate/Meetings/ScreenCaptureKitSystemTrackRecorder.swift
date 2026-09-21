@@ -17,6 +17,7 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
     private var stream: SCStream?
     private var output: ScreenCaptureKitTrackOutput?
     private var isRecording = false
+    private var levelHandler: MixedTrackLevelHandler?
 
     init(
         permissionService: SystemAudioPermissionService = SystemAudioPermissionService(),
@@ -24,6 +25,11 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
     ) {
         self.permissionService = permissionService
         self.firstBufferTimeout = firstBufferTimeout
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
+        levelHandler = handler
+        output?.setLevelHandler(handler)
     }
 
     func prepare(outputURL: URL) async throws {
@@ -61,7 +67,10 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
             excludingApplications: [],
             exceptingWindows: []
         )
-        let output = ScreenCaptureKitTrackOutput(outputURL: outputURL)
+        let output = ScreenCaptureKitTrackOutput(
+            outputURL: outputURL,
+            levelHandler: levelHandler
+        )
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         do {
             try stream.addStreamOutput(
@@ -152,10 +161,23 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
     private var requestedHostTime: UInt64 = 0
     private var hasBegun = false
     private var acceptsAudio = false
+    private var levelHandler: MixedTrackLevelHandler?
 
-    init(outputURL: URL) {
+    init(
+        outputURL: URL,
+        levelHandler: MixedTrackLevelHandler? = nil
+    ) {
         self.outputURL = outputURL
+        self.levelHandler = levelHandler
         super.init()
+    }
+
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) {
+        lock.lock()
+        levelHandler = handler
+        let sink = sink
+        lock.unlock()
+        sink?.setLevelHandler(handler)
     }
 
     func begin(requestedHostTime: UInt64) {
@@ -222,6 +244,7 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
         }
         let requestedHostTime = requestedHostTime
         var sink = sink
+        let levelHandler = levelHandler
         lock.unlock()
 
         do {
@@ -246,7 +269,8 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
                 let createdSink = try SystemAudioTrackCaptureSink(
                     outputURL: outputURL,
                     sourceFormat: sourceFormat,
-                    outputFormat: outputFormat
+                    outputFormat: outputFormat,
+                    levelHandler: levelHandler
                 )
                 createdSink.begin(requestedHostTime: requestedHostTime)
                 lock.lock()

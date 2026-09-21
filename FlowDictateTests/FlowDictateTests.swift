@@ -44,6 +44,14 @@ struct FlowDictateTests {
         )
         #expect(microphone.heading == "LIVE PREVIEW")
         #expect(microphone.showsActivityIndicator)
+
+        let mixed = OverlayPreviewPresentation.resolve(
+            source: .mixed,
+            state: .waiting
+        )
+        #expect(mixed.heading == "MEETING CAPTURE")
+        #expect(!mixed.showsActivityIndicator)
+        #expect(mixed.statusMessage?.contains("separate original tracks") == true)
     }
 
     @Test func standardOverlayUsesConfiguredPreviewWindow() {
@@ -3123,6 +3131,12 @@ struct FlowDictateTests {
         #expect(harness.coordinator.latestOutputURL?.lastPathComponent == completedSession.id.uuidString)
         #expect(harness.overlay.presentations.contains(.recording))
         #expect(harness.overlay.presentations.contains(.finalizing))
+        #expect(harness.overlay.meetingLevels.contains { update in
+            update.microphone == 0.25 && update.systemAudio == 0
+        })
+        #expect(harness.overlay.meetingLevels.contains { update in
+            update.microphone == 0.25 && update.systemAudio == 0.75
+        })
     }
 
     @MainActor
@@ -5235,6 +5249,8 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
         self.returnsCaptureOnCancel = returnsCaptureOnCancel
     }
 
+    func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {}
+
     func prepare(outputURL: URL) async throws {
         await events.append(.prepare(role))
         if let prepareError { throw prepareError }
@@ -5322,14 +5338,21 @@ private actor MockMixedRecordingSessionCoordinator: MixedRecordingSessionCoordin
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var cancelCount = 0
+    private var levelHandler: MixedRecordingLevelHandler?
 
     init(startResult: MixedRecordingSession, stopResult: MixedRecordingSession) {
         self.startResult = startResult
         self.stopResult = stopResult
     }
 
+    func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async {
+        levelHandler = handler
+    }
+
     func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession {
         startCount += 1
+        levelHandler?(.localSpeaker, 0.25)
+        levelHandler?(.systemAudio, 0.75)
         return startResult
     }
 
@@ -5770,12 +5793,17 @@ private final class MockRecordingOverlay: RecordingOverlayPresenting {
     private(set) var presentations: [OverlayStatus] = []
     private(set) var hideCount = 0
     private(set) var previewStates: [LivePreviewState] = []
+    private(set) var meetingLevels: [(microphone: Float, systemAudio: Float)] = []
 
     func show(status: OverlayStatus, level: Float, reposition: Bool) {
         presentations.append(status)
     }
 
     func updateLevel(_ level: Float) {}
+
+    func updateMeetingLevels(microphone: Float, systemAudio: Float) {
+        meetingLevels.append((microphone, systemAudio))
+    }
 
     func updatePreview(_ state: LivePreviewState) { previewStates.append(state) }
 

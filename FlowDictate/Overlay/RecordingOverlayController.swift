@@ -53,6 +53,13 @@ nonisolated struct OverlayPreviewPresentation: Equatable, Sendable {
                 showsActivityIndicator: false
             )
         }
+        if source == .mixed {
+            return Self(
+                heading: "MEETING CAPTURE",
+                statusMessage: "Microphone and System Audio are being saved as separate original tracks.",
+                showsActivityIndicator: false
+            )
+        }
 
         return switch state {
         case .disabled:
@@ -92,6 +99,7 @@ nonisolated struct OverlayPreviewPresentation: Equatable, Sendable {
 protocol RecordingOverlayPresenting: AnyObject {
     func show(status: OverlayStatus, level: Float, reposition: Bool)
     func updateLevel(_ level: Float)
+    func updateMeetingLevels(microphone: Float, systemAudio: Float)
     func updatePreview(_ state: LivePreviewState)
     func updateSource(_ source: RecordingAudioSource)
     func configure(size: OverlaySize, position: OverlayPosition)
@@ -104,12 +112,16 @@ extension RecordingOverlayPresenting {
     }
 
     func updateSource(_ source: RecordingAudioSource) {}
+
+    func updateMeetingLevels(microphone: Float, systemAudio: Float) {}
 }
 
 @MainActor
 private final class RecordingOverlayModel: ObservableObject {
     @Published var status: OverlayStatus = .recording
     @Published var level: Float = 0
+    @Published var microphoneLevel: Float = 0
+    @Published var systemAudioLevel: Float = 0
     @Published var previewState: LivePreviewState = .disabled
     @Published var size: OverlaySize = .standard
     @Published var source: RecordingAudioSource = .microphone
@@ -172,6 +184,12 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         model.level = level
     }
 
+    func updateMeetingLevels(microphone: Float, systemAudio: Float) {
+        expireOverdueSuccessOverlayIfNeeded()
+        model.microphoneLevel = min(max(microphone, 0), 1)
+        model.systemAudioLevel = min(max(systemAudio, 0), 1)
+    }
+
     func updatePreview(_ state: LivePreviewState) {
         expireOverdueSuccessOverlayIfNeeded()
         model.previewState = state
@@ -196,6 +214,8 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         cancelSuccessHideTimer()
         panel?.orderOut(nil)
         model.level = 0
+        model.microphoneLevel = 0
+        model.systemAudioLevel = 0
         model.previewState = .disabled
     }
 
@@ -357,8 +377,17 @@ private struct RecordingOverlayView: View {
             statusHeader
             Spacer(minLength: 4)
             if model.status == .recording {
-                AudioBars(level: model.level, barCount: meterBars, height: 17)
-                    .frame(width: meterWidth)
+                if model.source == .mixed {
+                    MeetingAudioLevelMeters(
+                        microphone: model.microphoneLevel,
+                        systemAudio: model.systemAudioLevel,
+                        barCount: max(6, meterBars - 4)
+                    )
+                    .frame(width: meterWidth + 44)
+                } else {
+                    AudioBars(level: model.level, barCount: meterBars, height: 17)
+                        .frame(width: meterWidth)
+                }
             } else {
                 secondaryStatusContent
             }
@@ -380,7 +409,9 @@ private struct RecordingOverlayView: View {
                     .padding(.vertical, 3)
                     .background(statusColor.opacity(0.12), in: Capsule())
             }
-            if model.status == .recording, model.size != .compact {
+            if model.status == .recording,
+               model.size != .compact,
+               model.source != .mixed {
                 Label(model.source.shortTitle, systemImage: model.source.symbolName)
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.white.opacity(0.54))
@@ -467,7 +498,7 @@ private struct RecordingOverlayView: View {
                     .foregroundStyle(Color.white.opacity(0.46))
             }
 
-            if model.source == .systemAudio {
+            if model.source == .systemAudio || model.source == .mixed {
                 Text(presentation.statusMessage ?? "The transcript is created after recording stops.")
                     .foregroundStyle(Color.white.opacity(0.66))
                     .lineLimit(model.size == .expanded ? 4 : 3)
@@ -532,6 +563,48 @@ private struct RecordingOverlayView: View {
         Color(red: 0.82, green: 0.84, blue: 0.86)
     }
 
+}
+
+private struct MeetingAudioLevelMeters: View {
+    let microphone: Float
+    let systemAudio: Float
+    let barCount: Int
+
+    var body: some View {
+        VStack(spacing: 3) {
+            meterRow(
+                title: "Mic",
+                symbol: "mic.fill",
+                level: microphone,
+                accessibilityName: "Microphone"
+            )
+            meterRow(
+                title: "System",
+                symbol: "speaker.wave.2.fill",
+                level: systemAudio,
+                accessibilityName: "System Audio"
+            )
+        }
+    }
+
+    private func meterRow(
+        title: String,
+        symbol: String,
+        level: Float,
+        accessibilityName: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 8, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.66))
+                .lineLimit(1)
+                .frame(width: 48, alignment: .leading)
+            AudioBars(level: level, barCount: barCount, height: 10)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(accessibilityName) level")
+        .accessibilityValue("\(Int((min(max(level, 0), 1) * 100).rounded())) percent")
+    }
 }
 
 private struct AudioBars: View {

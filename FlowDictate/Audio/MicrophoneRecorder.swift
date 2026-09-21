@@ -30,6 +30,15 @@ enum AudioRecorderError: LocalizedError {
 }
 
 enum AudioLevelMeter {
+    nonisolated static func normalizedRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channel = buffer.floatChannelData?[0] else { return 0 }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return 0 }
+        return normalizedRMS(
+            UnsafeBufferPointer(start: channel, count: frameCount)
+        )
+    }
+
     nonisolated static func normalizedRMS(_ samples: UnsafeBufferPointer<Float>) -> Float {
         guard !samples.isEmpty else { return 0 }
         var sum: Double = 0
