@@ -26,6 +26,23 @@ nonisolated struct TrackTranscriptionOutput: Sendable, Equatable {
     var modelID: String
     var segmentCount: Int
     var completedSegmentCount: Int
+    var timedEntries: [TrackTranscriptEntry]?
+
+    init(
+        transcript: String,
+        providerID: String,
+        modelID: String,
+        segmentCount: Int,
+        completedSegmentCount: Int,
+        timedEntries: [TrackTranscriptEntry]? = nil
+    ) {
+        self.transcript = transcript
+        self.providerID = providerID
+        self.modelID = modelID
+        self.segmentCount = segmentCount
+        self.completedSegmentCount = completedSegmentCount
+        self.timedEntries = timedEntries
+    }
 }
 
 nonisolated protocol TrackTranscriptionExecuting: Sendable {
@@ -64,6 +81,9 @@ nonisolated struct MeetingTrackTranscript: Codable, Sendable, Equatable {
     var transcript: String
     var segmentCount: Int
     var completedSegmentCount: Int
+    /// Optional provider/segment timing. Older 4.1 development artifacts decode
+    /// without it and safely fall back to one track-wide chunk.
+    var timedEntries: [TrackTranscriptEntry]?
     var createdAt: Date
 
     func validated() throws -> Self {
@@ -74,6 +94,20 @@ nonisolated struct MeetingTrackTranscript: Codable, Sendable, Equatable {
               segmentCount > 0,
               completedSegmentCount == segmentCount else {
             throw TrackTranscriptionRunnerError.invalidOutput(role)
+        }
+        if let timedEntries {
+            for (offset, entry) in timedEntries.enumerated() {
+                guard entry.index == offset,
+                      entry.startMilliseconds >= 0,
+                      entry.endMilliseconds > entry.startMilliseconds,
+                      !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw TrackTranscriptionRunnerError.invalidOutput(role)
+                }
+                if offset > 0,
+                   entry.startMilliseconds < timedEntries[offset - 1].startMilliseconds {
+                    throw TrackTranscriptionRunnerError.invalidOutput(role)
+                }
+            }
         }
         return self
     }
@@ -222,6 +256,7 @@ actor TrackTranscriptionRunner {
                     transcript: output.transcript,
                     segmentCount: output.segmentCount,
                     completedSegmentCount: output.completedSegmentCount,
+                    timedEntries: output.timedEntries,
                     createdAt: max(now(), session.updatedAt)
                 ).validated()
                 let relativePath = Self.transcriptRelativePath(for: role)

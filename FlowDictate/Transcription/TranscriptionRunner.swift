@@ -24,6 +24,7 @@ final class TranscriptionRunner {
     private let historyStore: DictationHistoryStore
     private let sleeper: Sleeper
     private let longFormRunner: LongFormTranscriptionRunner
+    private(set) var latestTimedUnits: [TranscriptionTimedUnit] = []
 
     init(
         historyStore: DictationHistoryStore,
@@ -50,6 +51,7 @@ final class TranscriptionRunner {
         deferSuccessfulPersistence: Bool = false,
         progress: @escaping @MainActor (LongFormProgress) -> Void = { _ in }
     ) async throws -> DictationRecord {
+        latestTimedUnits = []
         if let result = try await longFormRunner.runIfNeeded(
             record: record,
             audioURL: audioURL,
@@ -97,6 +99,7 @@ final class TranscriptionRunner {
                 throw TranscriptionRunFailure(underlyingError: error, record: updated)
             }
 
+            latestTimedUnits = result.timedUnits
             updated.status = .transcribed
             updated.originalTranscript = result.text
             updated.finalText = result.text

@@ -715,6 +715,7 @@ struct FlowDictateTests {
         var session = makeValidMixedRecordingSession()
         session.status = .completed
         session.finalTranscript = "[You] Hello\n[System Audio] Hi"
+        session.mergedTimelineRelativePath = "transcription/merged-timeline.json"
         session.completionMode = .allTracks
         session.tracks[0].status = .transcribed
         session.tracks[0].transcriptionSessionID = UUID()
@@ -1224,6 +1225,33 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func localTrackProviderWordTimingReachesMeetingTranscriptArtifact() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTrackTiming-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let provider = TimedTrackTranscriptionProvider()
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { _ in provider }
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        let result = try await runner.run(sessionID: fixture.session.id)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for track in result.tracks {
+            let relativePath = try #require(track.transcriptRelativePath)
+            let artifact = try decoder.decode(
+                MeetingTrackTranscript.self,
+                from: Data(contentsOf: fixture.paths.sessionDirectory
+                    .appendingPathComponent(relativePath))
+            )
+            let entries = try #require(artifact.timedEntries)
+            #expect(entries.map(\.text) == ["Timed", "words."])
+            #expect(entries.map(\.precision) == [.word, .word])
+            #expect(entries.map(\.startMilliseconds) == [100, 400])
+        }
+    }
+
+    @MainActor
     @Test func twoTrackLongFormRestartSkipsSuccessfulSegmentsForLocalAndOpenAI() async throws {
         let scenarios: [(
             name: String,
@@ -1430,6 +1458,364 @@ struct FlowDictateTests {
         #expect(systemAudio.status == .finalized)
         #expect(resolutionCount == 1)
         #expect(try await queue.snapshot().totalActiveCount == 0)
+    }
+
+    @Test func timedTranscriptMergeOrdersSerialAndOverlappingSpeechDeterministically() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let microphone = makeMeetingTrackTranscript(
+            session: session,
+            role: .localSpeaker,
+            text: "Microphone first. Shared sentence.",
+            entries: [
+                TrackTranscriptEntry(
+                    index: 0,
+                    startMilliseconds: 100,
+                    endMilliseconds: 400,
+                    text: "Microphone first.",
+                    precision: .segment
+                ),
+                TrackTranscriptEntry(
+                    index: 1,
+                    startMilliseconds: 500,
+                    endMilliseconds: 800,
+                    text: "Shared sentence.",
+                    precision: .word
+                )
+            ]
+        )
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session,
+            role: .systemAudio,
+            text: "System overlap. Shared sentence.",
+            entries: [
+                TrackTranscriptEntry(
+                    index: 0,
+                    startMilliseconds: 190,
+                    endMilliseconds: 350,
+                    text: "System overlap.",
+                    precision: .segment
+                ),
+                TrackTranscriptEntry(
+                    index: 1,
+                    startMilliseconds: 490,
+                    endMilliseconds: 900,
+                    text: "Shared sentence.",
+                    precision: .word
+                )
+            ]
+        )
+
+        let first = try TimedTranscriptMerger().merge(
+            session: session,
+            transcripts: [systemAudio, microphone],
+            createdAt: session.updatedAt
+        )
+        let retry = try TimedTranscriptMerger().merge(
+            session: session,
+            transcripts: [microphone, systemAudio],
+            createdAt: session.updatedAt
+        )
+
+        #expect(first == retry)
+        #expect(first.entries.map(\.role) == [
+            .localSpeaker, .systemAudio, .localSpeaker, .systemAudio
+        ])
+        #expect(first.entries.map(\.sessionStartMilliseconds) == [100, 200, 500, 500])
+        #expect(first.entries[0].sessionEndMilliseconds == 400)
+        #expect(first.entries[1].sessionEndMilliseconds == 360)
+        #expect(first.entries[0].sessionEndMilliseconds
+            > first.entries[1].sessionStartMilliseconds)
+        #expect(first.entries.filter { $0.text == "Shared sentence." }.count == 2)
+        #expect(first.renderedText == """
+            [You] Microphone first.
+            [System Audio] System overlap.
+            [You] Shared sentence.
+            [System Audio] Shared sentence.
+            """)
+    }
+
+    @Test func timedTranscriptMergeFallsBackHonestlyAndMapsGapAndDrift() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        session.synchronization?.estimatedDriftPartsPerMillion = 1_000
+        let gap = TrackGap(
+            id: UUID(),
+            startMilliseconds: 1_000,
+            endMilliseconds: 1_100,
+            reason: .droppedBuffers
+        )
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+            if session.tracks[index].role == .localSpeaker {
+                session.tracks[index].gaps = [gap]
+            }
+        }
+        let microphone = makeMeetingTrackTranscript(
+            session: session,
+            role: .localSpeaker,
+            text: "Precise local words",
+            entries: [
+                TrackTranscriptEntry(
+                    index: 0,
+                    startMilliseconds: 2_000,
+                    endMilliseconds: 3_000,
+                    text: "Precise local words",
+                    precision: .word
+                )
+            ]
+        )
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session,
+            role: .systemAudio,
+            text: "Provider returned text without timestamps",
+            entries: nil
+        )
+
+        let timeline = try TimedTranscriptMerger().merge(
+            session: session,
+            transcripts: [microphone, systemAudio],
+            createdAt: session.updatedAt
+        )
+        let localEntry = try #require(
+            timeline.entries.first(where: { $0.role == .localSpeaker })
+        )
+        let fallback = try #require(
+            timeline.entries.first(where: { $0.role == .systemAudio })
+        )
+
+        #expect(localEntry.precision == .word)
+        #expect(localEntry.sessionStartMilliseconds == 2_102)
+        #expect(localEntry.sessionEndMilliseconds == 3_103)
+        #expect(fallback.precision == .trackChunk)
+        #expect(fallback.trackStartMilliseconds == 0)
+        #expect(fallback.trackEndMilliseconds == 10_000)
+        #expect(fallback.sessionStartMilliseconds == 10)
+    }
+
+    @Test func timedTranscriptMergeRejectsUnreliableSynchronization() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        session.synchronization?.quality = .unreliable
+        session.qualityReport?.synchronizationQuality = .unreliable
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let transcripts = RecordingTrackRole.allCases.map { role in
+            makeMeetingTrackTranscript(
+                session: session,
+                role: role,
+                text: "Must not merge",
+                entries: nil
+            )
+        }
+
+        #expect(throws: TimedTranscriptMergeError.unreliableSynchronization) {
+            _ = try TimedTranscriptMerger().merge(
+                session: session,
+                transcripts: transcripts,
+                createdAt: session.updatedAt
+            )
+        }
+    }
+
+    @Test func meetingTranscriptMergePersistsTimelineAndRecoversAfterArtifactFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateTimedMerge-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let paths = try await store.prepareSession(id: session.id)
+        try await store.create(session)
+        let microphone = makeMeetingTrackTranscript(
+            session: session,
+            role: .localSpeaker,
+            text: "One",
+            entries: [TrackTranscriptEntry(
+                index: 0,
+                startMilliseconds: 100,
+                endMilliseconds: 200,
+                text: "One",
+                precision: .segment
+            )]
+        )
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session,
+            role: .systemAudio,
+            text: "Two",
+            entries: [TrackTranscriptEntry(
+                index: 0,
+                startMilliseconds: 300,
+                endMilliseconds: 400,
+                text: "Two",
+                precision: .segment
+            )]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        for artifact in [microphone, systemAudio] {
+            let relativePath = try #require(
+                session.tracks.first(where: { $0.role == artifact.role })?.transcriptRelativePath
+            )
+            try encoder.encode(artifact).write(
+                to: paths.sessionDirectory.appendingPathComponent(relativePath),
+                options: .atomic
+            )
+        }
+        let systemURL = paths.sessionDirectory.appendingPathComponent(
+            try #require(session.tracks.first(where: { $0.role == .systemAudio })?.transcriptRelativePath)
+        )
+        let systemData = try Data(contentsOf: systemURL)
+        try Data("invalid transcript artifact".utf8).write(to: systemURL, options: .atomic)
+        let runner = MeetingTranscriptMergeRunner(
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_200) }
+        )
+
+        await #expect(throws: (any Error).self) {
+            _ = try await runner.run(sessionID: session.id)
+        }
+        let paused = try #require(try await store.load(sessionID: session.id))
+        #expect(paused.status == .paused)
+        #expect(paused.lastErrorCategory == .transcriptMerge)
+        #expect(paused.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(paused.tracks.allSatisfy { track in
+            guard let relativePath = track.transcriptRelativePath else { return false }
+            return FileManager.default.fileExists(
+                atPath: paths.sessionDirectory.appendingPathComponent(relativePath).path
+            )
+        })
+
+        try systemData.write(to: systemURL, options: .atomic)
+        let completed = try await runner.run(sessionID: session.id)
+        let timelineURL = paths.sessionDirectory.appendingPathComponent(
+            MeetingTranscriptMergeRunner.timelineRelativePath
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let timeline = try decoder.decode(
+            TimedTranscriptTimeline.self,
+            from: Data(contentsOf: timelineURL)
+        )
+
+        #expect(completed.status == .completed)
+        #expect(completed.completionMode == .allTracks)
+        #expect(completed.mergedTimelineRelativePath
+            == MeetingTranscriptMergeRunner.timelineRelativePath)
+        #expect(completed.finalTranscript == "[You] One\n[System Audio] Two")
+        #expect(timeline.meetingSessionID == session.id)
+        #expect(timeline.entries.map(\.text) == ["One", "Two"])
+        #expect(try Data(contentsOf: systemURL) == systemData)
+    }
+
+    @Test func meetingTranscriptInsertionGateAuthorizesExactlyOnce() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingInsertion-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.finalTranscript = "[You] Ready"
+        session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        session.completionMode = .allTracks
+        session.transcriptInsertionState = .ready
+        session.transcriptInsertionAttemptCount = 0
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        try await store.create(session)
+        let gate = MeetingTranscriptInsertionGate(store: store)
+
+        #expect(try await gate.begin(sessionID: session.id, targetIsAvailable: true)
+            == .authorized("[You] Ready"))
+        #expect(try await store.load(sessionID: session.id)?.transcriptInsertionState
+            == .attempting)
+        try await gate.markCompleted(sessionID: session.id)
+        #expect(try await gate.begin(sessionID: session.id, targetIsAvailable: true)
+            == .alreadyCompleted)
+        let completed = try #require(try await store.load(sessionID: session.id))
+        #expect(completed.transcriptInsertionState == .completed)
+        #expect(completed.transcriptInsertionAttemptCount == 1)
+    }
+
+    @Test func meetingTranscriptInsertionGateDefersUnavailableAndUncertainTargets() async throws {
+        func completedSession(id: UUID) -> MixedRecordingSession {
+            var session = makeValidMixedRecordingSession()
+            session.id = id
+            session.recordID = UUID()
+            session.status = .completed
+            session.finalTranscript = "[System Audio] Deferred"
+            session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+            session.completionMode = .allTracks
+            session.transcriptInsertionState = .ready
+            session.transcriptInsertionAttemptCount = 0
+            for index in session.tracks.indices {
+                session.tracks[index].id = UUID()
+                session.tracks[index].status = .transcribed
+                session.tracks[index].transcriptionSessionID = UUID()
+                session.tracks[index].transcriptRelativePath =
+                    "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+            }
+            return session
+        }
+
+        let unavailableRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingDeferred-\(UUID())", isDirectory: true)
+        let uncertainRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingUnknown-\(UUID())", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: unavailableRoot)
+            try? FileManager.default.removeItem(at: uncertainRoot)
+        }
+        let unavailableStore = MeetingSessionStore(rootURL: unavailableRoot)
+        let unavailable = completedSession(id: UUID())
+        try await unavailableStore.create(unavailable)
+        let unavailableGate = MeetingTranscriptInsertionGate(store: unavailableStore)
+        #expect(try await unavailableGate.begin(
+            sessionID: unavailable.id,
+            targetIsAvailable: false
+        ) == .deferred)
+        #expect(try await unavailableStore.load(sessionID: unavailable.id)?
+            .transcriptInsertionState == .deferred)
+
+        let uncertainStore = MeetingSessionStore(rootURL: uncertainRoot)
+        let uncertain = completedSession(id: UUID())
+        try await uncertainStore.create(uncertain)
+        let firstProcess = MeetingTranscriptInsertionGate(store: uncertainStore)
+        #expect(try await firstProcess.begin(
+            sessionID: uncertain.id,
+            targetIsAvailable: true
+        ) == .authorized("[System Audio] Deferred"))
+        let restartedProcess = MeetingTranscriptInsertionGate(store: uncertainStore)
+        #expect(try await restartedProcess.begin(
+            sessionID: uncertain.id,
+            targetIsAvailable: true
+        ) == .requiresReview)
+        let recovered = try #require(try await uncertainStore.load(sessionID: uncertain.id))
+        #expect(recovered.transcriptInsertionState == .unknown)
+        #expect(recovered.transcriptInsertionAttemptCount == 1)
     }
 
     @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
@@ -4301,6 +4687,30 @@ struct FlowDictateTests {
         return peakIndex
     }
 
+    private func makeMeetingTrackTranscript(
+        session: MixedRecordingSession,
+        role: RecordingTrackRole,
+        text: String,
+        entries: [TrackTranscriptEntry]?
+    ) -> MeetingTrackTranscript {
+        let track = session.tracks.first { $0.role == role }!
+        return MeetingTrackTranscript(
+            schemaVersion: MeetingTrackTranscript.currentSchemaVersion,
+            meetingSessionID: session.id,
+            trackID: track.id,
+            role: role,
+            transcriptionSessionID: track.transcriptionSessionID!,
+            providerID: session.providerID,
+            modelID: session.modelID,
+            language: session.language,
+            transcript: text,
+            segmentCount: max(entries?.count ?? 1, 1),
+            completedSegmentCount: max(entries?.count ?? 1, 1),
+            timedEntries: entries,
+            createdAt: session.updatedAt
+        )
+    }
+
     private func makeValidMixedRecordingSession() -> MixedRecordingSession {
         let createdAt = Date(timeIntervalSince1970: 1_800_000_000)
         let baseQuality = TrackQualityMetrics(
@@ -4433,6 +4843,31 @@ private actor TrackProviderResolverProbe {
     func resolve(_ request: TrackTranscriptionRequest) -> any TranscriptionProvider {
         resolveCount += 1
         return provider
+    }
+}
+
+private nonisolated final class TimedTrackTranscriptionProvider: TranscriptionProvider,
+    @unchecked Sendable {
+    func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResult {
+        TranscriptionResult(
+            text: "Timed words.",
+            provider: TranscriptionProviderID.local.rawValue,
+            model: "timed-local-test",
+            timedUnits: [
+                TranscriptionTimedUnit(
+                    text: "Timed",
+                    startMilliseconds: 100,
+                    endMilliseconds: 300,
+                    precision: .word
+                ),
+                TranscriptionTimedUnit(
+                    text: "words.",
+                    startMilliseconds: 400,
+                    endMilliseconds: 700,
+                    precision: .word
+                )
+            ]
+        )
     }
 }
 

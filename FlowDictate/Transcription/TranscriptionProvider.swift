@@ -12,10 +12,36 @@ nonisolated struct TranscriptionRequest: Sendable {
     }
 }
 
+nonisolated enum TranscriptTimestampPrecision: String, Codable, Sendable, Equatable {
+    case word
+    case segment
+    case trackChunk
+}
+
+nonisolated struct TranscriptionTimedUnit: Equatable, Sendable {
+    let text: String
+    let startMilliseconds: Int64
+    let endMilliseconds: Int64
+    let precision: TranscriptTimestampPrecision
+}
+
 nonisolated struct TranscriptionResult: Equatable, Sendable {
     let text: String
     let provider: String
     let model: String
+    let timedUnits: [TranscriptionTimedUnit]
+
+    init(
+        text: String,
+        provider: String,
+        model: String,
+        timedUnits: [TranscriptionTimedUnit] = []
+    ) {
+        self.text = text
+        self.provider = provider
+        self.model = model
+        self.timedUnits = timedUnits
+    }
 }
 
 nonisolated protocol TranscriptionProvider: Sendable {

@@ -80,7 +80,12 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
             maximumAttempts: maximumAttempts,
             provider: provider
         )
-        return try output(from: completed, role: request.role)
+        return try output(
+            from: completed,
+            role: request.role,
+            durationMilliseconds: request.durationMilliseconds,
+            timedUnits: runner.latestTimedUnits
+        )
     }
 
     private func makeRecord(_ request: TrackTranscriptionRequest) -> DictationRecord {
@@ -109,7 +114,9 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
 
     private func output(
         from record: DictationRecord,
-        role: RecordingTrackRole
+        role: RecordingTrackRole,
+        durationMilliseconds: Int64? = nil,
+        timedUnits: [TranscriptionTimedUnit] = []
     ) throws -> TrackTranscriptionOutput {
         guard let transcript = record.originalTranscript,
               !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -119,12 +126,36 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
         let completedSegmentCount = record.transcriptionSegmentCount == nil
             ? 1
             : record.completedTranscriptionSegmentCount
+        let timedEntries: [TrackTranscriptEntry]?
+        if record.transcriptionSegmentCount == nil,
+           let durationMilliseconds,
+           !timedUnits.isEmpty {
+            let valid = timedUnits.enumerated().compactMap { index, unit -> TrackTranscriptEntry? in
+                guard unit.startMilliseconds >= 0,
+                      unit.endMilliseconds > unit.startMilliseconds,
+                      unit.endMilliseconds <= durationMilliseconds,
+                      !unit.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return TrackTranscriptEntry(
+                    index: index,
+                    startMilliseconds: unit.startMilliseconds,
+                    endMilliseconds: unit.endMilliseconds,
+                    text: unit.text,
+                    precision: unit.precision
+                )
+            }
+            timedEntries = valid.count == timedUnits.count ? valid : nil
+        } else {
+            timedEntries = nil
+        }
         return TrackTranscriptionOutput(
             transcript: transcript,
             providerID: record.providerID,
             modelID: record.modelID,
             segmentCount: segmentCount,
-            completedSegmentCount: completedSegmentCount
+            completedSegmentCount: completedSegmentCount,
+            timedEntries: timedEntries
         )
     }
 }

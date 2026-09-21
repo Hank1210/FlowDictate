@@ -114,6 +114,14 @@ nonisolated enum MeetingCompletionMode: Codable, Sendable, Equatable {
     case acceptedSingleTrack(RecordingTrackRole)
 }
 
+nonisolated enum MeetingTranscriptInsertionState: String, Codable, Sendable, Equatable {
+    case ready
+    case attempting
+    case completed
+    case deferred
+    case unknown
+}
+
 nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifiable {
     static let currentSchemaVersion = 1
 
@@ -137,6 +145,9 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
     var completionMode: MeetingCompletionMode?
     var mergedTimelineRelativePath: String?
     var finalTranscript: String?
+    /// Optional for manifests created before the timed-merge implementation.
+    var transcriptInsertionState: MeetingTranscriptInsertionState? = nil
+    var transcriptInsertionAttemptCount: Int? = nil
     var lastErrorCategory: DictationErrorCategory?
     var lastErrorMessage: String?
 
@@ -203,6 +214,19 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
                 throw MixedRecordingSessionValidationError.invalidQualityReport
             }
         }
+        if let transcriptInsertionAttemptCount {
+            guard transcriptInsertionAttemptCount >= 0 else {
+                throw MixedRecordingSessionValidationError.invalidInsertionState
+            }
+        }
+        if transcriptInsertionState == .completed,
+           transcriptInsertionAttemptCount != 1 {
+            throw MixedRecordingSessionValidationError.invalidInsertionState
+        }
+        if transcriptInsertionState == .attempting,
+           transcriptInsertionAttemptCount != 1 {
+            throw MixedRecordingSessionValidationError.invalidInsertionState
+        }
 
         let originalPaths = tracks.compactMap(\.audioRelativePath)
         guard Set(originalPaths).count == originalPaths.count else {
@@ -210,6 +234,9 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
         }
         if let mergedTimelineRelativePath {
             try validate(relativePath: mergedTimelineRelativePath)
+            guard mergedTimelineRelativePath.hasPrefix("transcription/") else {
+                throw MixedRecordingSessionValidationError.invalidMergedTimelinePath
+            }
             guard !originalPaths.contains(mergedTimelineRelativePath) else {
                 throw MixedRecordingSessionValidationError.derivedPathOverwritesOriginal
             }
@@ -221,6 +248,7 @@ nonisolated struct MixedRecordingSession: Codable, Sendable, Equatable, Identifi
         }
         if status == .completed {
             guard finalTranscript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                  mergedTimelineRelativePath != nil,
                   let completionMode else {
                 throw MixedRecordingSessionValidationError.invalidCompletion
             }
@@ -336,6 +364,8 @@ nonisolated enum MixedRecordingSessionValidationError: LocalizedError, Equatable
     case missingFinalizedTrackMetadata(RecordingTrackRole)
     case missingTranscriptMetadata(RecordingTrackRole)
     case invalidTranscriptPath(RecordingTrackRole)
+    case invalidMergedTimelinePath
+    case invalidInsertionState
     case invalidSynchronizationReport
     case invalidQualityReport
     case unsafeRelativePath(String)
@@ -367,6 +397,10 @@ nonisolated enum MixedRecordingSessionValidationError: LocalizedError, Equatable
             "The transcribed \(role.rawValue) track is missing its transcript metadata."
         case let .invalidTranscriptPath(role):
             "The \(role.rawValue) transcript must be stored in the meeting transcription directory."
+        case .invalidMergedTimelinePath:
+            "The merged meeting timeline must be stored in the meeting transcription directory."
+        case .invalidInsertionState:
+            "The meeting transcript insertion state is invalid."
         case .invalidSynchronizationReport:
             "The meeting session contains invalid synchronization metrics."
         case .invalidQualityReport:

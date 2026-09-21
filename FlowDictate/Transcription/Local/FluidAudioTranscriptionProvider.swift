@@ -47,10 +47,24 @@ actor FluidAudioTranscriptionProvider: TranscriptionProvider {
         }
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw TranscriptionProviderError.emptyTranscript }
+        let timedUnits = buildWordTimings(from: result.tokenTimings ?? []).compactMap {
+            timing -> TranscriptionTimedUnit? in
+            let word = timing.word.trimmingCharacters(in: .whitespacesAndNewlines)
+            let start = Int64((timing.startTime * 1_000).rounded())
+            let end = Int64((timing.endTime * 1_000).rounded())
+            guard !word.isEmpty, start >= 0, end > start else { return nil }
+            return TranscriptionTimedUnit(
+                text: word,
+                startMilliseconds: start,
+                endMilliseconds: end,
+                precision: .word
+            )
+        }
         return TranscriptionResult(
             text: text,
             provider: TranscriptionProviderID.local.rawValue,
-            model: modelID
+            model: modelID,
+            timedUnits: timedUnits
         )
         #else
         throw TranscriptionProviderError.providerUnavailable(

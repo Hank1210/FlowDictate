@@ -1,8 +1,8 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Derived Tracks und Track-Processing abgeschlossen, zeitbasierter Merge als nächster Schritt
-**Stand:** 17. September 2026
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing und zeitbasierter Merge abgeschlossen, vollständige UX und History als nächster Schritt
+**Stand:** 21. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
 **Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
@@ -104,18 +104,14 @@ Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
 ### 4.3 Noch nicht implementiert
 
-- simultaner Capture beider Quellen,
-- Captureentscheidung Audio-Tap versus ScreenCaptureKit,
-- gemeinsame Startbarriere und Stop-/Cancel-Orchestrierung,
-- periodische monotone Sampleanker,
-- Gap-, Drift- und Clippinganalyse aus realem Capture,
-- Dual-Level-Overlay,
-- Tracktranskription und persistierter Trackfortschritt,
-- zeitbasierter Transcript-Merge,
+- produktive Hotkey-Anbindung des vollständigen Mixed-Workflows,
+- Dual-Level-Overlay und Warnzustände während echter Mixed-Aufnahmen,
 - Historyschema 7 und Meeting-Detailansicht,
-- reale Langzeit-, Performance- und Recoverynachweise für vollständige Mixed Sessions.
+- Resume-, Retry-, Copy-, Export- und Delete-Aktionen in der Nutzeroberfläche,
+- Migration und Retention für sichtbare Meeting-History,
+- reale Langzeit-, Performance- und Recoverynachweise für vollständige End-to-End-Sessions.
 
-Die sichtbare Auswahl `.mixed` ist deshalb derzeit kein Versprechen funktionierender Aufnahme: Der Coordinator bricht den Start absichtlich mit `captureNotAvailable` ab.
+Der Capture-, Synchronisierungs-, Track-Processing- und Merge-Unterbau ist vorhanden. Die sichtbare Auswahl `.mixed` bleibt für normale Diktation trotzdem technisch gesperrt, bis Schritt 4.1.6 den vollständigen Nutzerablauf, Statusdarstellung und Recoveryzugang integriert.
 
 ## 5. Zielarchitektur und Abhängigkeiten
 
@@ -153,7 +149,7 @@ Recording Source / Consent / Permission Preflight
 | 4.1.2 Dual-Capture-Coordinator | `ERLEDIGT` | Spike-Go | echte Mixed-Aufnahme |
 | 4.1.3 Timeline, Sync und Qualität | `ERLEDIGT` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `ERLEDIGT` | finale Trackverträge | recoverbare Transkripte |
-| 4.1.5 Timed Merge | `OFFEN` | Tracktranskripte + Sync | Meeting-Timeline |
+| 4.1.5 Timed Merge | `ERLEDIGT` | Tracktranskripte + Sync | Meeting-Timeline |
 | 4.1.6 UX, History und Migration | `OFFEN` | stabile Zustände | vollständiger Nutzerablauf |
 | 4.1.7 Hardening und Langzeittests | `OFFEN` | End-to-End-Pfad | Releasekandidat |
 | 4.1.8 Dokumentation und Release-Gate | `OFFEN` | alle Gates grün | Freigabeentscheidung |
@@ -498,7 +494,15 @@ Beide Tracks einer mehrsegmentigen Testsession können lokal und über einen Ope
 
 ## 11. Schritt 4.1.5 – Zeitbasierter Transcript-Merge
 
-**Status:** `OFFEN`
+**Status:** `ERLEDIGT` – persistierte rollenmarkierte Timeline, ehrliche Zeitpräzision, deterministischer Merge, Recovery und Exactly-once-Insertion-Gate sind implementiert und vollständig regressionsgeprüft
+
+`TimedTranscriptMerger` bildet beide validierten Tracktranskripte über ihre monotone Startanker-, Gap- und Driftinformation auf eine gemeinsame Sessionzeit ab. Sortiert wird deterministisch nach Startzeit, Rolle und Quellindex; echte Überlappungen und identischer Text auf beiden Tracks bleiben erhalten. Eine automatische Zusammenführung wird bei fehlender oder unzuverlässiger Synchronisation abgewiesen. Das Ergebnis wird atomar als `transcription/merged-timeline.json` gespeichert, bevor die Session mit einem rollenmarkierten Finaltext abgeschlossen wird. Ein Mergefehler pausiert recoverbar und erhält beide Trackartefakte.
+
+Die Zeitgenauigkeit wird pro Eintrag explizit als `word`, `segment` oder `trackChunk` gespeichert. FluidAudio-Wortzeiten werden bei direkter lokaler Tracktranskription bis ins Meeting-Artefakt weitergereicht. Provider beziehungsweise Long-Form-Ergebnisse ohne belastbare Zeitmarken werden nicht künstlich präzisiert, sondern als ein Track-Chunk eingeordnet; die bereits bestehende Long-Form-Pipeline entfernt dabei ihre internen Segmentüberlappungen vor dem Merge.
+
+Das persistente `MeetingTranscriptInsertionGate` autorisiert eine automatische Einfügung höchstens einmal. Ein nicht verfügbares Ziel führt zu Deferred Insertion; ein Neustart nach bereits begonnenem, aber nicht sicher bestätigtem Einfügeversuch markiert den Zustand als unklar und verhindert eine mögliche Doppelinsertion. Die eigentliche UI-Anbindung dieses Gates gehört zu Schritt 4.1.6.
+
+Vollständige serielle Regression am 21. September 2026: 156/156 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Debug-Builds für `arm64` und `x86_64` waren erfolgreich. Die produktive Mixed-Hotkey-Freischaltung bleibt bis zur vollständigen UX- und History-Integration weiterhin gesperrt.
 
 ### 11.1 Voraussichtliche Dateien
 
