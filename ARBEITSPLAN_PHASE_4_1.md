@@ -549,6 +549,8 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Der 1.000-Record-Test enthält 100 Meetingzusammenfassungen. Debug-Builds für `arm64` und `x86_64` waren erfolgreich.
 
+**Zweiter Zwischenstand 21. September 2026:** Ein eigener `MeetingProcessingWorkflow` verbindet die bereits recoverbare Tracktranskription und den deterministischen Merge mit der Nutzer-History an dauerhaften Stufengrenzen. Fehler synchronisieren den zuletzt persistierten Manifestzustand, statt einen optimistischen UI-Status zu behaupten. Beim App-Start werden ausschließlich Sessions normalisiert, die bereits über eine Meetingreferenz mit der aktiven History verbunden sind. Dadurch bleiben der fünfsekündige Capture-Test und andere nicht verknüpfte Diagnosemanifeste weiterhin bewusst außerhalb der Nutzer-History. Ziel-App-Metadaten bleiben bei späteren Manifestupdates erhalten; kompakt archivierte Transkripte werden beim Neustart nicht aus dem Manifest rehydriert. Drei neue Tests sichern die vollständige Workflow-Synchronisierung, die Trennung zwischen produktiven und diagnostischen Sessions sowie die Archivgrenze. Vollständige serielle Regression: 161/161 Tests bestanden.
+
 ### 12.1 Recording Source und Start
 
 - `Microphone + System Audio` bleibt eine explizite dritte Recording Source.

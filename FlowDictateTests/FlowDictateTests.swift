@@ -1054,6 +1054,157 @@ struct FlowDictateTests {
         #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     }
 
+    @Test func meetingHistoryRecoveryUpdatesOnlyLinkedProductSessions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingHistoryRecovery-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionStore = MeetingSessionStore(
+            rootURL: directory.appendingPathComponent("MeetingSessions", isDirectory: true)
+        )
+        let historyStore = DictationHistoryStore(
+            fileURL: directory.appendingPathComponent("dictations.json")
+        )
+        let synchronizer = MeetingHistorySynchronizer(
+            sessionStore: sessionStore,
+            historyStore: historyStore
+        )
+
+        var linked = makeValidMixedRecordingSession()
+        linked.status = .recording
+        linked.tracks[0].status = .recording
+        linked.tracks[1].status = .recording
+        try await sessionStore.create(linked)
+        _ = try await synchronizer.sync(
+            linked,
+            targetBundleIdentifier: "com.example.Editor",
+            targetApplicationName: "Editor"
+        )
+
+        var diagnostic = makeValidMixedRecordingSession()
+        diagnostic.id = UUID()
+        diagnostic.recordID = UUID()
+        diagnostic.status = .recording
+        diagnostic.tracks[0].id = UUID()
+        diagnostic.tracks[1].id = UUID()
+        diagnostic.tracks[0].status = .recording
+        diagnostic.tracks[1].status = .recording
+        try await sessionStore.create(diagnostic)
+
+        let recoveryDate = linked.updatedAt.addingTimeInterval(30)
+        let recovered = try await synchronizer.recoverLinkedSessions(now: recoveryDate)
+        let restored = try #require(try await historyStore.record(id: linked.recordID))
+
+        #expect(recovered.count == 1)
+        #expect(restored.meetingSummary?.status == .paused)
+        #expect(restored.targetBundleIdentifier == "com.example.Editor")
+        #expect(restored.targetApplicationName == "Editor")
+        #expect(try await historyStore.record(id: diagnostic.recordID) == nil)
+        #expect(try await sessionStore.load(sessionID: diagnostic.id)?.status == .recording)
+    }
+
+    @Test func meetingProcessingWorkflowPublishesTranscriptionAndMergeBoundaries() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingWorkflow-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionStore = MeetingSessionStore(
+            rootURL: directory.appendingPathComponent("MeetingSessions", isDirectory: true)
+        )
+        let historyStore = DictationHistoryStore(
+            fileURL: directory.appendingPathComponent("dictations.json")
+        )
+        let synchronizer = MeetingHistorySynchronizer(
+            sessionStore: sessionStore,
+            historyStore: historyStore
+        )
+        var initial = makeValidMixedRecordingSession()
+        initial.status = .queued
+        try await sessionStore.create(initial)
+
+        var transcribed = initial
+        transcribed.status = .merging
+        transcribed.updatedAt = initial.updatedAt.addingTimeInterval(1)
+        for index in transcribed.tracks.indices {
+            transcribed.tracks[index].status = .transcribed
+            transcribed.tracks[index].transcriptionSessionID = UUID()
+            transcribed.tracks[index].transcriptRelativePath =
+                "transcription/\(transcribed.tracks[index].role.rawValue)-transcript.json"
+        }
+        var completed = transcribed
+        completed.status = .completed
+        completed.updatedAt = transcribed.updatedAt.addingTimeInterval(1)
+        completed.completionMode = .allTracks
+        completed.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        completed.finalTranscript = "[You] Hello\n[System Audio] Welcome"
+        completed.transcriptInsertionState = .ready
+        completed.transcriptInsertionAttemptCount = 0
+
+        let trackRunner = StubMeetingTrackRunner(result: transcribed)
+        let mergeRunner = StubMeetingMergeRunner(result: completed)
+        let workflow = MeetingProcessingWorkflow(
+            sessionStore: sessionStore,
+            trackRunner: trackRunner,
+            mergeRunner: mergeRunner,
+            historySynchronizer: synchronizer
+        )
+
+        let result = try await workflow.run(sessionID: initial.id)
+        let record = try #require(try await historyStore.record(id: initial.recordID))
+
+        #expect(result == completed)
+        #expect(await trackRunner.runCount == 1)
+        #expect(await mergeRunner.runCount == 1)
+        #expect(record.meetingSummary?.status == .completed)
+        #expect(record.meetingSummary?.insertionState == .ready)
+        #expect(record.finalText == completed.finalTranscript)
+    }
+
+    @Test func meetingHistorySyncDoesNotRehydrateArchivedTranscript() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingArchive-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionStore = MeetingSessionStore(
+            rootURL: directory.appendingPathComponent("MeetingSessions", isDirectory: true)
+        )
+        let historyStore = DictationHistoryStore(
+            fileURL: directory.appendingPathComponent("dictations.json")
+        )
+        let synchronizer = MeetingHistorySynchronizer(
+            sessionStore: sessionStore,
+            historyStore: historyStore
+        )
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.completionMode = .allTracks
+        session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        session.finalTranscript = "Private meeting timeline"
+        session.transcriptInsertionState = .completed
+        session.transcriptInsertionAttemptCount = 1
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        try await sessionStore.create(session)
+        _ = try await synchronizer.sync(
+            session,
+            targetBundleIdentifier: "com.example.Editor",
+            targetApplicationName: "Editor"
+        )
+        try await historyStore.archive(id: session.recordID)
+
+        _ = try await synchronizer.sync(session)
+        let archived = try #require(
+            try await historyStore.all(includeArchived: true).first
+        )
+
+        #expect(archived.archivedAt != nil)
+        #expect(archived.finalText == nil)
+        #expect(archived.originalTranscript == nil)
+        #expect(archived.targetBundleIdentifier == nil)
+        #expect(archived.targetApplicationName == nil)
+    }
+
     @Test func trackTranscriptionRunnerPersistsIndependentResultsAndFrozenConfiguration() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackTranscription-\(UUID())", isDirectory: true)
@@ -5190,6 +5341,34 @@ private actor MockMixedRecordingSessionCoordinator: MixedRecordingSessionCoordin
     func cancel() async throws -> MixedRecordingSession {
         cancelCount += 1
         return stopResult
+    }
+}
+
+private actor StubMeetingTrackRunner: MeetingTrackTranscriptionRunning {
+    private let result: MixedRecordingSession
+    private(set) var runCount = 0
+
+    init(result: MixedRecordingSession) {
+        self.result = result
+    }
+
+    func run(sessionID: UUID) async throws -> MixedRecordingSession {
+        runCount += 1
+        return result
+    }
+}
+
+private actor StubMeetingMergeRunner: MeetingTranscriptMerging {
+    private let result: MixedRecordingSession
+    private(set) var runCount = 0
+
+    init(result: MixedRecordingSession) {
+        self.result = result
+    }
+
+    func run(sessionID: UUID) async throws -> MixedRecordingSession {
+        runCount += 1
+        return result
     }
 }
 

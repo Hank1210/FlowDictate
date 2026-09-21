@@ -131,6 +131,8 @@ final class DictationCoordinator: ObservableObject {
     private let captureProbeArtifactStore = CaptureProbeArtifactStore()
     private let meetingRecordingConsentPresenter: any MeetingRecordingConsentPresenting
     private let coreAudioTapCaptureProbe = CoreAudioTapCaptureProbe()
+    private let meetingSessionStore: MeetingSessionStore
+    private let meetingHistorySynchronizer: MeetingHistorySynchronizer
     private let mixedRecordingCoordinatorFactory:
         @MainActor (AudioDeviceID?) -> any MixedRecordingSessionCoordinating
     private let mixedCaptureTestDuration: Duration
@@ -288,6 +290,14 @@ final class DictationCoordinator: ObservableObject {
         self.processActivityManager = processActivityManager ?? SystemProcessActivityManager()
         self.meetingRecordingConsentPresenter = meetingRecordingConsentPresenter
             ?? MeetingRecordingConsentWindowController()
+        let resolvedMeetingSessionStore = MeetingSessionStore(
+            recordingLocationStore: recordingLocationStore
+        )
+        meetingSessionStore = resolvedMeetingSessionStore
+        meetingHistorySynchronizer = MeetingHistorySynchronizer(
+            sessionStore: resolvedMeetingSessionStore,
+            historyStore: historyStore
+        )
         self.mixedRecordingCoordinatorFactory = mixedRecordingCoordinatorFactory
             ?? { inputDeviceID in
                 MixedRecordingSessionCoordinator(
@@ -295,9 +305,7 @@ final class DictationCoordinator: ObservableObject {
                         inputDeviceID: inputDeviceID
                     ),
                     systemAudioRecorder: SystemAudioTrackRecorder(),
-                    store: MeetingSessionStore(
-                        recordingLocationStore: recordingLocationStore
-                    )
+                    store: resolvedMeetingSessionStore
                 )
             }
         self.mixedCaptureTestDuration = mixedCaptureTestDuration
@@ -2107,6 +2115,7 @@ final class DictationCoordinator: ObservableObject {
         do {
             let recovered = try await historyStore.recoverInterrupted()
             await transcriptionRunner.recoverInterruptedLongFormSessions()
+            _ = try await meetingHistorySynchronizer.recoverLinkedSessions()
             for record in recovered
             where record.processingStatus == .notStarted
                 && record.enhancementErrorCategory == .interrupted
