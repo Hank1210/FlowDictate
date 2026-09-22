@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated protocol MeetingTrackTranscriptionRunning: Sendable {
     func run(sessionID: UUID) async throws -> MixedRecordingSession
@@ -37,6 +38,11 @@ actor MeetingHistorySynchronizer {
         targetBundleIdentifier: String? = nil,
         targetApplicationName: String? = nil
     ) async throws -> DictationRecord {
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Meeting History Persist", id: .exclusive,
+            "session: \(session.id.uuidString, privacy: .public), status: \(session.status.rawValue, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Meeting History Persist", signpost) }
         let existing = try await historyStore.record(id: session.recordID)
         // Completed archived rows are deliberately compact. A later startup
         // must not rehydrate transcript or target metadata from the manifest.
@@ -55,11 +61,27 @@ actor MeetingHistorySynchronizer {
         return record
     }
 
+    /// Refreshes visible snapshots before a user-requested retention pass,
+    /// without treating an active capture as interrupted work.
+    func syncLinkedSessions() async throws {
+        let linkedRecords = try await historyStore.all()
+            .filter { $0.meetingSummary != nil }
+        for record in linkedRecords {
+            guard let sessionID = record.meetingSummary?.sessionID,
+                  let session = try await sessionStore.load(sessionID: sessionID) else {
+                continue
+            }
+            _ = try await sync(session)
+        }
+    }
+
     /// Recovers only manifests already linked from History. This deliberately
     /// excludes capture probes and development diagnostics that also use the
     /// MeetingSessions directory but are not user dictations.
     @discardableResult
     func recoverLinkedSessions(now: Date = Date()) async throws -> [DictationRecord] {
+        let signpost = FlowLogger.meetingSignposter.beginInterval("Meeting Recovery")
+        defer { FlowLogger.meetingSignposter.endInterval("Meeting Recovery", signpost) }
         let linkedRecords = try await historyStore.all()
             .filter { $0.meetingSummary != nil }
         var recovered: [DictationRecord] = []

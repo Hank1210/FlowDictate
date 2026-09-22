@@ -153,6 +153,32 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         [.completed, .partial, .paused, .failed, .cancelled].contains(status)
     }
 
+    /// A completed timeline is still actionable until insertion is confirmed.
+    /// Keep its History row and originals available for review or retry.
+    var isAutomaticallyProtected: Bool {
+        switch status {
+        case .completed: insertionState != .completed
+        default: true
+        }
+    }
+
+    var canArchiveHistoryEntry: Bool {
+        !isAutomaticallyProtected
+    }
+
+    /// Keeps the content-free History summary after retention has removed the
+    /// completed session directory. Track state and quality remain useful,
+    /// while zero byte counts make the UI stop offering stale playback.
+    func withoutStoredSessionArtifacts() -> Self {
+        var copy = self
+        copy.tracks = copy.tracks.map { track in
+            var track = track
+            track.byteCount = 0
+            return track
+        }
+        return copy
+    }
+
     var captureWarningNotices: [String] {
         tracks.compactMap { track in
             if track.clippedFrameCount > 0 {

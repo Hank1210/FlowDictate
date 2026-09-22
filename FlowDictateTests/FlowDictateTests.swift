@@ -1175,6 +1175,45 @@ struct FlowDictateTests {
         #expect(try await sessionStore.load(sessionID: diagnostic.id)?.status == .recording)
     }
 
+    @Test func meetingHistoryRefreshUsesManifestWithoutInterruptingActiveCapture() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingHistoryRefresh-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionStore = MeetingSessionStore(
+            rootURL: directory.appendingPathComponent("MeetingSessions", isDirectory: true)
+        )
+        let historyStore = DictationHistoryStore(
+            fileURL: directory.appendingPathComponent("dictations.json")
+        )
+        let synchronizer = MeetingHistorySynchronizer(
+            sessionStore: sessionStore, historyStore: historyStore
+        )
+
+        var completed = makeCompletedMixedRecordingSession(insertionState: .completed)
+        try await sessionStore.create(completed)
+        _ = try await synchronizer.sync(completed)
+        completed.transcriptInsertionState = .deferred
+        try await sessionStore.save(completed)
+
+        var recording = makeValidMixedRecordingSession()
+        recording.id = UUID()
+        recording.recordID = UUID()
+        recording.status = .recording
+        for index in recording.tracks.indices {
+            recording.tracks[index].status = .recording
+        }
+        try await sessionStore.create(recording)
+        _ = try await synchronizer.sync(recording)
+
+        try await synchronizer.syncLinkedSessions()
+
+        #expect(try await historyStore.record(id: completed.recordID)?
+            .meetingSummary?.insertionState == .deferred)
+        #expect(try await historyStore.record(id: recording.recordID)?
+            .meetingSummary?.status == .recording)
+        #expect(try await sessionStore.load(sessionID: recording.id) == recording)
+    }
+
     @Test func interruptedMeetingCaptureRecoveryRepairsMetadataWithoutChangingOriginalTracks() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateInterruptedCapture-\(UUID())", isDirectory: true)
@@ -1340,6 +1379,7 @@ struct FlowDictateTests {
         #expect(archived.originalTranscript == nil)
         #expect(archived.targetBundleIdentifier == nil)
         #expect(archived.targetApplicationName == nil)
+        #expect(try await sessionStore.load(sessionID: session.id) == session)
     }
 
     @Test func trackTranscriptionRunnerPersistsIndependentResultsAndFrozenConfiguration() async throws {
@@ -2237,6 +2277,53 @@ struct FlowDictateTests {
         #expect(await systemAudio.receivedStartHostTime == requestedHostTime)
         #expect(await coordinator.state == .recording(request.sessionID))
         #expect(try await store.load(sessionID: request.sessionID) == session)
+    }
+
+    @Test func mixedCoordinatorCompletesTenConsecutiveSessionsWithoutReusingTracks() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedTenSessions-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(role: .localSpeaker, events: events),
+            systemAudioRecorder: MockMixedTrackRecorder(role: .systemAudio, events: events),
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            hostTime: { 50_000 }
+        )
+        var sessionIDs = Set<UUID>()
+        var recordIDs = Set<UUID>()
+
+        for _ in 0..<10 {
+            let request = MixedRecordingSessionRequest(
+                providerID: "local",
+                engineID: "fluid-audio",
+                modelID: "test-model",
+                language: nil
+            )
+            let started = try await coordinator.start(request)
+            #expect(started.status == .recording)
+            await #expect(throws: MixedRecordingCoordinatorError.alreadyActive) {
+                _ = try await coordinator.start(request)
+            }
+
+            let stopped = try await coordinator.stop()
+            #expect(stopped.status == .queued)
+            #expect(stopped.tracks.allSatisfy { $0.status == .finalized })
+            #expect(stopped.tracks.allSatisfy { $0.byteCount > 0 })
+            #expect(try await store.load(sessionID: request.sessionID) == stopped)
+            #expect(await coordinator.state == .idle)
+            await #expect(throws: MixedRecordingCoordinatorError.notRecording) {
+                _ = try await coordinator.stop()
+            }
+
+            sessionIDs.insert(request.sessionID)
+            recordIDs.insert(request.recordID)
+        }
+
+        #expect(sessionIDs.count == 10)
+        #expect(recordIDs.count == 10)
     }
 
     @Test func mixedCoordinatorForwardsTypedTrackWarnings() async {
@@ -4217,7 +4304,8 @@ struct FlowDictateTests {
         #expect(summary.tracks.map(\.role) == [.localSpeaker, .systemAudio])
         #expect(summary.synchronizationQuality == .good)
         #expect(summary.insertionState == .ready)
-        #expect(!restored.isAutomaticallyProtected)
+        #expect(restored.isAutomaticallyProtected)
+        #expect(!summary.canArchiveHistoryEntry)
     }
 
     @Test func phaseTwoHistoryWithoutArchivedAtStillDecodes() async throws {
@@ -4400,6 +4488,265 @@ struct FlowDictateTests {
         )
         #expect(result == HistoryRetentionResult())
         #expect(try await store.record(id: record.id) != nil)
+    }
+
+    @Test func historyRetentionProtectsPartialMeetingSessions() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingRetentionProtected-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = DictationHistoryStore(fileURL: fileURL)
+        var session = makeValidMixedRecordingSession()
+        session.status = .partial
+        session.lastErrorCategory = .network
+        session.lastErrorMessage = "System Audio transcription can be retried."
+        var record = try DictationRecord.meetingSession(session)
+        record.createdAt = Date(timeIntervalSince1970: 1)
+        try await store.upsert(record)
+
+        let result = try await store.applyRetention(
+            maximumAgeDays: 0,
+            maximumRecordCount: 0,
+            now: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+
+        #expect(result == HistoryRetentionResult())
+        #expect(try await store.all() == [record])
+        #expect(try await store.record(id: record.id)?.archivedAt == nil)
+    }
+
+    @Test func pendingMeetingInsertionCannotBeAutomaticallyOrManuallyArchived() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictatePendingMeetingArchive-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = DictationHistoryStore(fileURL: fileURL)
+        let states: [MeetingTranscriptInsertionState] = [
+            .ready, .attempting, .deferred, .unknown
+        ]
+        var records: [DictationRecord] = []
+        for state in states {
+            var session = makeCompletedMixedRecordingSession(insertionState: state)
+            session.id = UUID()
+            session.recordID = UUID()
+            session.createdAt = Date(timeIntervalSince1970: 1)
+            var record = try DictationRecord.meetingSession(session)
+            record.createdAt = session.createdAt
+            #expect(record.isAutomaticallyProtected)
+            #expect(record.meetingSummary?.canArchiveHistoryEntry == false)
+            try await store.upsert(record)
+            records.append(record)
+
+            await #expect(throws: DictationHistoryError.meetingRequiresAttention) {
+                try await store.archive(id: record.id)
+            }
+        }
+
+        var cancelled = makeValidMixedRecordingSession()
+        cancelled.id = UUID()
+        cancelled.recordID = UUID()
+        cancelled.status = .cancelled
+        var cancelledRecord = try DictationRecord.meetingSession(cancelled)
+        cancelledRecord.createdAt = Date(timeIntervalSince1970: 1)
+        #expect(cancelledRecord.isAutomaticallyProtected)
+        #expect(cancelledRecord.meetingSummary?.canArchiveHistoryEntry == false)
+        try await store.upsert(cancelledRecord)
+        records.append(cancelledRecord)
+        await #expect(throws: DictationHistoryError.meetingRequiresAttention) {
+            try await store.archive(id: cancelledRecord.id)
+        }
+
+        let result = try await store.applyRetention(
+            maximumAgeDays: 0,
+            maximumRecordCount: 0,
+            now: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+        #expect(result == HistoryRetentionResult())
+        #expect(Set(try await store.all().map(\.id)) == Set(records.map(\.id)))
+    }
+
+    @MainActor
+    @Test func meetingAudioRetentionPreservesPendingInsertionOriginals() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.coordinator.settings.audioRetentionDays = 30
+        let store = MeetingSessionStore(
+            recordingLocationStore: harness.recordingLocationStore
+        )
+        let states: [MeetingTranscriptInsertionState] = [
+            .ready, .attempting, .deferred, .unknown
+        ]
+        var sessions: [(id: UUID, directory: URL)] = []
+        for state in states {
+            var session = makeCompletedMixedRecordingSession(insertionState: state)
+            session.id = UUID()
+            session.recordID = UUID()
+            session.createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+            session.updatedAt = session.createdAt.addingTimeInterval(10)
+            let paths = try await store.prepareSession(id: session.id)
+            try await store.create(session)
+            try await harness.historyStore.upsert(
+                DictationRecord.meetingSession(session)
+            )
+            sessions.append((session.id, paths.sessionDirectory))
+        }
+
+        try await harness.coordinator.applyRetentionPolicy(
+            now: Date(timeIntervalSince1970: 1_810_000_000)
+        )
+
+        for session in sessions {
+            #expect(FileManager.default.fileExists(atPath: session.directory.path))
+            #expect(try await store.load(sessionID: session.id) != nil)
+        }
+        #expect(try await harness.historyStore.all().count == states.count)
+    }
+
+    @MainActor
+    @Test func meetingAudioRetentionTrustsManifestOverStaleHistorySummary() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.coordinator.settings.audioRetentionDays = 30
+        let store = MeetingSessionStore(
+            recordingLocationStore: harness.recordingLocationStore
+        )
+        var session = makeCompletedMixedRecordingSession(insertionState: .completed)
+        session.createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+        session.updatedAt = session.createdAt.addingTimeInterval(10)
+        let paths = try await store.prepareSession(id: session.id)
+        let originalURL = paths.tracksDirectory.appendingPathComponent("microphone.caf")
+        try Data("preserve original".utf8).write(to: originalURL)
+        try await store.create(session)
+        let staleRecord = try DictationRecord.meetingSession(session)
+        try await harness.historyStore.upsert(staleRecord)
+
+        session.transcriptInsertionState = .deferred
+        session.updatedAt = session.updatedAt.addingTimeInterval(1)
+        try await store.save(session)
+
+        try await harness.coordinator.applyRetentionPolicy(
+            now: session.createdAt.addingTimeInterval(100 * 86_400)
+        )
+
+        #expect(try Data(contentsOf: originalURL) == Data("preserve original".utf8))
+        #expect(try await store.load(sessionID: session.id) == session)
+        #expect(try await harness.historyStore.record(id: staleRecord.id)?.audioFileSize
+            == staleRecord.audioFileSize)
+    }
+
+    @Test func historyRetentionArchivesCompletedMeetingWithoutDeletingSessionReference() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingRetentionArchive-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let store = DictationHistoryStore(fileURL: fileURL)
+        var session = makeCompletedMixedRecordingSession(insertionState: .completed)
+        session.createdAt = Date(timeIntervalSince1970: 1)
+        session.updatedAt = Date(timeIntervalSince1970: 2)
+        var record = try DictationRecord.meetingSession(
+            session,
+            targetBundleIdentifier: "com.example.Editor",
+            targetApplicationName: "Editor"
+        )
+        record.createdAt = session.createdAt
+        try await store.upsert(record)
+
+        let result = try await store.applyRetention(
+            maximumAgeDays: 0,
+            maximumRecordCount: 0,
+            now: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+
+        #expect(result == HistoryRetentionResult(archivedCount: 1))
+        #expect(try await store.all().isEmpty)
+        let archived = try #require(try await store.all(includeArchived: true).first)
+        #expect(archived.archivedAt != nil)
+        #expect(archived.finalText == nil)
+        #expect(archived.targetBundleIdentifier == nil)
+        #expect(archived.meetingSummary?.sessionID == session.id)
+        #expect(archived.audioFileSize > 0)
+    }
+
+    @MainActor
+    @Test func meetingAudioRetentionRemovesAllSessionArtifactsAndKeepsVisibleTimeline() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.coordinator.settings.audioRetentionDays = 30
+        let store = MeetingSessionStore(
+            recordingLocationStore: harness.recordingLocationStore
+        )
+        var session = makeCompletedMixedRecordingSession(insertionState: .completed)
+        session.createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+        session.updatedAt = session.createdAt.addingTimeInterval(10)
+        let paths = try await store.prepareSession(id: session.id)
+        for track in session.tracks {
+            let relativePath = try #require(track.audioRelativePath)
+            try Data("original-\(track.role.rawValue)".utf8).write(
+                to: paths.sessionDirectory.appendingPathComponent(relativePath)
+            )
+            let transcriptPath = try #require(track.transcriptRelativePath)
+            try Data("track transcript".utf8).write(
+                to: paths.sessionDirectory.appendingPathComponent(transcriptPath)
+            )
+        }
+        try Data("derived".utf8).write(
+            to: paths.derivedDirectory.appendingPathComponent("aligned.m4a")
+        )
+        try Data("timeline".utf8).write(
+            to: paths.sessionDirectory.appendingPathComponent(
+                try #require(session.mergedTimelineRelativePath)
+            )
+        )
+        try await store.create(session)
+        let record = try DictationRecord.meetingSession(session)
+        try await harness.historyStore.upsert(record)
+
+        let retentionDate = session.createdAt.addingTimeInterval(100 * 86_400)
+        try await harness.coordinator.applyRetentionPolicy(now: retentionDate)
+
+        let retained = try #require(try await harness.historyStore.record(id: record.id))
+        #expect(retained.finalText == session.finalTranscript)
+        #expect(retained.audioFileSize == 0)
+        #expect(retained.meetingSummary?.tracks.allSatisfy { $0.byteCount == 0 } == true)
+        #expect(retained.meetingSummary?.tracks.allSatisfy { !$0.canPlayAudio } == true)
+        #expect(try await harness.historyStore.all().map(\.id) == [record.id])
+        #expect(!FileManager.default.fileExists(atPath: paths.sessionDirectory.path))
+        #expect(try await store.load(sessionID: session.id) == nil)
+    }
+
+    @MainActor
+    @Test func meetingAudioRetentionFinishesArchivedSessionLifecycle() async throws {
+        let harness = makeCoordinatorHarness()
+        harness.coordinator.settings.audioRetentionDays = 30
+        let store = MeetingSessionStore(
+            recordingLocationStore: harness.recordingLocationStore
+        )
+        var session = makeCompletedMixedRecordingSession(insertionState: .completed)
+        session.createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+        session.updatedAt = session.createdAt.addingTimeInterval(10)
+        let paths = try await store.prepareSession(id: session.id)
+        try Data("private derived content".utf8).write(
+            to: paths.derivedDirectory.appendingPathComponent("preview.m4a")
+        )
+        try await store.create(session)
+        let record = try DictationRecord.meetingSession(session)
+        try await harness.historyStore.upsert(record)
+        try await harness.historyStore.archive(id: record.id, now: session.updatedAt)
+
+        #expect(try await harness.historyStore.all().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: paths.sessionDirectory.path))
+
+        let retentionDate = session.createdAt.addingTimeInterval(100 * 86_400)
+        try await harness.coordinator.applyRetentionPolicy(now: retentionDate)
+
+        let retainedArchive = try #require(
+            try await harness.historyStore.record(id: record.id)
+        )
+        #expect(retainedArchive.archivedAt != nil)
+        #expect(retainedArchive.audioFileSize == 0)
+        #expect(!FileManager.default.fileExists(atPath: paths.sessionDirectory.path))
+
+        let purge = try await harness.historyStore.applyRetention(
+            maximumAgeDays: -1,
+            maximumRecordCount: -1,
+            now: retentionDate
+        )
+        #expect(purge.removedCount == 1)
+        #expect(try await harness.historyStore.record(id: record.id) == nil)
     }
 
     @Test func historyStoreHandlesOneThousandRecordsIncludingMeetingSummaries() async throws {
@@ -5719,6 +6066,28 @@ struct FlowDictateTests {
             lastErrorCategory: nil,
             lastErrorMessage: nil
         )
+    }
+
+    private func makeCompletedMixedRecordingSession(
+        insertionState: MeetingTranscriptInsertionState
+    ) -> MixedRecordingSession {
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.completionMode = .allTracks
+        session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        session.finalTranscript = "[You] Hello\n[System Audio] Welcome"
+        session.transcriptInsertionState = insertionState
+        session.transcriptInsertionAttemptCount = switch insertionState {
+        case .attempting, .completed: 1
+        case .ready, .deferred, .unknown: 0
+        }
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        return session
     }
 
     private func makeTranscribedRecord(text: String) -> DictationRecord {

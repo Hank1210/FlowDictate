@@ -1,7 +1,7 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing, Merge und die zentralen History-Aktionen abgeschlossen, Hardening in Vorbereitung
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing, Merge sowie UX, History und Retention abgeschlossen, Hardening in Arbeit
 **Stand:** 22. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
@@ -104,10 +104,9 @@ Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
 ### 4.3 Noch offen
 
-- vollständige Retention-Abnahme für sichtbare Meeting-History,
 - reale Langzeit-, Performance- und weitere Recoverynachweise für vollständige End-to-End-Sessions.
 
-Der produktive Mixed-Ablauf ist für Toggle und Press & Hold freigeschaltet. Dual-Level-Overlay, History-Synchronisierung, Restart-Resume, getrennte Originalspurwiedergabe sowie bestätigtes vollständiges Löschen sind implementiert und manuell abgenommen. Die verbleibenden Punkte schließen Schritt 4.1.6 und führen anschließend in das Hardening von Schritt 4.1.7.
+Der produktive Mixed-Ablauf ist für Toggle und Press & Hold freigeschaltet. Dual-Level-Overlay, History-Synchronisierung, Restart-Resume, getrennte Originalspurwiedergabe, bestätigtes vollständiges Löschen sowie Retention und Archivierung sind implementiert und abgenommen. Schritt 4.1.6 ist damit geschlossen; als Nächstes folgt das Hardening von Schritt 4.1.7.
 
 ## 5. Zielarchitektur und Abhängigkeiten
 
@@ -146,8 +145,8 @@ Recording Source / Consent / Permission Preflight
 | 4.1.3 Timeline, Sync und Qualität | `ERLEDIGT` | reale Trackanker | ausgerichtete Arbeitsdaten |
 | 4.1.4 Track-Processing und Recovery | `ERLEDIGT` | finale Trackverträge | recoverbare Transkripte |
 | 4.1.5 Timed Merge | `ERLEDIGT` | Tracktranskripte + Sync | Meeting-Timeline |
-| 4.1.6 UX, History und Migration | `IN ARBEIT` | stabile Zustände | vollständiger Nutzerablauf |
-| 4.1.7 Hardening und Langzeittests | `OFFEN` | End-to-End-Pfad | Releasekandidat |
+| 4.1.6 UX, History und Migration | `ERLEDIGT` | stabile Zustände | vollständiger Nutzerablauf |
+| 4.1.7 Hardening und Langzeittests | `IN ARBEIT` | End-to-End-Pfad | Releasekandidat |
 | 4.1.8 Dokumentation und Release-Gate | `OFFEN` | alle Gates grün | Freigabeentscheidung |
 
 ## 6. Schritt 4.1.0 – Grundlagen, Sessionstore und Consent
@@ -539,7 +538,7 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 ## 12. Schritt 4.1.6 – Vollständige UX, History und Migration
 
-**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad, Restart-Resume, Trackwiedergabe, bestätigtes Löschen, Partial-/Retry-UX und Warnzustände sind implementiert und abgenommen; die Retention-Abnahme bleibt offen
+**Status:** `ERLEDIGT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad, Restart-Resume, Trackwiedergabe, bestätigtes Löschen, Partial-/Retry-UX, Warnzustände sowie Retention und Archivierung sind implementiert und abgenommen
 
 **Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Restart-Resume ist im fünften Zwischenstand und die vollständige Trackwiedergabe-/Löschgrenze im sechsten Zwischenstand ergänzt.
 
@@ -558,6 +557,10 @@ Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 überspr
 **Siebter Zwischenstand 22. September 2026:** Die Partial-/Retry-UX unterscheidet jetzt eine partielle Transkription von einer partiellen Aufnahme. Nur bei mindestens einem bereits transkribierten und mindestens einem fehlgeschlagenen Track zeigt History `Partial transcription`, den Hinweis, dass fertige Trackarbeit erhalten bleibt, und die Aktion `Retry Failed Track`. Ein ausschließlich im Debug-Build vorhandener Einmal-Testschalter lässt den ersten Systemaudio-Transkriptionsversuch kontrolliert vor dem Provideraufruf scheitern; Release-Builds enthalten weder Schalter noch Beschriftung. Die reale Abnahme bestand: zunächst Mikrofon `Transcribed`, Systemaudio `Failed`, 1/2 Tracks fertig und keine Einfügung; nach Retry wurde ausschließlich Systemaudio verarbeitet, anschließend standen Session auf `Completed`, beide Tracks auf `Transcribed`, Completion Mode auf `allTracks`, Timeline vorhanden und Insertion auf `deferred`. Beide internen Trackjobs dokumentieren genau einen echten Provideraufruf. Eine 14-ms-Lücke im Systemaudio blieb korrekt als Qualitätswarnung sichtbar, bei 0 Clipping-Frames und trotzdem vollständigem Ergebnis. Zwei neue Tests sichern UX-Abgrenzung und Einmalfehler/Retry ohne Wiederholung der erfolgreichen Spur. Vollständige serielle Regression: 174/174 Tests bestanden; universelle Debug- und Release-Builds enthalten `x86_64 arm64`.
 
 **Achter Zwischenstand 22. September 2026:** Die produktiven Mikrofon-, Core-Audio- und ScreenCaptureKit-Recorder melden spurbezogene Clipping- und explizite Capturefehler an den Mixed-Coordinator. Das Recording-Overlay zeigt diese Warnungen dauerhaft mit orangefarbenem Symbol, Text und betroffener Spur, ohne die verbleibende Aufnahme oder den Erhalt der Originalspuren abzubrechen. Clipping und Trackverlust werden je Spur und Aufnahme nur einmal gemeldet; Writer-, Konvertierungs- und Streamfehler werden als Trackverlust sichtbar. History benennt Clipping und unvollständige Capturezustände ebenfalls ausdrücklich. Zwei ausschließlich im Debug-Build enthaltene Anzeigeaktionen erlauben die deterministische manuelle Overlay-Abnahme, ohne Audiodateien oder Manifestzustände künstlich zu verändern; der universelle Release-Build enthält weder Aktionen noch Beschriftungen. Die manuelle Abnahme bestand: Mikrofon-Clipping- und Systemaudio-Verlustwarnung waren gleichzeitig sichtbar, während beide Live-Pegel weiterliefen. Zwei neue Tests sichern die typisierte Warnweitergabe und die Historyhinweise bei Trackverlust und Clipping. Vollständige serielle Regression: 176/176 Tests bestanden; universeller Release-Build erfolgreich mit `x86_64 arm64`. Das Warn-UX-Gate ist damit abgeschlossen.
+
+**Neunter Zwischenstand 22. September 2026:** Retention und Archivierung der sichtbaren Meeting-History sind geschlossen. Die Prüfung fand eine falsche Einzeldatei-Annahme: Der synthetische Meeting-History-Pfad wurde zuvor über den normalen `Audio`-Store aufgelöst, sodass die Retention den Datensatz auf null Bytes setzen konnte, ohne den außerhalb dieses Ordners liegenden Sessionordner zu entfernen. Abgelaufene, vollständig abgeschlossene Meetings werden nun als eine UUID-begrenzte Retentionseinheit behandelt; Originalspuren, Derived Files, Tracktranskripte, Timeline und Manifest werden gemeinsam entfernt. Der sichtbare History-Eintrag und seine fertige Rollen-Timeline bleiben bis zum separaten History-Limit erhalten, während Track-Bytewerte auf null gesetzt und nicht mehr vorhandene Wiedergabe-/Finder-Aktionen deaktiviert werden. Partielle beziehungsweise recoverbare Meetings bleiben automatisch geschützt. Die explizite Aktion `Archive History Entry` bleibt nichtdestruktiv, entfernt private Text- und Zielmetadaten aus dem sichtbaren Verlauf, bewahrt aber Sessionreferenz und Dateien; ein späterer Manifest-Sync rehydriert den archivierten Text nicht. Erreicht die Audio-Retention später einen bereits archivierten Eintrag, entfernt sie dessen Sessionordner und der anschließend leere Tombstone wird kontrolliert verworfen. Vier neue Retentiontests und der erweiterte Archivtest sichern diese Grenzen. Vollständige serielle Regression: 180/180 Tests bestanden; universeller Debug-Build erfolgreich mit `x86_64 arm64`. Schritt 4.1.6 ist damit abgeschlossen.
+
+**Grenzfall-Nachtrag 22. September 2026:** Ein abgeschlossenes Meeting mit `ready`, `attempting`, `deferred`, `unknown` oder fehlendem Einfügungsstatus gilt weiterhin als recoverbar. Solche Einträge und ihre Originalspuren werden weder durch automatische History-/Audio-Retention entfernt noch manuell archiviert; die Aktion ist in History deaktiviert und der Store erzwingt dieselbe Regel. Auch abgebrochene Meetings mit bewahrten Originalspuren bleiben sichtbar: Die Audio-Retention für erfolgreiche Aufnahmen würde ihre Dateien sonst nach einer Archivierung nicht bereinigen. Nur bestätigte Einfügung (`completed`) erlaubt die Archivierung; vollständiges Löschen bleibt eine getrennte, bestätigte Aktion. Vor einer Audio-Löschung wird zusätzlich das autoritative Sessionmanifest auf Record-ID, Terminalstatus und bestätigte Einfügung geprüft, damit ein veralteter History-Snapshot keine inzwischen recoverbare Session löscht. Das manuelle Anwenden der Retention aktualisiert sichtbare History-Snapshots zuvor aus ihren Manifesten, ohne laufendes Capture als Unterbrechung zu normalisieren. Die nachträglichen Tests prüfen alle vier explizit offenen Einfügungszustände gegen beide Retentionpfade und die Archiv-API sowie den Schutz vor veralteter History.
 
 ### 12.1 Recording Source und Start
 
@@ -607,7 +610,7 @@ Ein Nutzer kann Quelle, Consent, Berechtigungen, Aufnahme, Verarbeitung, Teilfeh
 
 ## 13. Schritt 4.1.7 – Performance, Recovery und Langzeittests
 
-**Status:** `OFFEN`
+**Status:** `IN ARBEIT`
 
 ### 13.1 Signposts und inhaltsfreie Diagnostik
 
@@ -625,6 +628,8 @@ Mindestens:
 
 Logs enthalten nur IDs, Zustände, Zeiten, Größen und grobe Qualitätswerte; keine Texte, Audiopfade, App-/Fensternamen oder Teilnehmerdaten.
 
+**Zwischenstand 22. September 2026:** Inhaltsfreie OS-Signposts markieren Mixed-Session-Start/-Stop, Manifest- und Historypersistenz, Trackvorbereitung, erste/letzte Sampleanker, Trackverlust, Synchronisierung und verknüpfte Recovery. Sie enthalten ausschließlich Session-ID, Rolle, Status, Hostzeit, Größen und Qualitätszähler. Die übrigen Messpunkte aus 13.1 — insbesondere Preflight, Derived Rendering, Segmente und Merge — bleiben offen.
+
 ### 13.2 Verbindliche automatisierte Szenarien
 
 - zehn kurze Mixed Sessions hintereinander,
@@ -637,6 +642,8 @@ Logs enthalten nur IDs, Zustände, Zeiten, Größen und grobe Qualitätswerte; k
 - wenig Speicher vor Start und während Verarbeitung,
 - lokale Inferenzlast während Dual Capture,
 - 4.0-Queue-, Single-Track-, Preview- und Insertionregression.
+
+**Automatisierter Zwischenstand 22. September 2026:** Zehn aufeinanderfolgende Mixed Sessions mit getrennten Originalspuren, persistiertem Manifest und wiederholten Start-/Stop-Aufrufen sind als Regressionstest ergänzt. Zusammen mit den Retention-Grenzfällen: vollständige serielle Regression 185/185 bestanden, Universal-Debug-Build `arm64 x86_64` erfolgreich. Ein Bestehen ersetzt weder echte Capture-Last noch die übrigen Fehler-/Restartmatrizen.
 
 ### 13.3 Manuelle und private Langzeittests
 
@@ -798,7 +805,4 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen, Partial-/Retry sowie die Warnzustände für Trackverlust und Clipping sind manuell bestanden. Als Nächstes folgen:
-
-1. Retention und Archivierung sichtbarer Meeting-History vollständig prüfen,
-2. anschließend Schritt 4.1.7 mit produktiven Langzeit-, Performance- und Recovery-Gates beginnen.
+Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen, Partial-/Retry, Warnzustände für Trackverlust und Clipping sowie Retention und Archivierung sind bestanden. Schritt 4.1.7 läuft: Erste Signposts und der Zehn-Sessions-Test sind implementiert. Als Nächstes folgen die fehlenden Messpunkte, die automatisierten Fehler-/Restartmatrizen und die privaten realen Langzeit-/Performance-Gates. Bis dahin kein Releasekandidat.

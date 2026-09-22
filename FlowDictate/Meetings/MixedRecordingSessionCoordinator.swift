@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 nonisolated protocol MixedRecordingSessionStoring: Sendable {
     func prepareSession(id: UUID) async throws -> MeetingSessionPaths
@@ -225,6 +226,13 @@ actor MixedRecordingSessionCoordinator {
             )
         }
 
+        let signpostID = FlowLogger.meetingSignposter.makeSignpostID()
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Mixed Session Start", id: signpostID,
+            "session: \(request.sessionID.uuidString, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Mixed Session Start", signpost) }
+
         let operationID = UUID()
         activeOperationID = operationID
         state = .preparing(request.sessionID)
@@ -233,6 +241,10 @@ actor MixedRecordingSessionCoordinator {
             let paths = try await store.prepareSession(id: request.sessionID)
             var session = makePreparingSession(request: request)
             try await store.create(session)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Manifest Persisted", id: signpostID,
+                "status: \(session.status.rawValue, privacy: .public)"
+            )
             activeSession = session
 
             do {
@@ -249,6 +261,9 @@ actor MixedRecordingSessionCoordinator {
                 )
             }
             try ensureActive(operationID)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Track Prepared", id: signpostID, "role: microphone"
+            )
 
             do {
                 try await systemAudioRecorder.prepare(
@@ -264,6 +279,9 @@ actor MixedRecordingSessionCoordinator {
                 )
             }
             try ensureActive(operationID)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Track Prepared", id: signpostID, "role: system-audio"
+            )
 
             let requestedHostTime = hostTime()
             async let microphoneStart = Self.startOutcome(
@@ -305,9 +323,21 @@ actor MixedRecordingSessionCoordinator {
             }
             applyStart(microphoneResult, role: .localSpeaker, to: &session)
             applyStart(systemAudioResult, role: .systemAudio, to: &session)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting First Sample", id: signpostID,
+                "role: microphone, hostTime: \(microphoneResult.firstAnchor.hostTime)"
+            )
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting First Sample", id: signpostID,
+                "role: system-audio, hostTime: \(systemAudioResult.firstAnchor.hostTime)"
+            )
             session.status = .recording
             session.updatedAt = now()
             try await store.save(session)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Manifest Persisted", id: signpostID,
+                "status: \(session.status.rawValue, privacy: .public)"
+            )
             try ensureActive(operationID)
 
             activeSession = session
@@ -335,6 +365,12 @@ actor MixedRecordingSessionCoordinator {
             throw MixedRecordingCoordinatorError.notRecording
         }
         let operationID = try requireOperationID()
+        let signpostID = FlowLogger.meetingSignposter.makeSignpostID()
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Mixed Session Stop", id: signpostID,
+            "session: \(sessionID.uuidString, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Mixed Session Stop", signpost) }
         state = .finalizing(sessionID)
         session.status = .finalizing
         session.updatedAt = now()
@@ -347,9 +383,34 @@ actor MixedRecordingSessionCoordinator {
         let (microphoneOutcome, systemAudioOutcome) = await (microphoneStop, systemAudioStop)
         try ensureActive(operationID)
 
+        for (role, outcome) in [
+            (RecordingTrackRole.localSpeaker, microphoneOutcome),
+            (RecordingTrackRole.systemAudio, systemAudioOutcome)
+        ] {
+            switch outcome {
+            case let .success(result):
+                FlowLogger.meetingSignposter.emitEvent(
+                    "Meeting Last Sample", id: signpostID,
+                    "role: \(role.rawValue, privacy: .public), hostTime: \(result.lastHostTime), bytes: \(result.byteCount), gaps: \(result.gaps.count), dropped: \(result.quality.droppedBufferCount), clipped: \(result.quality.clippedFrameCount)"
+                )
+            case .failure:
+                FlowLogger.meetingSignposter.emitEvent(
+                    "Meeting Track Lost", id: signpostID,
+                    "role: \(role.rawValue, privacy: .public)"
+                )
+            }
+        }
+
         applyStop(microphoneOutcome, role: .localSpeaker, to: &session)
         applyStop(systemAudioOutcome, role: .systemAudio, to: &session)
+        let analysisSignpost = FlowLogger.meetingSignposter.beginInterval(
+            "Meeting Synchronization", id: signpostID
+        )
         applyAnalysis(to: &session)
+        FlowLogger.meetingSignposter.endInterval(
+            "Meeting Synchronization", analysisSignpost,
+            "quality: \(session.synchronization?.quality.rawValue ?? "not-analyzed", privacy: .public), gaps: \(session.qualityReport?.totalGapCount ?? 0)"
+        )
         let successfulTrackCount = [microphoneOutcome, systemAudioOutcome].reduce(0) {
             if case .success = $1 { $0 + 1 } else { $0 }
         }
@@ -363,6 +424,10 @@ actor MixedRecordingSessionCoordinator {
         }
         do {
             try await store.save(session)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Manifest Persisted", id: signpostID,
+                "status: \(session.status.rawValue, privacy: .public)"
+            )
             try ensureActive(operationID)
             activeOperationID = nil
             activeSession = nil
@@ -602,6 +667,10 @@ actor MixedRecordingSessionCoordinator {
             : .audioDevice
         session.lastErrorMessage = message
         try await store.save(session)
+        FlowLogger.meetingSignposter.emitEvent(
+            "Meeting Track Lost", id: .exclusive,
+            "role: \(role.rawValue, privacy: .public), phase: \(phase.rawValue, privacy: .public)"
+        )
         activeSession = session
         throw MixedRecordingCoordinatorError.trackFailed(
             role: role,

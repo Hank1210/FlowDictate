@@ -1,13 +1,16 @@
 import Foundation
 
-enum DictationHistoryError: LocalizedError {
+enum DictationHistoryError: LocalizedError, Equatable {
     case recordNotFound
+    case meetingRequiresAttention
     case unsupportedSchema(Int)
 
     var errorDescription: String? {
         switch self {
         case .recordNotFound:
             "The dictation history entry could not be found."
+        case .meetingRequiresAttention:
+            "Finish or review the meeting before archiving its History entry."
         case let .unsupportedSchema(schema):
             "The dictation history uses unsupported schema version \(schema)."
         }
@@ -100,6 +103,9 @@ actor DictationHistoryStore {
     func archive(id: UUID, now: Date = Date()) async throws {
         try await loadIfNeeded()
         guard var record = recordsByID[id] else { throw DictationHistoryError.recordNotFound }
+        if record.meetingSummary?.canArchiveHistoryEntry == false {
+            throw DictationHistoryError.meetingRequiresAttention
+        }
         compactForArchive(&record, now: now)
         recordsByID[id] = record
         try await persist()
@@ -121,7 +127,10 @@ actor DictationHistoryStore {
         // Archived records only keep the metadata needed to retain their audio.
         // Once that audio has gone, the tombstone is no longer needed either.
         let obsoleteArchiveIDs = recordsByID.values
-            .filter { $0.archivedAt != nil && $0.audioFileSize <= 0 }
+            .filter {
+                $0.archivedAt != nil && $0.audioFileSize <= 0
+                    && !$0.isAutomaticallyProtected
+            }
             .map(\.id)
         for id in obsoleteArchiveIDs {
             recordsByID.removeValue(forKey: id)

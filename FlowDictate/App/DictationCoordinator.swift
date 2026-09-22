@@ -1077,6 +1077,10 @@ final class DictationCoordinator: ObservableObject {
     }
 
     func deleteHistoryRecord(_ record: DictationRecord, deleteAudio: Bool) {
+        guard record.meetingSummary == nil
+            || (!deleteAudio && record.meetingSummary?.canArchiveHistoryEntry == true) else {
+            return
+        }
         Task {
             do {
                 if deleteAudio {
@@ -2306,6 +2310,7 @@ final class DictationCoordinator: ObservableObject {
     func applyRetentionSettings() {
         Task {
             do {
+                try await meetingHistorySynchronizer.syncLinkedSessions()
                 try await applyRetentionPolicy()
                 let result = try await historyStore.applyRetention(
                     maximumAgeDays: settings.historyRetentionDays,
@@ -2357,15 +2362,35 @@ final class DictationCoordinator: ObservableObject {
         await refreshHistory()
     }
 
-    private func applyRetentionPolicy(now: Date = Date()) async throws {
+    func applyRetentionPolicy(now: Date = Date()) async throws {
         let days = settings.audioRetentionDays
         guard days >= 0, recordingLocationConfigured,
               let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: now) else { return }
         for var record in try await historyStore.all(includeArchived: true)
-        where record.status == .completed && record.recordingEndedAt < cutoff && record.audioFileSize > 0 {
-            let url = try audioURL(for: record)
-            if FileManager.default.fileExists(atPath: url.path) {
-                try FileManager.default.removeItem(at: url)
+        where record.status == .completed
+            && record.recordingEndedAt < cutoff
+            && record.audioFileSize > 0
+            && !record.isAutomaticallyProtected {
+            if let meeting = record.meetingSummary {
+                guard let manifest = try await meetingSessionStore.load(
+                    sessionID: meeting.sessionID
+                ), manifest.recordID == record.id,
+                    manifest.status == .completed,
+                    manifest.transcriptInsertionState == .completed else {
+                    // History is a snapshot. A missing or newer manifest must
+                    // never authorize deleting recoverable original tracks.
+                    continue
+                }
+                // A meeting is one retention unit. Removing only the synthetic
+                // History path would leave both originals and every derived
+                // artifact orphaned outside the normal Audio directory.
+                try await meetingSessionStore.delete(sessionID: meeting.sessionID)
+                record.meetingSummary = meeting.withoutStoredSessionArtifacts()
+            } else {
+                let url = try audioURL(for: record)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
             }
             record.audioFileSize = 0
             record.updatedAt = now

@@ -172,9 +172,7 @@ nonisolated struct DictationRecord: Identifiable, Codable, Equatable, Sendable {
 
     nonisolated var isAutomaticallyProtected: Bool {
         if let meetingSummary {
-            return ![MeetingSessionStatus.completed, .cancelled].contains(
-                meetingSummary.status
-            )
+            return meetingSummary.isAutomaticallyProtected
         }
         if let jobStatus,
            ![DictationJobStatus.completed, .cancelled, .insertionDeferred].contains(jobStatus) {

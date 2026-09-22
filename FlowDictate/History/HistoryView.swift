@@ -247,6 +247,7 @@ struct HistoryView: View {
                         Button("Show Session in Finder") {
                             coordinator.revealMeetingSession(for: record)
                         }
+                        .disabled(record.audioFileSize == 0)
                         Button("Copy Timeline") { coordinator.copyText(from: record) }
                             .disabled(!record.canInsert)
                         Button("Export Timeline…") { coordinator.exportText(from: record) }
@@ -304,6 +305,9 @@ struct HistoryView: View {
                             coordinator.deleteHistoryRecord(record, deleteAudio: false)
                             selection = nil
                         }
+                        .disabled(
+                            !meeting.canArchiveHistoryEntry || retryingRecordIDs.contains(record.id)
+                        )
                         Button("Delete Meeting and Files…", role: .destructive) {
                             meetingPendingDeletion = record
                         }
