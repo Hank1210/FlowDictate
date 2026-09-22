@@ -386,3 +386,30 @@ actor TrackTranscriptionRunner {
         return candidatePath.hasPrefix(directoryPath)
     }
 }
+
+#if DEBUG
+/// Debug-only, one-shot fault used to exercise the product's partial meeting
+/// recovery UX with real captured tracks. Release builds never compile it.
+actor DebugOneShotTrackTranscriptionFailureExecutor: TrackTranscriptionExecuting {
+    private let base: any TrackTranscriptionExecuting
+    private var pendingRole: RecordingTrackRole?
+
+    init(
+        base: any TrackTranscriptionExecuting,
+        failing role: RecordingTrackRole
+    ) {
+        self.base = base
+        pendingRole = role
+    }
+
+    func transcribe(
+        _ request: TrackTranscriptionRequest
+    ) async throws -> TrackTranscriptionOutput {
+        if pendingRole == request.role {
+            pendingRole = nil
+            throw URLError(.networkConnectionLost)
+        }
+        return try await base.transcribe(request)
+    }
+}
+#endif

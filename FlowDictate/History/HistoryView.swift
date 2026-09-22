@@ -239,7 +239,7 @@ struct HistoryView: View {
                 HStack(alignment: .top) {
                     if record.meetingSummary != nil {
                         if record.meetingSummary?.canResumeProcessing == true {
-                            Button("Continue Processing") {
+                            Button(record.meetingSummary?.processingActionTitle ?? "Continue Processing") {
                                 coordinator.continueMeetingProcessing(record)
                             }
                             .disabled(retryingRecordIDs.contains(record.id))
@@ -365,6 +365,13 @@ struct HistoryView: View {
                     .help("Play \(track.title) original track")
                 }
                 .font(.callout)
+            }
+
+            if let processingNotice = meeting.processingNotice {
+                Label(processingNotice, systemImage: "arrow.clockwise.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel(processingNotice)
             }
 
             Divider()

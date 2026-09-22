@@ -110,6 +110,31 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         tracks.filter(\.isComplete).count
     }
 
+    var failedTrackCount: Int {
+        tracks.count { $0.status == .failed }
+    }
+
+    var transcribedTrackCount: Int {
+        tracks.count { $0.status == .transcribed }
+    }
+
+    var hasPartialTranscription: Bool {
+        status == .partial && transcribedTrackCount > 0 && failedTrackCount > 0
+    }
+
+    var processingActionTitle: String {
+        if hasPartialTranscription && failedTrackCount == 1 { return "Retry Failed Track" }
+        if hasPartialTranscription && failedTrackCount > 1 { return "Retry Failed Tracks" }
+        return "Continue Processing"
+    }
+
+    var processingNotice: String? {
+        guard hasPartialTranscription else { return nil }
+        let completed = transcribedTrackCount
+        let total = tracks.count
+        return "\(completed) of \(total) tracks transcribed. Retrying keeps completed track work."
+    }
+
     var canResumeProcessing: Bool {
         guard [.queued, .partial, .paused, .failed, .merging].contains(status) else {
             return false
@@ -137,7 +162,8 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         case .transcribing: "Transcribing tracks"
         case .merging: "Creating meeting timeline"
         case .completed: "Completed"
-        case .partial: "Partial recording"
+        case .partial:
+            hasPartialTranscription ? "Partial transcription" : "Partial recording"
         case .paused: "Paused — can be resumed"
         case .failed: "Needs attention"
         case .cancelled: "Cancelled"

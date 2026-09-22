@@ -1390,6 +1390,43 @@ struct FlowDictateTests {
         }
     }
 
+    @Test func partialMeetingHistoryExplainsThatOnlyFailedTrackWorkWillRetry() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .partial
+        let microphoneIndex = try #require(
+            session.tracks.firstIndex(where: { $0.role == .localSpeaker })
+        )
+        session.tracks[microphoneIndex].status = .transcribed
+        session.tracks[microphoneIndex].transcriptionSessionID = UUID()
+        session.tracks[microphoneIndex].transcriptRelativePath =
+            "transcription/localSpeaker-transcript.json"
+        let systemIndex = try #require(
+            session.tracks.firstIndex(where: { $0.role == .systemAudio })
+        )
+        session.tracks[systemIndex].status = .failed
+        session.tracks[systemIndex].errorCategory = .network
+        session.tracks[systemIndex].errorMessage = "Injected test failure"
+
+        let summary = try MeetingHistorySummary(session: session).validated()
+
+        #expect(summary.statusTitle == "Partial transcription")
+        #expect(summary.processingActionTitle == "Retry Failed Track")
+        #expect(summary.processingNotice
+            == "1 of 2 tracks transcribed. Retrying keeps completed track work.")
+        #expect(summary.canResumeProcessing)
+
+        var capturePartial = makeValidMixedRecordingSession()
+        capturePartial.status = .partial
+        let captureSystemIndex = try #require(
+            capturePartial.tracks.firstIndex(where: { $0.role == .systemAudio })
+        )
+        capturePartial.tracks[captureSystemIndex].status = .failed
+        let captureSummary = try MeetingHistorySummary(session: capturePartial).validated()
+        #expect(captureSummary.statusTitle == "Partial recording")
+        #expect(captureSummary.processingActionTitle == "Continue Processing")
+        #expect(captureSummary.processingNotice == nil)
+    }
+
     @Test func trackTranscriptionOwnsExclusiveQueueLaneAndReleasesIt() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackQueue-\(UUID())", isDirectory: true)
@@ -1457,6 +1494,37 @@ struct FlowDictateTests {
         #expect(recovered.tracks.first(where: { $0.role == .localSpeaker })?.transcriptionSessionID
             == firstMicrophone.transcriptionSessionID)
     }
+
+#if DEBUG
+    @Test func debugOneShotTrackFailureExercisesPartialThenRetryWithoutRepeatingSuccess() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateDebugTrackRetry-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+        let base = MockTrackTranscriptionExecutor(behaviors: [
+            .localSpeaker: [.success("Kept microphone transcript")],
+            .systemAudio: [.success("Recovered System Audio transcript")]
+        ])
+        let executor = DebugOneShotTrackTranscriptionFailureExecutor(
+            base: base,
+            failing: .systemAudio
+        )
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+        let partial = try await runner.run(sessionID: fixture.session.id)
+        #expect(partial.status == .partial)
+        #expect(partial.tracks.first(where: { $0.role == .localSpeaker })?.status == .transcribed)
+        #expect(partial.tracks.first(where: { $0.role == .systemAudio })?.status == .failed)
+        #expect(partial.tracks.first(where: { $0.role == .systemAudio })?.errorCategory == .network)
+
+        let recovered = try await runner.run(sessionID: fixture.session.id)
+        let requests = await base.requests
+
+        #expect(recovered.status == .merging)
+        #expect(recovered.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(requests.map(\.role) == [.localSpeaker, .systemAudio])
+    }
+#endif
 
     @Test func cancellingTrackTranscriptionPreservesCompletedTrackAndResumeIdentity() async throws {
         let root = FileManager.default.temporaryDirectory

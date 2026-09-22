@@ -80,6 +80,9 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var coreAudioTapProbeMessage: String?
     @Published private(set) var isMixedCaptureTestRunning = false
     @Published private(set) var mixedCaptureTestMessage: String?
+#if DEBUG
+    @Published private(set) var debugNextMeetingTrackFailureRole: RecordingTrackRole?
+#endif
     @Published private(set) var queueSnapshot = DictationQueueSnapshot(
         processingCount: 0,
         queuedCount: 0,
@@ -1465,6 +1468,20 @@ final class DictationCoordinator: ObservableObject {
         presentMeetingRecordingConsent()
     }
 
+#if DEBUG
+    func armNextSystemAudioTranscriptionFailure() {
+        guard !isCaptureActive, !isProcessing else { return }
+        debugNextMeetingTrackFailureRole = .systemAudio
+        setupMessage = "The next mixed session will simulate one System Audio transcription failure. Its original track will remain intact."
+    }
+
+    func clearNextMeetingTrackTranscriptionFailure() {
+        guard !isCaptureActive, !isProcessing else { return }
+        debugNextMeetingTrackFailureRole = nil
+        setupMessage = "The simulated meeting track failure was cancelled."
+    }
+#endif
+
     func runMixedCaptureTest() {
         guard !isMixedCaptureTestRunning,
               !isCoreAudioTapProbeRunning,
@@ -2775,6 +2792,20 @@ final class DictationCoordinator: ObservableObject {
                 )
             )
         }
+        let trackExecutor: any TrackTranscriptionExecuting
+#if DEBUG
+        if let failingRole = debugNextMeetingTrackFailureRole {
+            debugNextMeetingTrackFailureRole = nil
+            trackExecutor = DebugOneShotTrackTranscriptionFailureExecutor(
+                base: executor,
+                failing: failingRole
+            )
+        } else {
+            trackExecutor = executor
+        }
+#else
+        trackExecutor = executor
+#endif
         return MeetingProcessingWorkflow(
             sessionStore: meetingSessionStore,
             interruptedCaptureRecovery: InterruptedMeetingCaptureRecovery(
@@ -2782,7 +2813,7 @@ final class DictationCoordinator: ObservableObject {
             ),
             trackRunner: TrackTranscriptionRunner(
                 store: meetingSessionStore,
-                executor: executor,
+                executor: trackExecutor,
                 processingQueue: processingQueue
             ),
             mergeRunner: MeetingTranscriptMergeRunner(store: meetingSessionStore),

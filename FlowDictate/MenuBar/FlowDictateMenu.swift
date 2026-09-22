@@ -500,6 +500,25 @@ struct FlowDictateSettingsView: View {
                             .textSelection(.enabled)
                     }
 
+#if DEBUG
+                    Divider()
+                    Group {
+                        if coordinator.debugNextMeetingTrackFailureRole == .systemAudio {
+                            Button("Cancel Simulated Track Failure") {
+                                coordinator.clearNextMeetingTrackTranscriptionFailure()
+                            }
+                        } else {
+                            Button("Fail System Audio Transcription Once") {
+                                coordinator.armNextSystemAudioTranscriptionFailure()
+                            }
+                        }
+                    }
+                    .disabled(coordinator.isRecording || coordinator.isProcessing)
+                    Text("Development test: the next full mixed session keeps both originals, transcribes the microphone, fails System Audio once, and exposes the History retry flow. Release builds omit this control.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+#endif
+
                     if #available(macOS 14.2, *) {
                         Divider()
                         systemAudioProbeDurationPicker

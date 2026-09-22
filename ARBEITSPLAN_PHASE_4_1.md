@@ -104,7 +104,6 @@ Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
 ### 4.3 Noch offen
 
-- manuelle Partial-/Retry-Abnahme bei absichtlich fehlgeschlagener einzelner Tracktranskription,
 - vollständige Retention-Abnahme für sichtbare Meeting-History,
 - gezielte UX-Abnahme der Warnzustände für Trackverlust und Clipping,
 - reale Langzeit-, Performance- und weitere Recoverynachweise für vollständige End-to-End-Sessions.
@@ -541,7 +540,7 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 ## 12. Schritt 4.1.6 – Vollständige UX, History und Migration
 
-**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad, Restart-Resume, Trackwiedergabe und bestätigtes Löschen sind implementiert; gezielte Partial-/Retry-Abnahme bleibt offen
+**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad, Restart-Resume, Trackwiedergabe, bestätigtes Löschen und Partial-/Retry-UX sind implementiert; Warnzustände und Retention-Abnahme bleiben offen
 
 **Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Restart-Resume ist im fünften Zwischenstand und die vollständige Trackwiedergabe-/Löschgrenze im sechsten Zwischenstand ergänzt.
 
@@ -556,6 +555,8 @@ Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 überspr
 **Fünfter Zwischenstand 22. September 2026:** Restart-Resume ist produktiv geschlossen. Nach einem harten Prozessabbruch während Mixed Capture normalisiert FlowDictate die verknüpfte Session auf `paused` und die aktiven Tracks auf `interrupted`, ohne Originaldateien zu verändern. `Continue Processing` in History liest die erhaltenen CAF-Dateien nur zur Wiederherstellung von Dauer, Dateigröße und PCM-Format, stuft die wegen des Crashs unvollständige Capture-Timeline konservativ als `degraded` ein und setzt Tracktranskription sowie Merge mit der im Manifest eingefrorenen Provider-/Privacy-Konfiguration fort. Da nach einem Neustart kein verlässliches altes Fokusziel existiert, wird das fertige Transkript stets als `deferred` in History abgelegt und nie automatisch eingefügt. Die manuelle Abnahme bestand mit zwei lesbaren rund 30-sekündigen Originalspuren, OpenAI `gpt-4o-mini-transcribe`, zwei transkribierten Tracks und fertiger Rollen-Timeline. Zwei neue Regressionstests sichern byte-identischen Originalerhalt und die ausbleibende automatische Einfügung; vollständige Regression: 169/169 Tests bestanden. Universal-Debug-Build: `x86_64 arm64`.
 
 **Sechster Zwischenstand 22. September 2026:** Jede Meeting-Trackzeile besitzt eine eigene Wiedergabeaktion, die den Originalpfad ausschließlich aus dem validierten Sessionmanifest auflöst und auf den jeweiligen `tracks/`-Ordner begrenzt. Die manuelle Abnahme bestätigte, dass Mikrofon- und Systemaudiospur separat und hörbar unterschiedlich wiedergegeben werden. `Archive History Entry` bleibt eine nichtdestruktive, getrennte Aktion. `Delete Meeting and Files…` verlangt eine ausdrückliche Bestätigung und löscht danach exakt den UUID-Sessionordner mit beiden Originals, Derived Files, Segmenten, Timeline und Manifest sowie nur den verknüpften History-/Jobdatensatz. Abbrechen bewahrt die Session vollständig; beide Dialogpfade wurden manuell bestanden. Drei neue Tests sichern sichere Originalpfadauflösung, Ablehnung von Pfaden außerhalb `tracks/`, idempotentes UUID-begrenztes Löschen sowie den Erhalt einer Nachbarsession, einer fremden Datei und eines fremden Jobs. Vollständige serielle Regression: 172/172 Tests bestanden; Universal-Debug-Build: `x86_64 arm64`. Ein bestehender Mixed-Cancel-Test überschritt im ersten parallelen Gesamtlauf einmal sein Zeitbudget, bestand isoliert und in der vollständigen seriellen Suite; kein reproduzierbarer Produktionsfehler.
+
+**Siebter Zwischenstand 22. September 2026:** Die Partial-/Retry-UX unterscheidet jetzt eine partielle Transkription von einer partiellen Aufnahme. Nur bei mindestens einem bereits transkribierten und mindestens einem fehlgeschlagenen Track zeigt History `Partial transcription`, den Hinweis, dass fertige Trackarbeit erhalten bleibt, und die Aktion `Retry Failed Track`. Ein ausschließlich im Debug-Build vorhandener Einmal-Testschalter lässt den ersten Systemaudio-Transkriptionsversuch kontrolliert vor dem Provideraufruf scheitern; Release-Builds enthalten weder Schalter noch Beschriftung. Die reale Abnahme bestand: zunächst Mikrofon `Transcribed`, Systemaudio `Failed`, 1/2 Tracks fertig und keine Einfügung; nach Retry wurde ausschließlich Systemaudio verarbeitet, anschließend standen Session auf `Completed`, beide Tracks auf `Transcribed`, Completion Mode auf `allTracks`, Timeline vorhanden und Insertion auf `deferred`. Beide internen Trackjobs dokumentieren genau einen echten Provideraufruf. Eine 14-ms-Lücke im Systemaudio blieb korrekt als Qualitätswarnung sichtbar, bei 0 Clipping-Frames und trotzdem vollständigem Ergebnis. Zwei neue Tests sichern UX-Abgrenzung und Einmalfehler/Retry ohne Wiederholung der erfolgreichen Spur. Vollständige serielle Regression: 174/174 Tests bestanden; universelle Debug- und Release-Builds enthalten `x86_64 arm64`.
 
 ### 12.1 Recording Source und Start
 
@@ -796,8 +797,8 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe und bestätigtes Sessionlöschen sind manuell bestanden. Als Nächstes folgen:
+Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen und Partial-/Retry sind manuell bestanden. Als Nächstes folgen:
 
-1. Partial-/Retry-UX für eine absichtlich fehlgeschlagene einzelne Tracktranskription manuell prüfen,
-2. Warnzustände für Trackverlust und Clipping gezielt in der Nutzeroberfläche abnehmen,
+1. Warnzustände für Trackverlust und Clipping gezielt in der Nutzeroberfläche abnehmen,
+2. Retention und Archivierung sichtbarer Meeting-History vollständig prüfen,
 3. anschließend Schritt 4.1.7 mit produktiven Langzeit-, Performance- und Recovery-Gates beginnen.
