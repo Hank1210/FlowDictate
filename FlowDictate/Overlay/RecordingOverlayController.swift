@@ -100,6 +100,7 @@ protocol RecordingOverlayPresenting: AnyObject {
     func show(status: OverlayStatus, level: Float, reposition: Bool)
     func updateLevel(_ level: Float)
     func updateMeetingLevels(microphone: Float, systemAudio: Float)
+    func updateMeetingWarnings(_ warnings: [MixedRecordingWarning])
     func updatePreview(_ state: LivePreviewState)
     func updateSource(_ source: RecordingAudioSource)
     func configure(size: OverlaySize, position: OverlayPosition)
@@ -114,6 +115,8 @@ extension RecordingOverlayPresenting {
     func updateSource(_ source: RecordingAudioSource) {}
 
     func updateMeetingLevels(microphone: Float, systemAudio: Float) {}
+
+    func updateMeetingWarnings(_ warnings: [MixedRecordingWarning]) {}
 }
 
 @MainActor
@@ -122,6 +125,7 @@ private final class RecordingOverlayModel: ObservableObject {
     @Published var level: Float = 0
     @Published var microphoneLevel: Float = 0
     @Published var systemAudioLevel: Float = 0
+    @Published var meetingWarnings: [MixedRecordingWarning] = []
     @Published var previewState: LivePreviewState = .disabled
     @Published var size: OverlaySize = .standard
     @Published var source: RecordingAudioSource = .microphone
@@ -135,6 +139,10 @@ private final class RecordingOverlayModel: ObservableObject {
         case .compact: CGSize(width: 320, height: 60)
         case .standard: CGSize(width: 390, height: 136)
         case .expanded: CGSize(width: 500, height: 236)
+        }
+        if status == .recording, source == .mixed, !meetingWarnings.isEmpty,
+           size == .standard {
+            return CGSize(width: configuredSize.width, height: 166)
         }
         guard status != .recording else { return configuredSize }
         if case .error = status {
@@ -190,6 +198,12 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         model.systemAudioLevel = min(max(systemAudio, 0), 1)
     }
 
+    func updateMeetingWarnings(_ warnings: [MixedRecordingWarning]) {
+        expireOverdueSuccessOverlayIfNeeded()
+        model.meetingWarnings = warnings.sorted { $0.id < $1.id }
+        if let panel { resize(panel) }
+    }
+
     func updatePreview(_ state: LivePreviewState) {
         expireOverdueSuccessOverlayIfNeeded()
         model.previewState = state
@@ -216,6 +230,7 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
         model.level = 0
         model.microphoneLevel = 0
         model.systemAudioLevel = 0
+        model.meetingWarnings = []
         model.previewState = .disabled
     }
 
@@ -410,6 +425,20 @@ private struct RecordingOverlayView: View {
                     .background(statusColor.opacity(0.12), in: Capsule())
             }
             if model.status == .recording,
+               model.source == .mixed,
+               !model.meetingWarnings.isEmpty {
+                Group {
+                    if model.size == .compact {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    } else {
+                        Label("WARNING", systemImage: "exclamationmark.triangle.fill")
+                    }
+                }
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundStyle(.orange)
+                .accessibilityLabel("Meeting capture warning")
+            }
+            if model.status == .recording,
                model.size != .compact,
                model.source != .mixed {
                 Label(model.source.shortTitle, systemImage: model.source.symbolName)
@@ -472,7 +501,8 @@ private struct RecordingOverlayView: View {
 
     private var statusColor: Color {
         switch model.status {
-        case .recording: .red
+        case .recording:
+            model.source == .mixed && !model.meetingWarnings.isEmpty ? .orange : .red
         case .processing, .finalizing, .inserting, .longForm: .accentColor
         case .success: .green
         case .error: .orange
@@ -498,7 +528,16 @@ private struct RecordingOverlayView: View {
                     .foregroundStyle(Color.white.opacity(0.46))
             }
 
-            if model.source == .systemAudio || model.source == .mixed {
+            if model.source == .mixed, !model.meetingWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.meetingWarnings) { warning in
+                        Label(warning.message, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .lineLimit(model.size == .expanded ? 3 : 2)
+                .accessibilityElement(children: .combine)
+            } else if model.source == .systemAudio || model.source == .mixed {
                 Text(presentation.statusMessage ?? "The transcript is created after recording stops.")
                     .foregroundStyle(Color.white.opacity(0.66))
                     .lineLimit(model.size == .expanded ? 4 : 3)

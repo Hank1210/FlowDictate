@@ -18,6 +18,7 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
     private var output: ScreenCaptureKitTrackOutput?
     private var isRecording = false
     private var levelHandler: MixedTrackLevelHandler?
+    private var warningHandler: MixedTrackWarningHandler?
 
     init(
         permissionService: SystemAudioPermissionService = SystemAudioPermissionService(),
@@ -30,6 +31,11 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
     func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
         levelHandler = handler
         output?.setLevelHandler(handler)
+    }
+
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) async {
+        warningHandler = handler
+        output?.setWarningHandler(handler)
     }
 
     func prepare(outputURL: URL) async throws {
@@ -69,7 +75,8 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
         )
         let output = ScreenCaptureKitTrackOutput(
             outputURL: outputURL,
-            levelHandler: levelHandler
+            levelHandler: levelHandler,
+            warningHandler: warningHandler
         )
         let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
         do {
@@ -162,13 +169,16 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
     private var hasBegun = false
     private var acceptsAudio = false
     private var levelHandler: MixedTrackLevelHandler?
+    private var warningHandler: MixedTrackWarningHandler?
 
     init(
         outputURL: URL,
-        levelHandler: MixedTrackLevelHandler? = nil
+        levelHandler: MixedTrackLevelHandler? = nil,
+        warningHandler: MixedTrackWarningHandler? = nil
     ) {
         self.outputURL = outputURL
         self.levelHandler = levelHandler
+        self.warningHandler = warningHandler
         super.init()
     }
 
@@ -178,6 +188,14 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
         let sink = sink
         lock.unlock()
         sink?.setLevelHandler(handler)
+    }
+
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) {
+        lock.lock()
+        warningHandler = handler
+        let sink = sink
+        lock.unlock()
+        sink?.setWarningHandler(handler)
     }
 
     func begin(requestedHostTime: UInt64) {
@@ -270,7 +288,8 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
                     outputURL: outputURL,
                     sourceFormat: sourceFormat,
                     outputFormat: outputFormat,
-                    levelHandler: levelHandler
+                    levelHandler: levelHandler,
+                    warningHandler: warningHandler
                 )
                 createdSink.begin(requestedHostTime: requestedHostTime)
                 lock.lock()
@@ -313,8 +332,11 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
 
     private func record(_ error: SystemAudioTrackRecorderError) {
         lock.lock()
-        if failure == nil { failure = error }
+        let shouldReport = failure == nil
+        if shouldReport { failure = error }
+        let warningHandler = warningHandler
         lock.unlock()
+        if shouldReport { warningHandler?(.sourceLost) }
     }
 
     private func withAudioBufferList<T>(

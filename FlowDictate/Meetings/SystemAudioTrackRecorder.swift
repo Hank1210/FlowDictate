@@ -73,6 +73,7 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
     private var callbackQueue: DispatchQueue?
     private var sink: SystemAudioTrackCaptureSink?
     private var levelHandler: MixedTrackLevelHandler?
+    private var warningHandler: MixedTrackWarningHandler?
     private var deviceStarted = false
     private var precomputedStopStatus: OSStatus?
 
@@ -83,6 +84,11 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
     func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {
         levelHandler = handler
         sink?.setLevelHandler(handler)
+    }
+
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) async {
+        warningHandler = handler
+        sink?.setWarningHandler(handler)
     }
 
     func prepare(outputURL: URL) async throws {
@@ -132,7 +138,8 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
                 outputURL: outputURL,
                 sourceFormat: sourceFormat,
                 outputFormat: outputFormat,
-                levelHandler: levelHandler
+                levelHandler: levelHandler,
+                warningHandler: warningHandler
             )
             self.sink = sink
 
@@ -481,18 +488,23 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
     private var hasBegun = false
     private var acceptsAudio = false
     private var levelHandler: MixedTrackLevelHandler?
+    private var warningHandler: MixedTrackWarningHandler?
+    private var didReportClipping = false
+    private var didReportSourceLoss = false
     private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
     init(
         outputURL: URL,
         sourceFormat: AVAudioFormat,
         outputFormat: AVAudioFormat,
-        levelHandler: MixedTrackLevelHandler? = nil
+        levelHandler: MixedTrackLevelHandler? = nil,
+        warningHandler: MixedTrackWarningHandler? = nil
     ) throws {
         self.outputURL = outputURL
         self.sourceFormat = sourceFormat
         self.outputFormat = outputFormat
         self.levelHandler = levelHandler
+        self.warningHandler = warningHandler
         converter = sourceFormat == outputFormat
             ? nil
             : AVAudioConverter(from: sourceFormat, to: outputFormat)
@@ -516,6 +528,12 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) {
+        lock.lock()
+        warningHandler = handler
+        lock.unlock()
+    }
+
     func begin(requestedHostTime: UInt64) {
         lock.lock()
         metrics = PCMTrackMetrics(
@@ -523,6 +541,8 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             sampleRate: outputFormat.sampleRate
         )
         failure = nil
+        didReportClipping = false
+        didReportSourceLoss = false
         hasBegun = true
         acceptsAudio = true
         lock.unlock()
@@ -552,13 +572,28 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
                 audioTimeStamp: &timeStamp,
                 sampleRate: sourceFormat.sampleRate
             )
+            let clippedFrameCount = metrics.clippedFrameCount
             metrics.record(buffer: outputBuffer, time: audioTime)
+            if !didReportClipping,
+               clippedFrameCount == 0,
+               metrics.clippedFrameCount > 0 {
+                didReportClipping = true
+                warningHandler?(.clipping)
+            }
             publishLevelIfNeeded(from: outputBuffer)
         } catch let error as SystemAudioTrackRecorderError {
             failure = error
+            reportSourceLossIfNeeded()
         } catch {
             failure = .writerFailed(error.localizedDescription)
+            reportSourceLossIfNeeded()
         }
+    }
+
+    private func reportSourceLossIfNeeded() {
+        guard !didReportSourceLoss else { return }
+        didReportSourceLoss = true
+        warningHandler?(.sourceLost)
     }
 
     private func publishLevelIfNeeded(from buffer: AVAudioPCMBuffer) {

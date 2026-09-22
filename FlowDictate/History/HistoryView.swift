@@ -367,6 +367,13 @@ struct HistoryView: View {
                 .font(.callout)
             }
 
+            ForEach(meeting.captureWarningNotices, id: \.self) { notice in
+                Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel(notice)
+            }
+
             if let processingNotice = meeting.processingNotice {
                 Label(processingNotice, systemImage: "arrow.clockwise.circle")
                     .font(.caption)

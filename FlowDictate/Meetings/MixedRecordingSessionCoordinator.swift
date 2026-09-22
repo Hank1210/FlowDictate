@@ -14,22 +14,61 @@ typealias MixedRecordingLevelHandler = @Sendable (
     RecordingTrackRole,
     Float
 ) -> Void
+typealias MixedTrackWarningHandler = @Sendable (MixedTrackWarningKind) -> Void
+typealias MixedRecordingWarningHandler = @Sendable (MixedRecordingWarning) -> Void
+
+nonisolated enum MixedTrackWarningKind: String, Codable, Hashable, Sendable {
+    case clipping
+    case sourceLost
+}
+
+nonisolated struct MixedRecordingWarning: Codable, Hashable, Sendable, Identifiable {
+    var role: RecordingTrackRole
+    var kind: MixedTrackWarningKind
+
+    var id: String { "\(role.rawValue)-\(kind.rawValue)" }
+
+    var trackTitle: String {
+        role == .localSpeaker ? "Microphone" : "System Audio"
+    }
+
+    var message: String {
+        switch kind {
+        case .clipping:
+            role == .localSpeaker
+                ? "Microphone clipping detected — reduce the input level or increase your distance."
+                : "System Audio clipping detected — the original track is still being preserved."
+        case .sourceLost:
+            "\(trackTitle) lost — the other original track continues to be saved."
+        }
+    }
+}
 
 nonisolated protocol MixedTrackRecording: Sendable {
     var role: RecordingTrackRole { get }
 
     func setLevelHandler(_ handler: MixedTrackLevelHandler?) async
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) async
     func prepare(outputURL: URL) async throws
     func start(requestedHostTime: UInt64) async throws -> MixedTrackStartResult
     func stop() async throws -> MixedTrackCaptureResult
     func cancel() async -> MixedTrackCaptureResult?
 }
 
+extension MixedTrackRecording {
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) async {}
+}
+
 nonisolated protocol MixedRecordingSessionCoordinating: Sendable {
     func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async
+    func setWarningHandler(_ handler: MixedRecordingWarningHandler?) async
     func start(_ request: MixedRecordingSessionRequest) async throws -> MixedRecordingSession
     func stop() async throws -> MixedRecordingSession
     func cancel() async throws -> MixedRecordingSession
+}
+
+extension MixedRecordingSessionCoordinating {
+    func setWarningHandler(_ handler: MixedRecordingWarningHandler?) async {}
 }
 
 nonisolated struct MixedTrackStartResult: Sendable, Equatable {
@@ -157,6 +196,16 @@ actor MixedRecordingSessionCoordinator {
         }
         async let systemAudioUpdate: Void = systemAudioRecorder.setLevelHandler { level in
             handler?(.systemAudio, level)
+        }
+        _ = await (microphoneUpdate, systemAudioUpdate)
+    }
+
+    func setWarningHandler(_ handler: MixedRecordingWarningHandler?) async {
+        async let microphoneUpdate: Void = microphoneRecorder.setWarningHandler { kind in
+            handler?(MixedRecordingWarning(role: .localSpeaker, kind: kind))
+        }
+        async let systemAudioUpdate: Void = systemAudioRecorder.setWarningHandler { kind in
+            handler?(MixedRecordingWarning(role: .systemAudio, kind: kind))
         }
         _ = await (microphoneUpdate, systemAudioUpdate)
     }

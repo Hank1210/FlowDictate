@@ -153,6 +153,18 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         [.completed, .partial, .paused, .failed, .cancelled].contains(status)
     }
 
+    var captureWarningNotices: [String] {
+        tracks.compactMap { track in
+            if track.clippedFrameCount > 0 {
+                return "\(track.title) clipping was detected. The original track was preserved; review its audio quality."
+            }
+            if [.unavailable, .interrupted, .failed].contains(track.status) {
+                return "\(track.title) was not fully captured. Any available original track remains preserved."
+            }
+            return nil
+        }
+    }
+
     var statusTitle: String {
         switch status {
         case .preparing: "Preparing"

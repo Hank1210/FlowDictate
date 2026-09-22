@@ -1427,6 +1427,28 @@ struct FlowDictateTests {
         #expect(captureSummary.processingNotice == nil)
     }
 
+    @Test func meetingHistorySurfacesTrackLossAndClippingWithoutHidingPreservedTracks() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .partial
+        let microphoneIndex = try #require(
+            session.tracks.firstIndex(where: { $0.role == .localSpeaker })
+        )
+        session.tracks[microphoneIndex].quality.clippedFrameCount = 48
+        let systemIndex = try #require(
+            session.tracks.firstIndex(where: { $0.role == .systemAudio })
+        )
+        session.tracks[systemIndex].status = .failed
+
+        let summary = try MeetingHistorySummary(session: session).validated()
+
+        #expect(summary.captureWarningNotices == [
+            "Microphone clipping was detected. The original track was preserved; review its audio quality.",
+            "System Audio was not fully captured. Any available original track remains preserved."
+        ])
+        #expect(summary.tracks.first(where: { $0.role == .localSpeaker })?.canPlayAudio == true)
+        #expect(summary.tracks.first(where: { $0.role == .systemAudio })?.canPlayAudio == true)
+    }
+
     @Test func trackTranscriptionOwnsExclusiveQueueLaneAndReleasesIt() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackQueue-\(UUID())", isDirectory: true)
@@ -2215,6 +2237,36 @@ struct FlowDictateTests {
         #expect(await systemAudio.receivedStartHostTime == requestedHostTime)
         #expect(await coordinator.state == .recording(request.sessionID))
         #expect(try await store.load(sessionID: request.sessionID) == session)
+    }
+
+    @Test func mixedCoordinatorForwardsTypedTrackWarnings() async {
+        let events = MixedTrackTestEventLog()
+        let microphone = MockMixedTrackRecorder(role: .localSpeaker, events: events)
+        let systemAudio = MockMixedTrackRecorder(role: .systemAudio, events: events)
+        let warnings = LockedMixedWarningLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: microphone,
+            systemAudioRecorder: systemAudio,
+            store: MeetingSessionStore(
+                rootURL: FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "FlowDictateWarningForwarding-\(UUID())",
+                    isDirectory: true
+                )
+            )
+        )
+        await coordinator.setWarningHandler { warning in
+            warnings.append(warning)
+        }
+
+        await microphone.emitWarning(.clipping)
+        await systemAudio.emitWarning(.sourceLost)
+
+        #expect(warnings.values == [
+            MixedRecordingWarning(role: .localSpeaker, kind: .clipping),
+            MixedRecordingWarning(role: .systemAudio, kind: .sourceLost)
+        ])
+        #expect(warnings.values[0].message.contains("Microphone clipping"))
+        #expect(warnings.values[1].message.contains("System Audio lost"))
     }
 
     @Test func mixedCoordinatorPersistsPartialSessionWhenOneTrackCannotStop() async throws {
@@ -5804,6 +5856,23 @@ private actor MixedTrackTestEventLog {
     }
 }
 
+private nonisolated final class LockedMixedWarningLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [MixedRecordingWarning] = []
+
+    var values: [MixedRecordingWarning] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValues
+    }
+
+    func append(_ warning: MixedRecordingWarning) {
+        lock.lock()
+        storedValues.append(warning)
+        lock.unlock()
+    }
+}
+
 private nonisolated enum MockMixedTrackError: LocalizedError, Sendable, Equatable {
     case requested(String)
 
@@ -5823,6 +5892,7 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
     private let stopError: MockMixedTrackError?
     private let returnsCaptureOnCancel: Bool
     private var outputURL: URL?
+    private var warningHandler: MixedTrackWarningHandler?
     private(set) var receivedStartHostTime: UInt64?
 
     init(
@@ -5842,6 +5912,14 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
     }
 
     func setLevelHandler(_ handler: MixedTrackLevelHandler?) async {}
+
+    func setWarningHandler(_ handler: MixedTrackWarningHandler?) async {
+        warningHandler = handler
+    }
+
+    func emitWarning(_ kind: MixedTrackWarningKind) {
+        warningHandler?(kind)
+    }
 
     func prepare(outputURL: URL) async throws {
         await events.append(.prepare(role))

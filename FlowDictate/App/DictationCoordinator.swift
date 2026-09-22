@@ -158,6 +158,7 @@ final class DictationCoordinator: ObservableObject {
         (any MixedRecordingSessionCoordinating)?
     private var mixedMicrophoneLevel: Float = 0
     private var mixedSystemAudioLevel: Float = 0
+    private var mixedCaptureWarnings: [MixedRecordingWarning] = []
     private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
@@ -1542,6 +1543,11 @@ final class DictationCoordinator: ObservableObject {
                         self?.updateMixedCaptureLevel(level, for: role)
                     }
                 }
+                await createdCoordinator.setWarningHandler { [weak self] warning in
+                    Task { @MainActor [weak self] in
+                        self?.handleMixedCaptureWarning(warning)
+                    }
+                }
                 let provider = settings.transcriptionProviderID
                 let engineID = provider == .local
                     ? TranscriptionProviderRegistry.local.capabilities.engineID
@@ -1623,7 +1629,34 @@ final class DictationCoordinator: ObservableObject {
         mixedMicrophoneLevel = 0
         mixedSystemAudioLevel = 0
         overlay.updateMeetingLevels(microphone: 0, systemAudio: 0)
+        mixedCaptureWarnings = []
+        overlay.updateMeetingWarnings([])
     }
+
+    private func handleMixedCaptureWarning(_ warning: MixedRecordingWarning) {
+        guard !mixedCaptureWarnings.contains(warning) else { return }
+        mixedCaptureWarnings.append(warning)
+        overlay.updateMeetingWarnings(mixedCaptureWarnings)
+        FlowLogger.audio.warning(
+            "Mixed capture warning: \(warning.message, privacy: .public)"
+        )
+    }
+
+#if DEBUG
+    func showDebugMicrophoneClippingWarning() {
+        guard isCaptureActive, settings.recordingAudioSource == .mixed else { return }
+        handleMixedCaptureWarning(
+            MixedRecordingWarning(role: .localSpeaker, kind: .clipping)
+        )
+    }
+
+    func showDebugSystemAudioLostWarning() {
+        guard isCaptureActive, settings.recordingAudioSource == .mixed else { return }
+        handleMixedCaptureWarning(
+            MixedRecordingWarning(role: .systemAudio, kind: .sourceLost)
+        )
+    }
+#endif
 
     private func meetingSessionDirectory(for id: UUID) throws -> URL {
         try recordingLocationStore.resolvedDirectory()
@@ -2614,6 +2647,11 @@ final class DictationCoordinator: ObservableObject {
                 self?.updateMixedCaptureLevel(level, for: role)
             }
         }
+        await coordinator.setWarningHandler { [weak self] warning in
+            Task { @MainActor [weak self] in
+                self?.handleMixedCaptureWarning(warning)
+            }
+        }
 
         do {
             let session = try await coordinator.start(
@@ -2638,6 +2676,7 @@ final class DictationCoordinator: ObservableObject {
                 _ = try? await coordinator.cancel()
                 activeMixedRecordingCoordinator = nil
                 await coordinator.setLevelHandler(nil)
+                await coordinator.setWarningHandler(nil)
                 resetMixedCaptureLevels()
                 throw error
             }
@@ -2651,6 +2690,7 @@ final class DictationCoordinator: ObservableObject {
             await refreshHistory()
         } catch {
             await coordinator.setLevelHandler(nil)
+            await coordinator.setWarningHandler(nil)
             throw error
         }
     }
@@ -2667,6 +2707,7 @@ final class DictationCoordinator: ObservableObject {
             finalized = try await coordinator.stop()
             activeMixedRecordingCoordinator = nil
             await coordinator.setLevelHandler(nil)
+            await coordinator.setWarningHandler(nil)
             resetMixedCaptureLevels()
             latestOutputURL = try meetingSessionDirectory(for: finalized.id)
             try await meetingHistorySynchronizer.sync(
@@ -2678,6 +2719,7 @@ final class DictationCoordinator: ObservableObject {
         } catch {
             activeMixedRecordingCoordinator = nil
             await coordinator.setLevelHandler(nil)
+            await coordinator.setWarningHandler(nil)
             resetMixedCaptureLevels()
             await releaseQueueReservation()
             fail(error, retainedAudioURL: latestOutputURL)
@@ -2749,6 +2791,7 @@ final class DictationCoordinator: ObservableObject {
             let cancelled = try await coordinator.cancel()
             activeMixedRecordingCoordinator = nil
             await coordinator.setLevelHandler(nil)
+            await coordinator.setWarningHandler(nil)
             resetMixedCaptureLevels()
             latestOutputURL = try meetingSessionDirectory(for: cancelled.id)
             try await meetingHistorySynchronizer.sync(
@@ -2766,6 +2809,7 @@ final class DictationCoordinator: ObservableObject {
         } catch {
             activeMixedRecordingCoordinator = nil
             await coordinator.setLevelHandler(nil)
+            await coordinator.setWarningHandler(nil)
             resetMixedCaptureLevels()
             await releaseQueueReservation()
             fail(error, retainedAudioURL: latestOutputURL)

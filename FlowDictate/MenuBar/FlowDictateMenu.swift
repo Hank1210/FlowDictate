@@ -517,6 +517,20 @@ struct FlowDictateSettingsView: View {
                     Text("Development test: the next full mixed session keeps both originals, transcribes the microphone, fails System Audio once, and exposes the History retry flow. Release builds omit this control.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    Divider()
+                    HStack {
+                        Button("Show Mic Clipping Warning") {
+                            coordinator.showDebugMicrophoneClippingWarning()
+                        }
+                        Button("Show System Audio Lost Warning") {
+                            coordinator.showDebugSystemAudioLostWarning()
+                        }
+                    }
+                    .disabled(!coordinator.isRecording)
+                    Text("Development display test: while a full mixed recording is active, these controls verify persistent, accessible overlay warnings. They do not alter or discard either original track.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 #endif
 
                     if #available(macOS 14.2, *) {
