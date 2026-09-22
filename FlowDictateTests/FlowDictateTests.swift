@@ -2354,6 +2354,31 @@ struct FlowDictateTests {
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
+    @Test func mixedCoordinatorWarnsButStartsShortCaptureBelowOldStorageThreshold() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedStorageWarning-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let events = MixedTrackTestEventLog()
+        let warnings = LockedMixedWarningLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(role: .localSpeaker, events: events),
+            systemAudioRecorder: MockMixedTrackRecorder(role: .systemAudio, events: events),
+            store: MeetingSessionStore(rootURL: root),
+            availableStorageBytes: { _ in 100_000_000 }
+        )
+        await coordinator.setWarningHandler { warning in warnings.append(warning) }
+        let started = try await coordinator.start(MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: "de"
+        ))
+
+        #expect(started.status == .recording)
+        #expect(warnings.values == [.lowStorage])
+        #expect(warnings.values[0].message.contains("Low disk space"))
+        #expect(await events.values.contains(.prepare(.localSpeaker)))
+        _ = try await coordinator.stop()
+    }
+
     @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMixedStart-\(UUID())", isDirectory: true)
@@ -2509,13 +2534,16 @@ struct FlowDictateTests {
 
         await microphone.emitWarning(.clipping)
         await systemAudio.emitWarning(.sourceLost)
+        await microphone.emitWarning(.writerFailed)
 
         #expect(warnings.values == [
             MixedRecordingWarning(role: .localSpeaker, kind: .clipping),
-            MixedRecordingWarning(role: .systemAudio, kind: .sourceLost)
+            MixedRecordingWarning(role: .systemAudio, kind: .sourceLost),
+            MixedRecordingWarning(role: .localSpeaker, kind: .writerFailed)
         ])
         #expect(warnings.values[0].message.contains("Microphone clipping"))
         #expect(warnings.values[1].message.contains("System Audio lost"))
+        #expect(warnings.values[2].message.contains("could not be written"))
     }
 
     @Test func mixedCoordinatorPersistsPartialSessionWhenOneTrackCannotStop() async throws {

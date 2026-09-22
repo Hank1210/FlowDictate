@@ -22,26 +22,36 @@ typealias MixedRecordingWarningHandler = @Sendable (MixedRecordingWarning) -> Vo
 nonisolated enum MixedTrackWarningKind: String, Codable, Hashable, Sendable {
     case clipping
     case sourceLost
+    case writerFailed
 }
 
-nonisolated struct MixedRecordingWarning: Codable, Hashable, Sendable, Identifiable {
-    var role: RecordingTrackRole
-    var kind: MixedTrackWarningKind
+nonisolated enum MixedRecordingWarning: Codable, Hashable, Sendable, Identifiable {
+    case track(role: RecordingTrackRole, kind: MixedTrackWarningKind)
+    case lowStorage
 
-    var id: String { "\(role.rawValue)-\(kind.rawValue)" }
+    init(role: RecordingTrackRole, kind: MixedTrackWarningKind) {
+        self = .track(role: role, kind: kind)
+    }
 
-    var trackTitle: String {
-        role == .localSpeaker ? "Microphone" : "System Audio"
+    var id: String {
+        switch self {
+        case let .track(role, kind): "\(role.rawValue)-\(kind.rawValue)"
+        case .lowStorage: "low-storage"
+        }
     }
 
     var message: String {
-        switch kind {
-        case .clipping:
+        switch self {
+        case let .track(role, .clipping):
             role == .localSpeaker
                 ? "Microphone clipping detected — reduce the input level or increase your distance."
                 : "System Audio clipping detected — the original track is still being preserved."
-        case .sourceLost:
-            "\(trackTitle) lost — the other original track continues to be saved."
+        case let .track(role, .sourceLost):
+            "\(role == .localSpeaker ? "Microphone" : "System Audio") lost — the other original track continues to be saved."
+        case let .track(role, .writerFailed):
+            "\(role == .localSpeaker ? "Microphone" : "System Audio") could not be written — recording on that track stopped; any existing original is retained."
+        case .lowStorage:
+            "Low disk space on the recording volume — long meetings may stop early. Free space when possible."
         }
     }
 }
@@ -182,8 +192,9 @@ private nonisolated enum MixedRecordingStorageCapacity {
 }
 
 actor MixedRecordingSessionCoordinator {
-    /// Five minutes of two 96 kHz mono Float32 originals plus a working reserve.
-    static let minimumRecordingStorageBytes: Int64 = 500_000_000
+    /// Roughly thirty seconds of two 96 kHz mono Float32 originals plus reserve.
+    static let minimumRecordingStorageBytes: Int64 = 50_000_000
+    static let lowStorageWarningBytes: Int64 = 500_000_000
 
     private let microphoneRecorder: any MixedTrackRecording
     private let systemAudioRecorder: any MixedTrackRecording
@@ -193,6 +204,7 @@ actor MixedRecordingSessionCoordinator {
     private let now: @Sendable () -> Date
     private let hostTime: @Sendable () -> UInt64
     private let availableStorageBytes: @Sendable (URL) throws -> Int64
+    private var warningHandler: MixedRecordingWarningHandler?
 
     private(set) var state: MixedRecordingCoordinatorState = .idle
     private var activeSession: MixedRecordingSession?
@@ -231,6 +243,7 @@ actor MixedRecordingSessionCoordinator {
     }
 
     func setWarningHandler(_ handler: MixedRecordingWarningHandler?) async {
+        warningHandler = handler
         async let microphoneUpdate: Void = microphoneRecorder.setWarningHandler { kind in
             handler?(MixedRecordingWarning(role: .localSpeaker, kind: kind))
         }
@@ -379,6 +392,9 @@ actor MixedRecordingSessionCoordinator {
 
             activeSession = session
             state = .recording(session.id)
+            if available < Self.lowStorageWarningBytes {
+                warningHandler?(.lowStorage)
+            }
             return session
         } catch {
             if activeOperationID == operationID {

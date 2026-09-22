@@ -462,6 +462,10 @@ struct FlowDictateSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    Text("Storage: at 48 kHz, the two uncompressed original tracks use about 1.4 GB per hour. Aligned working copies can roughly double that; higher microphone sample rates need more. FlowDictate warns below 500 MB free and blocks a new mixed recording only below 50 MB.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     if coordinator.hasCurrentMeetingRecordingConsent {
                         Button("Reset Meeting Recording Confirmation") {
                             coordinator.resetMeetingRecordingConsent()

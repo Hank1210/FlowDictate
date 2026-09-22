@@ -336,7 +336,13 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
         if shouldReport { failure = error }
         let warningHandler = warningHandler
         lock.unlock()
-        if shouldReport { warningHandler?(.sourceLost) }
+        if shouldReport {
+            if case .writerFailed = error {
+                warningHandler?(.writerFailed)
+            } else {
+                warningHandler?(.sourceLost)
+            }
+        }
     }
 
     private func withAudioBufferList<T>(

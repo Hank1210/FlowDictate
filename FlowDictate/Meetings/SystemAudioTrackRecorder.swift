@@ -490,7 +490,7 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
     private var levelHandler: MixedTrackLevelHandler?
     private var warningHandler: MixedTrackWarningHandler?
     private var didReportClipping = false
-    private var didReportSourceLoss = false
+    private var didReportFailure = false
     private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
     init(
@@ -542,7 +542,7 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
         )
         failure = nil
         didReportClipping = false
-        didReportSourceLoss = false
+        didReportFailure = false
         hasBegun = true
         acceptsAudio = true
         lock.unlock()
@@ -583,17 +583,21 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             publishLevelIfNeeded(from: outputBuffer)
         } catch let error as SystemAudioTrackRecorderError {
             failure = error
-            reportSourceLossIfNeeded()
+            reportFailureIfNeeded(error)
         } catch {
             failure = .writerFailed(error.localizedDescription)
-            reportSourceLossIfNeeded()
+            reportFailureIfNeeded(.writerFailed(error.localizedDescription))
         }
     }
 
-    private func reportSourceLossIfNeeded() {
-        guard !didReportSourceLoss else { return }
-        didReportSourceLoss = true
-        warningHandler?(.sourceLost)
+    private func reportFailureIfNeeded(_ error: SystemAudioTrackRecorderError) {
+        guard !didReportFailure else { return }
+        didReportFailure = true
+        if case .writerFailed = error {
+            warningHandler?(.writerFailed)
+        } else {
+            warningHandler?(.sourceLost)
+        }
     }
 
     private func publishLevelIfNeeded(from buffer: AVAudioPCMBuffer) {
