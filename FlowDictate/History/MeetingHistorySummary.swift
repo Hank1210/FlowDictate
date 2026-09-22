@@ -105,6 +105,20 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         tracks.filter(\.isComplete).count
     }
 
+    var canResumeProcessing: Bool {
+        guard [.queued, .partial, .paused, .failed, .merging].contains(status) else {
+            return false
+        }
+        if tracks.contains(where: {
+            [.finalized, .interrupted, .transcriptionPending, .transcribing, .failed]
+                .contains($0.status)
+        }) {
+            return true
+        }
+        return tracks.allSatisfy { $0.status == .transcribed }
+            && [.good, .degraded].contains(synchronizationQuality)
+    }
+
     var statusTitle: String {
         switch status {
         case .preparing: "Preparing"

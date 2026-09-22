@@ -1182,6 +1182,66 @@ final class DictationCoordinator: ObservableObject {
         }
     }
 
+    func continueMeetingProcessing(_ record: DictationRecord) {
+        guard let meeting = record.meetingSummary,
+              meeting.canResumeProcessing,
+              !retryingRecordIDs.contains(record.id) else { return }
+        guard !isCaptureActive, state.acceptsStart else {
+            setupMessage = "Finish the current dictation before continuing this meeting."
+            return
+        }
+
+        retryingRecordIDs.insert(record.id)
+        retryTranscriptionTasks[record.id] = Task {
+            defer {
+                retryingRecordIDs.remove(record.id)
+                retryTranscriptionTasks[record.id] = nil
+            }
+            state = .transcribing
+            overlay.show(status: .processing)
+            do {
+                let completed = try await makeMeetingProcessingWorkflow().run(
+                    sessionID: meeting.sessionID
+                )
+                guard completed.status == .completed else {
+                    state = .idle
+                    overlay.hide()
+                    setupMessage = completed.lastErrorMessage
+                        ?? "Meeting processing paused. The original tracks remain in History."
+                    await refreshHistory()
+                    return
+                }
+
+                // A resumed session has no trustworthy foreground target. Keep
+                // the result in History and require an explicit later insert.
+                _ = try await meetingTranscriptInsertionGate.begin(
+                    sessionID: completed.id,
+                    targetIsAvailable: false
+                )
+                try await syncLatestMeetingSessionIfAvailable(sessionID: completed.id)
+                latestOutputURL = try meetingSessionDirectory(for: completed.id)
+                latestOutputNotice =
+                    "Meeting processing completed. The transcript is ready in History."
+                setupMessage = latestOutputNotice
+                state = .idle
+                overlay.hide()
+                await refreshHistory()
+            } catch is CancellationError {
+                state = .idle
+                overlay.hide()
+                await refreshHistory()
+            } catch {
+                if let latest = try? await meetingSessionStore.load(sessionID: meeting.sessionID) {
+                    _ = try? await meetingHistorySynchronizer.sync(latest)
+                }
+                state = .idle
+                overlay.hide()
+                setupMessage = error.localizedDescription
+                await refreshHistory()
+            }
+        }
+    }
+
     func reinsert(_ record: DictationRecord) {
         guard let text = record.finalText ?? record.originalTranscript,
               let target = insertionTarget(for: record) else {
@@ -2669,6 +2729,9 @@ final class DictationCoordinator: ObservableObject {
         }
         return MeetingProcessingWorkflow(
             sessionStore: meetingSessionStore,
+            interruptedCaptureRecovery: InterruptedMeetingCaptureRecovery(
+                store: meetingSessionStore
+            ),
             trackRunner: TrackTranscriptionRunner(
                 store: meetingSessionStore,
                 executor: executor,

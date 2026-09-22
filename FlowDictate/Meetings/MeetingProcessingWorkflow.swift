@@ -84,24 +84,33 @@ actor MeetingHistorySynchronizer {
 /// merge stages to History at durable stage boundaries.
 actor MeetingProcessingWorkflow {
     private let sessionStore: MeetingSessionStore
+    private let interruptedCaptureRecovery: (any MeetingInterruptedCaptureRecovering)?
     private let trackRunner: any MeetingTrackTranscriptionRunning
     private let mergeRunner: any MeetingTranscriptMerging
     private let historySynchronizer: MeetingHistorySynchronizer
 
     init(
         sessionStore: MeetingSessionStore,
+        interruptedCaptureRecovery: (any MeetingInterruptedCaptureRecovering)? = nil,
         trackRunner: any MeetingTrackTranscriptionRunning,
         mergeRunner: any MeetingTranscriptMerging,
         historySynchronizer: MeetingHistorySynchronizer
     ) {
         self.sessionStore = sessionStore
+        self.interruptedCaptureRecovery = interruptedCaptureRecovery
         self.trackRunner = trackRunner
         self.mergeRunner = mergeRunner
         self.historySynchronizer = historySynchronizer
     }
 
     func run(sessionID: UUID) async throws -> MixedRecordingSession {
-        guard let initial = try await sessionStore.load(sessionID: sessionID) else {
+        let initial: MixedRecordingSession?
+        if let interruptedCaptureRecovery {
+            initial = try await interruptedCaptureRecovery.recover(sessionID: sessionID)
+        } else {
+            initial = try await sessionStore.load(sessionID: sessionID)
+        }
+        guard let initial else {
             throw TrackTranscriptionRunnerError.sessionNotFound(sessionID)
         }
         try await historySynchronizer.sync(initial)

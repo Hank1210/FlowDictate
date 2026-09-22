@@ -1110,6 +1110,70 @@ struct FlowDictateTests {
         #expect(try await sessionStore.load(sessionID: diagnostic.id)?.status == .recording)
     }
 
+    @Test func interruptedMeetingCaptureRecoveryRepairsMetadataWithoutChangingOriginalTracks() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateInterruptedCapture-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.status = .paused
+        session.lastErrorCategory = .interrupted
+        session.lastErrorMessage = "Capture interrupted"
+        session.synchronization = nil
+        session.qualityReport = nil
+        let paths = try await store.prepareSession(id: session.id)
+
+        var originalData: [RecordingTrackRole: Data] = [:]
+        for index in session.tracks.indices {
+            let role = session.tracks[index].role
+            let relativePath = role == .localSpeaker
+                ? "tracks/microphone.caf"
+                : "tracks/system-audio.caf"
+            session.tracks[index].status = .interrupted
+            session.tracks[index].audioRelativePath = relativePath
+            session.tracks[index].formatIdentifier = nil
+            session.tracks[index].sampleRate = 0
+            session.tracks[index].channelCount = 0
+            session.tracks[index].lastHostTime = nil
+            session.tracks[index].durationMilliseconds = 0
+            session.tracks[index].byteCount = 0
+            session.tracks[index].timestampAnchors = [
+                TrackTimestampAnchor(
+                    hostTime: role == .localSpeaker ? 1_010 : 1_000,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: role == .localSpeaker ? 10 : 0
+                )
+            ]
+            let url = paths.sessionDirectory.appendingPathComponent(relativePath)
+            try writeImpulseCAF(url: url, impulseFrame: role == .localSpeaker ? 10 : 20)
+            originalData[role] = try Data(contentsOf: url)
+        }
+        try await store.create(session)
+
+        let recovery = InterruptedMeetingCaptureRecovery(
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_100) }
+        )
+        let recovered = try await recovery.recover(sessionID: session.id)
+
+        #expect(recovered.status == .paused)
+        #expect(recovered.tracks.allSatisfy { $0.status == .finalized })
+        #expect(recovered.tracks.allSatisfy {
+            $0.formatIdentifier == "lpcm"
+                && $0.sampleRate == 48_000
+                && $0.channelCount == 1
+                && $0.durationMilliseconds == 500
+                && $0.byteCount > 0
+        })
+        #expect(recovered.synchronization?.quality == .degraded)
+        #expect(recovered.synchronization?.initialOffsetMilliseconds == 10)
+        #expect(recovered.qualityReport?.synchronizationQuality == .degraded)
+        for track in recovered.tracks {
+            let url = paths.sessionDirectory.appendingPathComponent(track.audioRelativePath!)
+            #expect(try Data(contentsOf: url) == originalData[track.role])
+        }
+    }
+
     @Test func meetingProcessingWorkflowPublishesTranscriptionAndMergeBoundaries() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingWorkflow-\(UUID())", isDirectory: true)
@@ -3386,6 +3450,55 @@ struct FlowDictateTests {
         #expect(message == paused.lastErrorMessage)
         #expect(retainedAudioURL?.lastPathComponent == paused.id.uuidString)
         #expect(harness.coordinator.latestOutputNotice?.contains("History") == true)
+    }
+
+    @MainActor
+    @Test func continuingMeetingFromHistoryDefersInsertionUntilExplicitUserAction() async throws {
+        var paused = makeValidMixedRecordingSession()
+        paused.status = .paused
+        paused.lastErrorCategory = .interrupted
+        paused.lastErrorMessage = "Meeting processing was interrupted."
+        paused.tracks[0].status = .interrupted
+        let record = try DictationRecord.meetingSession(paused)
+
+        var completed = makeValidMixedRecordingSession()
+        completed.id = paused.id
+        completed.recordID = paused.recordID
+        completed.status = .completed
+        completed.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        completed.finalTranscript = "[You] Recovered\n[System Audio] Safely"
+        completed.completionMode = .allTracks
+        completed.transcriptInsertionState = .ready
+        completed.transcriptInsertionAttemptCount = 0
+        for index in completed.tracks.indices {
+            completed.tracks[index].status = .transcribed
+            completed.tracks[index].transcriptionSessionID = UUID()
+            completed.tracks[index].transcriptRelativePath =
+                "transcription/track-\(index).json"
+        }
+        let workflow = StubMeetingProcessingWorkflow(result: completed)
+        let insertionGate = StubMeetingTranscriptInsertionGate(beginDecision: .deferred)
+        let harness = makeCoordinatorHarness(
+            recordingSource: .mixed,
+            meetingProcessingWorkflow: workflow,
+            meetingTranscriptInsertionGate: insertionGate
+        )
+
+        harness.coordinator.continueMeetingProcessing(record)
+        for _ in 0..<80 {
+            if await workflow.runCount > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        for _ in 0..<80 where harness.coordinator.state != .idle {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await workflow.runCount == 1)
+        #expect(await insertionGate.beginCount == 1)
+        #expect(await insertionGate.lastTargetIsAvailable == false)
+        #expect(harness.inserter.insertCount == 0)
+        #expect(harness.coordinator.latestOutputNotice?.contains("History") == true)
+        #expect(harness.coordinator.state == .idle)
     }
 
     @MainActor
@@ -5668,6 +5781,7 @@ private actor StubMeetingTranscriptInsertionGate: MeetingTranscriptInsertionGati
     private(set) var beginCount = 0
     private(set) var completedCount = 0
     private(set) var deferredCount = 0
+    private(set) var lastTargetIsAvailable: Bool?
 
     init(
         beginDecision: MeetingTranscriptInsertionDecision,
@@ -5682,6 +5796,7 @@ private actor StubMeetingTranscriptInsertionGate: MeetingTranscriptInsertionGati
         targetIsAvailable: Bool
     ) async throws -> MeetingTranscriptInsertionDecision {
         beginCount += 1
+        lastTargetIsAvailable = targetIsAvailable
         return beginDecision
     }
 

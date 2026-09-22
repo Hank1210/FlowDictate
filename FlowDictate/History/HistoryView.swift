@@ -212,6 +212,12 @@ struct HistoryView: View {
                 }
                 HStack(alignment: .top) {
                     if record.meetingSummary != nil {
+                        if record.meetingSummary?.canResumeProcessing == true {
+                            Button("Continue Processing") {
+                                coordinator.continueMeetingProcessing(record)
+                            }
+                            .disabled(retryingRecordIDs.contains(record.id))
+                        }
                         Button("Show Session in Finder") {
                             coordinator.revealMeetingSession(for: record)
                         }
