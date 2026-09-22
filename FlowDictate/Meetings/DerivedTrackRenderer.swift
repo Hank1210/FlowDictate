@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Foundation
+import os
 
 nonisolated struct DerivedTrackArtifact: Sendable, Equatable {
     var role: RecordingTrackRole
@@ -80,6 +81,11 @@ nonisolated final class DerivedTrackRenderer: @unchecked Sendable {
         sessionDirectory: URL
     ) async throws -> DerivedTrackRenderResult {
         let validated = try session.validated()
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Meeting Derived Render", id: .exclusive,
+            "session: \(validated.id.uuidString, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Meeting Derived Render", signpost) }
         guard let synchronization = validated.synchronization else {
             throw DerivedTrackRendererError.synchronizationUnavailable
         }
@@ -103,7 +109,7 @@ nonisolated final class DerivedTrackRenderer: @unchecked Sendable {
         )
         let fileManager = fileManager
         let targetSampleRate = targetSampleRate
-        return try await Task.detached(priority: .utility) {
+        let result = try await Task.detached(priority: .utility) {
             var artifacts: [DerivedTrackArtifact] = []
             for plan in plans {
                 try Task.checkCancellation()
@@ -113,6 +119,13 @@ nonisolated final class DerivedTrackRenderer: @unchecked Sendable {
             }
             return DerivedTrackRenderResult(tracks: artifacts)
         }.value
+        for track in result.tracks {
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Derived Track", id: .exclusive,
+                "role: \(track.role.rawValue, privacy: .public), frames: \(track.frameCount), bytes: \(track.byteCount)"
+            )
+        }
+        return result
     }
 
     private func makePlans(

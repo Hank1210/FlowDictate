@@ -371,6 +371,7 @@ actor MixedRecordingSessionCoordinator {
             "session: \(sessionID.uuidString, privacy: .public)"
         )
         defer { FlowLogger.meetingSignposter.endInterval("Mixed Session Stop", signpost) }
+        FlowLogger.meetingSignposter.emitEvent("Meeting Stop Requested", id: signpostID)
         state = .finalizing(sessionID)
         session.status = .finalizing
         session.updatedAt = now()
@@ -393,6 +394,18 @@ actor MixedRecordingSessionCoordinator {
                     "Meeting Last Sample", id: signpostID,
                     "role: \(role.rawValue, privacy: .public), hostTime: \(result.lastHostTime), bytes: \(result.byteCount), gaps: \(result.gaps.count), dropped: \(result.quality.droppedBufferCount), clipped: \(result.quality.clippedFrameCount)"
                 )
+                FlowLogger.meetingSignposter.emitEvent(
+                    "Meeting Writer Finalized", id: signpostID,
+                    "role: \(role.rawValue, privacy: .public), bytes: \(result.byteCount)"
+                )
+                if FlowLogger.meetingSignposter.isEnabled {
+                    for gap in result.gaps {
+                        FlowLogger.meetingSignposter.emitEvent(
+                            "Meeting Track Gap", id: signpostID,
+                            "role: \(role.rawValue, privacy: .public), startMs: \(gap.startMilliseconds), endMs: \(gap.endMilliseconds), reason: \(gap.reason.rawValue, privacy: .public)"
+                        )
+                    }
+                }
             case .failure:
                 FlowLogger.meetingSignposter.emitEvent(
                     "Meeting Track Lost", id: signpostID,

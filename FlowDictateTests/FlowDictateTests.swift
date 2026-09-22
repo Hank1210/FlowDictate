@@ -1017,6 +1017,91 @@ struct FlowDictateTests {
         #expect(try Data(contentsOf: systemAudioURL) == Data("system-audio-original".utf8))
     }
 
+    @Test func meetingRestartNormalizesEverySessionAndTrackStatusWithoutChangingOriginals() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingStatusMatrix-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let statuses: [MeetingSessionStatus] = [
+            .preparing, .recording, .finalizing, .queued, .transcribing,
+            .merging, .completed, .partial, .paused, .failed, .cancelled
+        ]
+        let interruptedSessionStatuses: [MeetingSessionStatus] = [
+            .preparing, .recording, .finalizing, .transcribing, .merging
+        ]
+        let interruptedTrackStatuses: [TrackCaptureStatus] = [
+            .preparing, .recording, .transcribing
+        ]
+        var originalSessions: [MixedRecordingSession] = []
+        var originalFiles: [URL: Data] = [:]
+
+        for status in statuses {
+            var session = status == .completed
+                ? makeCompletedMixedRecordingSession(insertionState: .completed)
+                : makeValidMixedRecordingSession()
+            session.id = UUID()
+            session.recordID = UUID()
+            session.status = status
+            let trackStatuses: [TrackCaptureStatus] = switch status {
+            case .preparing: [.preparing, .preparing]
+            case .recording, .finalizing: [.recording, .recording]
+            case .queued: [.transcriptionPending, .transcriptionPending]
+            case .transcribing: [.transcribing, .transcribing]
+            case .merging, .completed: [.transcribed, .transcribed]
+            case .partial: [.transcribed, .unavailable]
+            case .paused: [.interrupted, .interrupted]
+            case .failed: [.failed, .failed]
+            case .cancelled: [.finalized, .finalized]
+            }
+            for index in session.tracks.indices {
+                session.tracks[index].status = trackStatuses[index]
+                if trackStatuses[index] == .transcribed {
+                    session.tracks[index].transcriptionSessionID = UUID()
+                    session.tracks[index].transcriptRelativePath =
+                        "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+                }
+            }
+            let paths = try await store.prepareSession(id: session.id)
+            for track in session.tracks {
+                let url = paths.sessionDirectory.appendingPathComponent(
+                    try #require(track.audioRelativePath)
+                )
+                let data = Data("original-\(status.rawValue)-\(track.role.rawValue)".utf8)
+                try data.write(to: url)
+                originalFiles[url] = data
+            }
+            try await store.create(session)
+            originalSessions.append(session)
+        }
+
+        let recoveryDate = Date(timeIntervalSince1970: 1_800_000_100)
+        let restartedStore = MeetingSessionStore(rootURL: root)
+        let normalized = try await restartedStore.normalizeInterruptedSessions(now: recoveryDate)
+        #expect(Set(normalized.map(\.id)) == Set(originalSessions.filter {
+            interruptedSessionStatuses.contains($0.status)
+        }.map(\.id)))
+
+        for original in originalSessions {
+            let restored = try #require(try await restartedStore.load(sessionID: original.id))
+            let shouldPause = interruptedSessionStatuses.contains(original.status)
+            #expect(restored.status == (shouldPause ? .paused : original.status))
+            #expect(restored.updatedAt == (shouldPause ? recoveryDate : original.updatedAt))
+            for (before, after) in zip(original.tracks, restored.tracks) {
+                let expectedStatus: TrackCaptureStatus = interruptedTrackStatuses.contains(
+                    before.status
+                ) ? .interrupted : before.status
+                #expect(after.status == expectedStatus)
+                #expect(after.audioRelativePath == before.audioRelativePath)
+                #expect(after.byteCount == before.byteCount)
+                #expect(after.timestampAnchors == before.timestampAnchors)
+            }
+        }
+        for (url, data) in originalFiles {
+            #expect(try Data(contentsOf: url) == data)
+        }
+        #expect(try await restartedStore.normalizeInterruptedSessions(now: recoveryDate).isEmpty)
+    }
+
     @Test func meetingSessionStoreRejectsFutureSchemaWithoutRewritingIt() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingFuture-\(UUID())", isDirectory: true)

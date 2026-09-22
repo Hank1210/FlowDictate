@@ -95,6 +95,10 @@ actor MeetingHistorySynchronizer {
             session.normalizeInterruptedWork(now: max(now, session.updatedAt))
             if session != previous {
                 try await sessionStore.save(session)
+                FlowLogger.meetingSignposter.emitEvent(
+                    "Meeting Recovery Normalized", id: .exclusive,
+                    "session: \(session.id.uuidString, privacy: .public), from: \(previous.status.rawValue, privacy: .public), to: \(session.status.rawValue, privacy: .public)"
+                )
             }
             recovered.append(try await sync(session))
         }

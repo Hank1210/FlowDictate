@@ -628,7 +628,7 @@ Mindestens:
 
 Logs enthalten nur IDs, Zustände, Zeiten, Größen und grobe Qualitätswerte; keine Texte, Audiopfade, App-/Fensternamen oder Teilnehmerdaten.
 
-**Zwischenstand 22. September 2026:** Inhaltsfreie OS-Signposts markieren Mixed-Session-Start/-Stop, Manifest- und Historypersistenz, Trackvorbereitung, erste/letzte Sampleanker, Trackverlust, Synchronisierung und verknüpfte Recovery. Sie enthalten ausschließlich Session-ID, Rolle, Status, Hostzeit, Größen und Qualitätszähler. Die übrigen Messpunkte aus 13.1 — insbesondere Preflight, Derived Rendering, Segmente und Merge — bleiben offen.
+**Zwischenstand 22. September 2026:** Inhaltsfreie OS-Signposts markieren Mixed-Preflight, Sessionstart/-stop, Manifest- und Historypersistenz, Trackvorbereitung, erste/letzte Sampleanker, Writer-Finalisierung, Gaps, Trackverlust, Synchronisierung, Derived Rendering, Tracktranskription, Segmentintervalle der gemeinsamen Long-Form-Pipeline, Merge und verknüpfte Recovery-Normalisierung. Sie enthalten nur UUIDs, Rollen, Zustände, Hostzeiten, Größen und grobe Qualitätszähler; weder Text noch Audio-/Transkriptpfade oder Zielanwendungen. Die Events unterscheiden einen erkannten Trackverlust noch nicht zuverlässig nach Writer-, Geräte- und Quellenfehler. Die Signposts liefern erste Messpunkte; die Performancebudgets aus 13.4 sind noch nicht mit realen Langläufen nachgewiesen.
 
 ### 13.2 Verbindliche automatisierte Szenarien
 
@@ -643,7 +643,7 @@ Logs enthalten nur IDs, Zustände, Zeiten, Größen und grobe Qualitätswerte; k
 - lokale Inferenzlast während Dual Capture,
 - 4.0-Queue-, Single-Track-, Preview- und Insertionregression.
 
-**Automatisierter Zwischenstand 22. September 2026:** Zehn aufeinanderfolgende Mixed Sessions mit getrennten Originalspuren, persistiertem Manifest und wiederholten Start-/Stop-Aufrufen sind als Regressionstest ergänzt. Ein kontrolliert angehaltener Stop prüft konkurrierende Stop-/Cancel-/Start-Aufrufe im Zustand `finalizing`; Mikrofon-Prepare- und Mikrofon-Stopfehler ergänzen die vorhandenen Systemaudio-Fehlerfälle und prüfen den Erhalt des jeweils noch verfügbaren Zustands beziehungsweise Originals. Zusammen mit den Retention-Grenzfällen: vollständige serielle Regression 188/188 bestanden, Universal-Debug-Build `arm64 x86_64` erfolgreich. Ein Bestehen ersetzt weder echte Capture-Last noch die übrigen Fehler-/Restartmatrizen.
+**Automatisierter Zwischenstand 22. September 2026:** Zehn aufeinanderfolgende Mixed Sessions mit getrennten Originalspuren, persistiertem Manifest und wiederholten Start-/Stop-Aufrufen sind als Regressionstest ergänzt. Ein kontrolliert angehaltener Stop prüft konkurrierende Stop-/Cancel-/Start-Aufrufe im Zustand `finalizing`; Mikrofon-Prepare- und Mikrofon-Stopfehler ergänzen die vorhandenen Systemaudio-Fehlerfälle und prüfen den Erhalt des jeweils noch verfügbaren Zustands beziehungsweise Originals. Eine persistierte Restart-Matrix deckt alle elf Sessionstatus und alle Trackstatus ab: Nur aktive Arbeit wird normalisiert, beide Originale bleiben bytegleich und ein zweiter Recovery-Lauf ist idempotent. Zusammen mit den Retention-Grenzfällen: vollständige serielle Regression 189/189 bestanden, Universal-Debug-Build `arm64 x86_64` erfolgreich. Ein Bestehen ersetzt weder echte Capture-Last noch die übrigen Fehler-, Segment- und Policy-Matrizen.
 
 ### 13.3 Manuelle und private Langzeittests
 
@@ -805,4 +805,4 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen, Partial-/Retry, Warnzustände für Trackverlust und Clipping sowie Retention und Archivierung sind bestanden. Schritt 4.1.7 läuft: Erste Signposts und der Zehn-Sessions-Test sind implementiert. Als Nächstes folgen die fehlenden Messpunkte, die automatisierten Fehler-/Restartmatrizen und die privaten realen Langzeit-/Performance-Gates. Bis dahin kein Releasekandidat.
+Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen, Partial-/Retry, Warnzustände für Trackverlust und Clipping sowie Retention und Archivierung sind bestanden. Schritt 4.1.7 läuft: Die inhaltsfreien Messpunkte, der Zehn-Sessions-Test, das Stop-Rennen und die vollständige Status-Recovery-Matrix sind implementiert. Als Nächstes folgen Crash nach erfolgreichen Segmenten beider Tracks, Speicher-/Policy-Matrizen, Fehlerklassifizierung und die privaten realen Langzeit-/Performance-Gates. Bis dahin kein Releasekandidat.

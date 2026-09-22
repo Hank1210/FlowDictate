@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import os
 
 @MainActor
 final class LongFormTranscriptionRunner {
@@ -143,6 +144,15 @@ final class LongFormTranscriptionRunner {
             try await persist(updated)
 
             for index in manifest.segments.indices where manifest.segments[index].status != .succeeded {
+                let segmentSignpost = FlowLogger.transcriptionSignposter.beginInterval(
+                    "Transcription Segment", id: .exclusive,
+                    "record: \(record.id.uuidString, privacy: .public), index: \(index), total: \(manifest.segments.count)"
+                )
+                defer {
+                    FlowLogger.transcriptionSignposter.endInterval(
+                        "Transcription Segment", segmentSignpost
+                    )
+                }
                 try Task.checkCancellation()
                 let total = manifest.segments.count
                 progress(.preparing(segment: index, total: total))
@@ -219,6 +229,10 @@ final class LongFormTranscriptionRunner {
                 manifest.modelID = result.model
                 manifest.updatedAt = Date()
                 try await sessionStore.save(manifest)
+                FlowLogger.transcriptionSignposter.emitEvent(
+                    "Transcription Segment Persisted", id: .exclusive,
+                    "index: \(index), bytes: \(byteCount), attempts: \(manifest.segments[index].attemptCount)"
+                )
                 await sessionStore.removeWorkFile(recordID: record.id, segmentIndex: index)
 
                 updateSummary(record: &updated, manifest: manifest)

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated struct TrackTranscriptionRequest: Sendable, Equatable {
     var meetingSessionID: UUID
@@ -160,6 +161,11 @@ actor TrackTranscriptionRunner {
     /// Runs each non-terminal track independently. Track-level failures are
     /// persisted and do not prevent the other track from completing.
     func run(sessionID: UUID) async throws -> MixedRecordingSession {
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Meeting Track Processing", id: .exclusive,
+            "session: \(sessionID.uuidString, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Meeting Track Processing", signpost) }
         if let processingQueue {
             _ = try await processingQueue.beginMeetingProcessing(sessionID: sessionID)
         }
@@ -198,6 +204,16 @@ actor TrackTranscriptionRunner {
             }
             if [.transcribed, .unavailable].contains(session.tracks[index].status) {
                 continue
+            }
+
+            let trackSignpost = FlowLogger.meetingSignposter.beginInterval(
+                "Meeting Track Transcription", id: .exclusive,
+                "role: \(role.rawValue, privacy: .public)"
+            )
+            defer {
+                FlowLogger.meetingSignposter.endInterval(
+                    "Meeting Track Transcription", trackSignpost
+                )
             }
 
             let transcriptionSessionID = session.tracks[index].transcriptionSessionID ?? UUID()
@@ -268,6 +284,10 @@ actor TrackTranscriptionRunner {
                 session.tracks[index].errorMessage = nil
                 updateTimestamp(&session)
                 try await store.save(session)
+                FlowLogger.meetingSignposter.emitEvent(
+                    "Meeting Track Transcript Persisted", id: .exclusive,
+                    "role: \(role.rawValue, privacy: .public), segments: \(output.segmentCount)"
+                )
             } catch is CancellationError {
                 session.tracks[index].status = .interrupted
                 session.tracks[index].errorCategory = .interrupted

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 nonisolated enum TimedTranscriptMergeError: LocalizedError, Equatable {
     case sessionNotFound(UUID)
@@ -288,6 +289,11 @@ actor MeetingTranscriptMergeRunner {
         guard [.merging, .paused, .failed].contains(session.status) else {
             throw TimedTranscriptMergeError.invalidSessionState(session.status)
         }
+        let signpost = FlowLogger.meetingSignposter.beginInterval(
+            "Meeting Transcript Merge", id: .exclusive,
+            "session: \(sessionID.uuidString, privacy: .public)"
+        )
+        defer { FlowLogger.meetingSignposter.endInterval("Meeting Transcript Merge", signpost) }
         let paths = try await store.prepareSession(id: sessionID)
         session.status = .merging
         session.lastErrorCategory = nil
@@ -324,6 +330,10 @@ actor MeetingTranscriptMergeRunner {
             session.lastErrorMessage = nil
             session.updatedAt = max(now(), session.updatedAt)
             try await store.save(session)
+            FlowLogger.meetingSignposter.emitEvent(
+                "Meeting Timeline Persisted", id: .exclusive,
+                "entries: \(timeline.entries.count), status: \(session.status.rawValue, privacy: .public)"
+            )
             return session
         } catch {
             session.status = .paused

@@ -13,4 +13,8 @@ enum FlowLogger {
         subsystem: subsystem,
         category: "meeting-performance"
     )
+    nonisolated static let transcriptionSignposter = OSSignposter(
+        subsystem: subsystem,
+        category: "transcription-performance"
+    )
 }

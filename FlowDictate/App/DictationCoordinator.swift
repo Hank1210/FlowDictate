@@ -4,6 +4,7 @@ import Combine
 import CoreAudio
 import Foundation
 import OSLog
+import os
 import UniformTypeIdentifiers
 
 @MainActor
@@ -2510,12 +2511,24 @@ final class DictationCoordinator: ObservableObject {
     private func startRecording() async {
         latestOutputNotice = nil
         latestOutputURL = nil
+        let isMixedRequest = settings.recordingAudioSource == .mixed
+        let startSignpost = isMixedRequest
+            ? FlowLogger.meetingSignposter.beginInterval("Meeting Start Request")
+            : nil
+        defer {
+            if let startSignpost {
+                FlowLogger.meetingSignposter.endInterval(
+                    "Meeting Start Request", startSignpost
+                )
+            }
+        }
         guard !transcriptionRestartRequired else {
             setupMessage = "Transcription settings changed. Use Quit & Restart before starting another dictation."
             return
         }
         if settings.recordingAudioSource == .mixed {
             guard hasCurrentMeetingRecordingConsent else {
+                FlowLogger.meetingSignposter.emitEvent("Meeting Consent Required")
                 presentMeetingRecordingConsent()
                 return
             }
@@ -2585,6 +2598,9 @@ final class DictationCoordinator: ObservableObject {
         do {
             queueSnapshot = try await processingQueue.reserveRecordingSlot()
             hasQueueReservation = true
+            if isMixedRequest {
+                FlowLogger.meetingSignposter.emitEvent("Meeting Queue Slot Reserved")
+            }
         } catch {
             fail(error, retainedAudioURL: nil)
             return
@@ -2593,8 +2609,14 @@ final class DictationCoordinator: ObservableObject {
             if settings.recordingAudioSource == .microphone
                 || settings.recordingAudioSource == .mixed {
                 try await permissionManager.ensureMicrophoneAccess()
+                if isMixedRequest {
+                    FlowLogger.meetingSignposter.emitEvent("Meeting Microphone Permission Ready")
+                }
             }
             try permissionManager.ensureEventPostingAccess()
+            if isMixedRequest {
+                FlowLogger.meetingSignposter.emitEvent("Meeting Input Permission Ready")
+            }
             sessionConfiguration = configuration
             refreshPermissionStatus()
             if settings.recordingAudioSource == .microphone,
@@ -2604,10 +2626,12 @@ final class DictationCoordinator: ObservableObject {
                 refreshLivePreviewAvailability()
             }
             if settings.recordingAudioSource == .mixed {
+                FlowLogger.meetingSignposter.emitEvent("Meeting Preflight Passed")
                 try await startMixedRecording(
                     target: target,
                     configuration: configuration
                 )
+                FlowLogger.meetingSignposter.emitEvent("Meeting Recording Visible")
                 return
             }
             sessionRecorder = settings.recordingAudioSource == .systemAudio
