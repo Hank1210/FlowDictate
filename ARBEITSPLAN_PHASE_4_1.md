@@ -643,7 +643,7 @@ Logs enthalten nur IDs, Zustände, Zeiten, Größen und grobe Qualitätswerte; k
 - lokale Inferenzlast während Dual Capture,
 - 4.0-Queue-, Single-Track-, Preview- und Insertionregression.
 
-**Automatisierter Zwischenstand 22. September 2026:** Zehn aufeinanderfolgende Mixed Sessions mit getrennten Originalspuren, persistiertem Manifest und wiederholten Start-/Stop-Aufrufen sind als Regressionstest ergänzt. Zusammen mit den Retention-Grenzfällen: vollständige serielle Regression 185/185 bestanden, Universal-Debug-Build `arm64 x86_64` erfolgreich. Ein Bestehen ersetzt weder echte Capture-Last noch die übrigen Fehler-/Restartmatrizen.
+**Automatisierter Zwischenstand 22. September 2026:** Zehn aufeinanderfolgende Mixed Sessions mit getrennten Originalspuren, persistiertem Manifest und wiederholten Start-/Stop-Aufrufen sind als Regressionstest ergänzt. Ein kontrolliert angehaltener Stop prüft konkurrierende Stop-/Cancel-/Start-Aufrufe im Zustand `finalizing`; Mikrofon-Prepare- und Mikrofon-Stopfehler ergänzen die vorhandenen Systemaudio-Fehlerfälle und prüfen den Erhalt des jeweils noch verfügbaren Zustands beziehungsweise Originals. Zusammen mit den Retention-Grenzfällen: vollständige serielle Regression 188/188 bestanden, Universal-Debug-Build `arm64 x86_64` erfolgreich. Ein Bestehen ersetzt weder echte Capture-Last noch die übrigen Fehler-/Restartmatrizen.
 
 ### 13.3 Manuelle und private Langzeittests
 

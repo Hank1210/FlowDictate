@@ -2326,6 +2326,50 @@ struct FlowDictateTests {
         #expect(recordIDs.count == 10)
     }
 
+    @Test func mixedCoordinatorRejectsConcurrentTransitionsWhileStopIsFinalizing() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedStopRace-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let stopGate = MockMixedStopGate()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(
+                role: .localSpeaker, events: events, stopGate: stopGate
+            ),
+            systemAudioRecorder: MockMixedTrackRecorder(
+                role: .systemAudio, events: events
+            ),
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: nil
+        )
+        _ = try await coordinator.start(request)
+
+        let firstStop = Task { try await coordinator.stop() }
+        await stopGate.waitUntilEntered()
+        #expect(await coordinator.state == .finalizing(request.sessionID))
+        await #expect(throws: MixedRecordingCoordinatorError.transitionInProgress) {
+            _ = try await coordinator.stop()
+        }
+        await #expect(throws: MixedRecordingCoordinatorError.transitionInProgress) {
+            _ = try await coordinator.cancel()
+        }
+        await #expect(throws: MixedRecordingCoordinatorError.alreadyActive) {
+            _ = try await coordinator.start(request)
+        }
+
+        await stopGate.release()
+        let stopped = try await firstStop.value
+        #expect(stopped.status == .queued)
+        #expect(stopped.tracks.allSatisfy { $0.status == .finalized })
+        #expect(try await store.load(sessionID: request.sessionID) == stopped)
+        #expect(await coordinator.state == .idle)
+    }
+
     @Test func mixedCoordinatorForwardsTypedTrackWarnings() async {
         let events = MixedTrackTestEventLog()
         let microphone = MockMixedTrackRecorder(role: .localSpeaker, events: events)
@@ -2458,6 +2502,82 @@ struct FlowDictateTests {
         #expect(recordedEvents.contains(.cancel(.localSpeaker)))
         #expect(recordedEvents.contains(.cancel(.systemAudio)))
         #expect(await coordinator.state == .idle)
+    }
+
+    @Test func mixedCoordinatorMicrophonePrepareFailurePreservesFailedManifest() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedMicPrepareFailure-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(
+                role: .localSpeaker, events: events,
+                prepareError: .requested("microphone unavailable")
+            ),
+            systemAudioRecorder: MockMixedTrackRecorder(
+                role: .systemAudio, events: events
+            ),
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: nil
+        )
+
+        await #expect(throws: MixedRecordingCoordinatorError.trackFailed(
+            role: .localSpeaker, phase: .prepare,
+            message: "microphone unavailable"
+        )) {
+            _ = try await coordinator.start(request)
+        }
+        let failed = try #require(try await store.load(sessionID: request.sessionID))
+        let recordedEvents = await events.values
+        #expect(failed.status == .failed)
+        #expect(failed.tracks.first(where: { $0.role == .localSpeaker })?.status == .unavailable)
+        #expect(failed.tracks.first(where: { $0.role == .systemAudio })?.status == .interrupted)
+        #expect(recordedEvents.contains(.cancel(.localSpeaker)))
+        #expect(recordedEvents.contains(.cancel(.systemAudio)))
+        #expect(await coordinator.state == .idle)
+    }
+
+    @Test func mixedCoordinatorMicrophoneStopFailurePreservesSystemOriginal() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedMicStopFailure-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(
+                role: .localSpeaker, events: events,
+                stopError: .requested("microphone writer failed")
+            ),
+            systemAudioRecorder: MockMixedTrackRecorder(
+                role: .systemAudio, events: events
+            ),
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: nil
+        )
+
+        _ = try await coordinator.start(request)
+        let partial = try await coordinator.stop()
+        let systemTrack = try #require(partial.tracks.first {
+            $0.role == .systemAudio
+        })
+        let systemAudioURL = root.appendingPathComponent(request.sessionID.uuidString)
+            .appendingPathComponent(try #require(systemTrack.audioRelativePath))
+
+        #expect(partial.status == .partial)
+        #expect(partial.tracks.first(where: { $0.role == .localSpeaker })?.status == .failed)
+        #expect(systemTrack.status == .finalized)
+        #expect(systemTrack.byteCount > 0)
+        #expect(FileManager.default.fileExists(atPath: systemAudioURL.path))
+        #expect(try await store.load(sessionID: request.sessionID) == partial)
     }
 
     @Test func mixedCoordinatorCancelPreservesTracksAndAllowsAnotherSession() async throws {
@@ -6252,6 +6372,32 @@ private nonisolated enum MockMixedTrackError: LocalizedError, Sendable, Equatabl
     }
 }
 
+private actor MockMixedStopGate {
+    private var entered = false
+    private var released = false
+    private var enterWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func block() async {
+        entered = true
+        enterWaiters.forEach { $0.resume() }
+        enterWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enterWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
 private actor MockMixedTrackRecorder: MixedTrackRecording {
     nonisolated let role: RecordingTrackRole
 
@@ -6259,6 +6405,7 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
     private let prepareError: MockMixedTrackError?
     private let startError: MockMixedTrackError?
     private let stopError: MockMixedTrackError?
+    private let stopGate: MockMixedStopGate?
     private let returnsCaptureOnCancel: Bool
     private var outputURL: URL?
     private var warningHandler: MixedTrackWarningHandler?
@@ -6270,6 +6417,7 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
         prepareError: MockMixedTrackError? = nil,
         startError: MockMixedTrackError? = nil,
         stopError: MockMixedTrackError? = nil,
+        stopGate: MockMixedStopGate? = nil,
         returnsCaptureOnCancel: Bool = false
     ) {
         self.role = role
@@ -6277,6 +6425,7 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
         self.prepareError = prepareError
         self.startError = startError
         self.stopError = stopError
+        self.stopGate = stopGate
         self.returnsCaptureOnCancel = returnsCaptureOnCancel
     }
 
@@ -6316,6 +6465,7 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
 
     func stop() async throws -> MixedTrackCaptureResult {
         await events.append(.stop(role))
+        if let stopGate { await stopGate.block() }
         if let stopError { throw stopError }
         return try captureResult()
     }
