@@ -31,6 +31,7 @@ struct HistoryView: View {
     @State private var retryingRecordIDs: Set<UUID>
     @State private var retryingEnhancementRecordIDs: Set<UUID>
     @State private var writingStyles: [WritingStyleProfile]
+    @State private var meetingPendingDeletion: DictationRecord?
 
     init(coordinator: DictationCoordinator) {
         self.coordinator = coordinator
@@ -38,6 +39,7 @@ struct HistoryView: View {
         _retryingRecordIDs = State(initialValue: coordinator.retryingRecordIDs)
         _retryingEnhancementRecordIDs = State(initialValue: coordinator.retryingEnhancementRecordIDs)
         _writingStyles = State(initialValue: coordinator.writingStyles)
+        _meetingPendingDeletion = State(initialValue: nil)
     }
 
     enum HistoryFilter: String, CaseIterable, Identifiable {
@@ -107,6 +109,30 @@ struct HistoryView: View {
         .onReceive(coordinator.$retryingRecordIDs) { retryingRecordIDs = $0 }
         .onReceive(coordinator.$retryingEnhancementRecordIDs) { retryingEnhancementRecordIDs = $0 }
         .onReceive(coordinator.$writingStyles) { writingStyles = $0 }
+        .confirmationDialog(
+            "Delete Meeting Session?",
+            isPresented: Binding(
+                get: { meetingPendingDeletion != nil },
+                set: { if !$0 { meetingPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: meetingPendingDeletion
+        ) { record in
+            Button("Delete Session and Original Tracks", role: .destructive) {
+                coordinator.deleteMeetingSession(record)
+                if selection == record.id { selection = nil }
+                meetingPendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) {
+                meetingPendingDeletion = nil
+            }
+        } message: { _ in
+            Text(
+                "This permanently deletes both original audio tracks, derived files, "
+                    + "transcription segments, the merged timeline, and the History entry. "
+                    + "This action cannot be undone."
+            )
+        }
     }
 
     private func detail(_ record: DictationRecord) -> some View {
@@ -151,7 +177,7 @@ struct HistoryView: View {
                 }
 
                 if let meeting = record.meetingSummary {
-                    meetingSummary(meeting)
+                    meetingSummary(meeting, record: record)
                 }
 
                 if record.meetingSummary != nil {
@@ -272,14 +298,33 @@ struct HistoryView: View {
                     }
                 }
                 Divider()
-                Button("Delete History Entry", role: .destructive) {
-                    coordinator.deleteHistoryRecord(record, deleteAudio: false); selection = nil
+                if let meeting = record.meetingSummary {
+                    HStack {
+                        Button("Archive History Entry") {
+                            coordinator.deleteHistoryRecord(record, deleteAudio: false)
+                            selection = nil
+                        }
+                        Button("Delete Meeting and Files…", role: .destructive) {
+                            meetingPendingDeletion = record
+                        }
+                        .disabled(
+                            !meeting.canDeleteSession || retryingRecordIDs.contains(record.id)
+                        )
+                    }
+                } else {
+                    Button("Delete History Entry", role: .destructive) {
+                        coordinator.deleteHistoryRecord(record, deleteAudio: false)
+                        selection = nil
+                    }
                 }
             }.padding(24)
         }
     }
 
-    private func meetingSummary(_ meeting: MeetingHistorySummary) -> some View {
+    private func meetingSummary(
+        _ meeting: MeetingHistorySummary,
+        record: DictationRecord
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Microphone + System Audio", systemImage: "waveform")
@@ -291,24 +336,35 @@ struct HistoryView: View {
             }
 
             ForEach(meeting.tracks) { track in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Label(track.title, systemImage: track.statusSymbolName)
-                        .frame(width: 150, alignment: .leading)
-                    Text(track.statusTitle)
-                    Spacer()
-                    Text(track.durationMilliseconds.formattedDuration)
-                        .monospacedDigit()
-                    if track.gapCount > 0 {
-                        Label("\(track.gapCount) gap(s)", systemImage: "exclamationmark.circle")
-                            .foregroundStyle(.orange)
+                HStack(alignment: .center, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Label(track.title, systemImage: track.statusSymbolName)
+                            .frame(width: 150, alignment: .leading)
+                        Text(track.statusTitle)
+                        Spacer()
+                        Text(track.durationMilliseconds.formattedDuration)
+                            .monospacedDigit()
+                        if track.gapCount > 0 {
+                            Label("\(track.gapCount) gap(s)", systemImage: "exclamationmark.circle")
+                                .foregroundStyle(.orange)
+                        }
+                        if track.clippedFrameCount > 0 {
+                            Label("Clipping", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                        }
                     }
-                    if track.clippedFrameCount > 0 {
-                        Label("Clipping", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
+                    .accessibilityElement(children: .combine)
+                    Button {
+                        coordinator.playMeetingTrack(for: record, role: track.role)
+                    } label: {
+                        Label("Play \(track.title)", systemImage: "play.fill")
+                            .labelStyle(.iconOnly)
                     }
+                    .buttonStyle(.borderless)
+                    .disabled(!track.canPlayAudio)
+                    .help("Play \(track.title) original track")
                 }
                 .font(.callout)
-                .accessibilityElement(children: .combine)
             }
 
             Divider()

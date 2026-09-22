@@ -1,8 +1,8 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing und zeitbasierter Merge abgeschlossen, UX und History in Arbeit
-**Stand:** 21. September 2026
+**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing, Merge und die zentralen History-Aktionen abgeschlossen, Hardening in Vorbereitung
+**Stand:** 22. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
 **Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
@@ -102,16 +102,14 @@ Status: `ERLEDIGT` – implementiert, als zusammenhängender Diff geprüft und m
 
 Letzter verifizierter Teststand: 122 Tests erfolgreich am 17. September 2026.
 
-### 4.3 Noch nicht implementiert
+### 4.3 Noch offen
 
-- produktive Hotkey-Anbindung des vollständigen Mixed-Workflows,
-- Dual-Level-Overlay und Warnzustände während echter Mixed-Aufnahmen,
-- produktive Anbindung der neuen Meeting-History an den vollständigen Mixed-Workflow,
-- Trackwiedergabe sowie Resume-, Retry- und bestätigte Delete-Aktionen in der Nutzeroberfläche,
-- Retention für sichtbare Meeting-History,
-- reale Langzeit-, Performance- und Recoverynachweise für vollständige End-to-End-Sessions.
+- manuelle Partial-/Retry-Abnahme bei absichtlich fehlgeschlagener einzelner Tracktranskription,
+- vollständige Retention-Abnahme für sichtbare Meeting-History,
+- gezielte UX-Abnahme der Warnzustände für Trackverlust und Clipping,
+- reale Langzeit-, Performance- und weitere Recoverynachweise für vollständige End-to-End-Sessions.
 
-Der Capture-, Synchronisierungs-, Track-Processing- und Merge-Unterbau ist vorhanden. Die sichtbare Auswahl `.mixed` bleibt für normale Diktation trotzdem technisch gesperrt, bis Schritt 4.1.6 den vollständigen Nutzerablauf, Statusdarstellung und Recoveryzugang integriert.
+Der produktive Mixed-Ablauf ist für Toggle und Press & Hold freigeschaltet. Dual-Level-Overlay, History-Synchronisierung, Restart-Resume, getrennte Originalspurwiedergabe sowie bestätigtes vollständiges Löschen sind implementiert und manuell abgenommen. Die verbleibenden Punkte schließen Schritt 4.1.6 und führen anschließend in das Hardening von Schritt 4.1.7.
 
 ## 5. Zielarchitektur und Abhängigkeiten
 
@@ -543,9 +541,9 @@ Der Merger erzeugt aus reproduzierbaren Trackfixtures eine deterministische, rol
 
 ## 12. Schritt 4.1.6 – Vollständige UX, History und Migration
 
-**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad und Restart-Resume sind implementiert; Trackwiedergabe und bestätigtes Löschen bleiben offen
+**Status:** `IN ARBEIT` – Schema 7, Meeting-History-Synchronisierung, getrennte Live-Pegel, produktiver Mixed-Hotkey-Pfad, Restart-Resume, Trackwiedergabe und bestätigtes Löschen sind implementiert; gezielte Partial-/Retry-Abnahme bleibt offen
 
-**Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Trackwiedergabe und bestätigtes Löschen folgen in einem weiteren Teil dieses Schritts; Restart-Resume ist im fünften Zwischenstand ergänzt.
+**Zwischenstand 21. September 2026:** `DictationRecord` enthält optional eine kompakte, inhaltsfreie Meetingzusammenfassung mit Sessionreferenz, beiden Trackzuständen, Dauer, Dateigröße, Gap-/Clippingzählung, Synchronisationsqualität und Insertion-State. Das Sessionmanifest bleibt die alleinige Quelle für Pfade, Tracktranskripte und Recovery. Beim ersten Schreiben aus Schema 6 entsteht einmalig `dictations-pre-4.1.json`; Single-Track-Einträge werden ohne automatische `.mixed`-Umdeutung weitergelesen. Die History-Detailansicht kennzeichnet Meetings mit Text und Symbol, zeigt beide Tracks, Qualitätswarnungen und eine gemeinsame Rollen-Timeline und bietet Finder, Copy, Export sowie Insert. Restart-Resume ist im fünften Zwischenstand und die vollständige Trackwiedergabe-/Löschgrenze im sechsten Zwischenstand ergänzt.
 
 Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen. Der 1.000-Record-Test enthält 100 Meetingzusammenfassungen. Debug-Builds für `arm64` und `x86_64` waren erfolgreich.
 
@@ -556,6 +554,8 @@ Vollständige serielle Regression: 158/158 Tests bestanden, 0 Fehler, 0 überspr
 **Vierter Zwischenstand 21. September 2026:** Die technische Mixed-Sperre ist entfernt und der produktive Ablauf ist an Toggle sowie Press & Hold angeschlossen. Eine gestartete Session wird sofort mit der Nutzer-History verknüpft, damit ein Prozessabbruch bereits während der Aufnahme recoverbar bleibt. Stop finalisiert beide Originalspuren, synchronisiert die Qualitätsdaten, übergibt die Session an die exklusive Meeting-Processing-Lane, transkribiert die Tracks mit der eingefrorenen Provider-/Privacy-Konfiguration, merged die Timeline und führt automatische Einfügung ausschließlich über das persistierte Exactly-once-Gate aus. Ein nicht mehr verfügbares Ziel bleibt als Deferred Insertion in History; es gibt keinen Mixed-zu-Mikrofon- oder Local-zu-Cloud-Fallback. Cancel bewahrt finalisierbare Originalspuren und startet weder Processing noch Insertion. Drei neue Coordinator-Tests prüfen Toggle bis zur genau einmaligen Einfügung, Press-&-Hold-Release und Cancel. Vollständige Regression: 164/164 Tests bestanden, 0 Fehler, 0 übersprungen und 0 Runtime-Warnungen; Debug-Builds für `arm64` und `x86_64` waren erfolgreich. Die erste reale produktive End-to-End-Session bestand anschließend Dual Capture, Verarbeitung, Merge und die erfolgreiche Einfügung eines rollenmarkierten Transkripts. Separate manuelle Press-&-Hold-, Cancel- und Recovery-Abnahmen bleiben Teil der folgenden UX-/Hardening-Gates.
 
 **Fünfter Zwischenstand 22. September 2026:** Restart-Resume ist produktiv geschlossen. Nach einem harten Prozessabbruch während Mixed Capture normalisiert FlowDictate die verknüpfte Session auf `paused` und die aktiven Tracks auf `interrupted`, ohne Originaldateien zu verändern. `Continue Processing` in History liest die erhaltenen CAF-Dateien nur zur Wiederherstellung von Dauer, Dateigröße und PCM-Format, stuft die wegen des Crashs unvollständige Capture-Timeline konservativ als `degraded` ein und setzt Tracktranskription sowie Merge mit der im Manifest eingefrorenen Provider-/Privacy-Konfiguration fort. Da nach einem Neustart kein verlässliches altes Fokusziel existiert, wird das fertige Transkript stets als `deferred` in History abgelegt und nie automatisch eingefügt. Die manuelle Abnahme bestand mit zwei lesbaren rund 30-sekündigen Originalspuren, OpenAI `gpt-4o-mini-transcribe`, zwei transkribierten Tracks und fertiger Rollen-Timeline. Zwei neue Regressionstests sichern byte-identischen Originalerhalt und die ausbleibende automatische Einfügung; vollständige Regression: 169/169 Tests bestanden. Universal-Debug-Build: `x86_64 arm64`.
+
+**Sechster Zwischenstand 22. September 2026:** Jede Meeting-Trackzeile besitzt eine eigene Wiedergabeaktion, die den Originalpfad ausschließlich aus dem validierten Sessionmanifest auflöst und auf den jeweiligen `tracks/`-Ordner begrenzt. Die manuelle Abnahme bestätigte, dass Mikrofon- und Systemaudiospur separat und hörbar unterschiedlich wiedergegeben werden. `Archive History Entry` bleibt eine nichtdestruktive, getrennte Aktion. `Delete Meeting and Files…` verlangt eine ausdrückliche Bestätigung und löscht danach exakt den UUID-Sessionordner mit beiden Originals, Derived Files, Segmenten, Timeline und Manifest sowie nur den verknüpften History-/Jobdatensatz. Abbrechen bewahrt die Session vollständig; beide Dialogpfade wurden manuell bestanden. Drei neue Tests sichern sichere Originalpfadauflösung, Ablehnung von Pfaden außerhalb `tracks/`, idempotentes UUID-begrenztes Löschen sowie den Erhalt einer Nachbarsession, einer fremden Datei und eines fremden Jobs. Vollständige serielle Regression: 172/172 Tests bestanden; Universal-Debug-Build: `x86_64 arm64`. Ein bestehender Mixed-Cancel-Test überschritt im ersten parallelen Gesamtlauf einmal sein Zeitbudget, bestand isoliert und in der vollständigen seriellen Suite; kein reproduzierbarer Produktionsfehler.
 
 ### 12.1 Recording Source und Start
 
@@ -796,8 +796,8 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Press & Hold, Cancel, Deferred Insertion und Restart-Recovery einschließlich `Continue Processing` sind manuell bestanden. Als Nächstes folgen:
+Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe und bestätigtes Sessionlöschen sind manuell bestanden. Als Nächstes folgen:
 
-1. die noch fehlenden Meeting-History-Aktionen für getrennte Trackwiedergabe und bestätigtes Löschen implementieren,
-2. Partial-/Retry-UX für absichtlich fehlgeschlagene einzelne Tracktranskription manuell prüfen,
-3. anschließend Schritt 4.1.7 mit produktiven Langzeit-, Performance- und Recovery-Gates fortsetzen.
+1. Partial-/Retry-UX für eine absichtlich fehlgeschlagene einzelne Tracktranskription manuell prüfen,
+2. Warnzustände für Trackverlust und Clipping gezielt in der Nutzeroberfläche abnehmen,
+3. anschließend Schritt 4.1.7 mit produktiven Langzeit-, Performance- und Recovery-Gates beginnen.

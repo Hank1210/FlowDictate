@@ -987,6 +987,22 @@ final class DictationCoordinator: ObservableObject {
         do { audioPlayer = try AVAudioPlayer(contentsOf: audioURL(for: record)); audioPlayer?.play() }
         catch { fail(error, retainedAudioURL: nil) }
     }
+    func playMeetingTrack(for record: DictationRecord, role: RecordingTrackRole) {
+        guard let meeting = record.meetingSummary else { return }
+        Task {
+            do {
+                let url = try await meetingSessionStore.audioURL(
+                    sessionID: meeting.sessionID,
+                    role: role
+                )
+                audioPlayer?.stop()
+                audioPlayer = try AVAudioPlayer(contentsOf: url)
+                audioPlayer?.play()
+            } catch {
+                fail(error, retainedAudioURL: nil)
+            }
+        }
+    }
     func copyText(from record: DictationRecord) {
         guard let text = record.finalText ?? record.originalTranscript else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
@@ -1077,6 +1093,38 @@ final class DictationCoordinator: ObservableObject {
                 }
             } catch {
                 FlowLogger.app.error("History deletion failed: \(error.localizedDescription, privacy: .public)")
+            }
+            await refreshHistory()
+        }
+    }
+
+    func deleteMeetingSession(_ record: DictationRecord) {
+        guard let meeting = record.meetingSummary,
+              meeting.canDeleteSession,
+              !retryingRecordIDs.contains(record.id) else { return }
+        Task {
+            do {
+                audioPlayer?.stop()
+                try await historyStore.delete(id: record.id)
+                do {
+                    try await meetingSessionStore.delete(sessionID: meeting.sessionID)
+                } catch {
+                    // Restore discoverability if the irreversible file step did
+                    // not succeed. The original session remains authoritative.
+                    try? await historyStore.upsert(record)
+                    throw error
+                }
+                if let jobID = record.jobID {
+                    try? await jobStore.delete(id: jobID)
+                }
+                let deletedDirectory = try? meetingSessionDirectory(for: meeting.sessionID)
+                if latestOutputURL == deletedDirectory {
+                    latestOutputURL = nil
+                    latestOutputNotice = nil
+                }
+                setupMessage = "Meeting session and both original tracks were deleted."
+            } catch {
+                setupMessage = error.localizedDescription
             }
             await refreshHistory()
         }

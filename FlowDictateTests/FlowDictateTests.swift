@@ -1062,6 +1062,71 @@ struct FlowDictateTests {
         #expect(originalURLs.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
     }
 
+    @Test func meetingSessionStoreResolvesOnlyOriginalTracksAndDeletesOnlySelectedSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingDelete-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sentinel = root.appendingPathComponent("keep-me.txt")
+        try Data("unrelated".utf8).write(to: sentinel)
+        let store = MeetingSessionStore(rootURL: root)
+
+        let selected = makeValidMixedRecordingSession()
+        let selectedPaths = try await store.prepareSession(id: selected.id)
+        for track in selected.tracks {
+            try Data("selected-\(track.role.rawValue)".utf8).write(
+                to: selectedPaths.sessionDirectory.appendingPathComponent(track.audioRelativePath!)
+            )
+        }
+        try await store.create(selected)
+
+        var neighbor = makeValidMixedRecordingSession()
+        neighbor.id = UUID()
+        neighbor.recordID = UUID()
+        neighbor.tracks[0].id = UUID()
+        neighbor.tracks[1].id = UUID()
+        let neighborPaths = try await store.prepareSession(id: neighbor.id)
+        for track in neighbor.tracks {
+            try Data("neighbor-\(track.role.rawValue)".utf8).write(
+                to: neighborPaths.sessionDirectory.appendingPathComponent(track.audioRelativePath!)
+            )
+        }
+        try await store.create(neighbor)
+
+        let microphoneURL = try await store.audioURL(
+            sessionID: selected.id,
+            role: .localSpeaker
+        )
+        #expect(microphoneURL == selectedPaths.tracksDirectory
+            .appendingPathComponent("microphone.caf")
+            .standardizedFileURL.resolvingSymlinksInPath())
+
+        try await store.delete(sessionID: selected.id)
+        try await store.delete(sessionID: selected.id)
+
+        #expect(!FileManager.default.fileExists(atPath: selectedPaths.sessionDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: neighborPaths.manifestURL.path))
+        #expect(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+
+    @Test func meetingSessionStoreRejectsTrackPathOutsideOriginalDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMeetingUnsafeTrack-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        var session = makeValidMixedRecordingSession()
+        session.tracks[0].audioRelativePath = "derived/not-an-original.caf"
+        let paths = try await store.prepareSession(id: session.id)
+        try Data("not-original".utf8).write(
+            to: paths.sessionDirectory.appendingPathComponent("derived/not-an-original.caf")
+        )
+        try await store.create(session)
+
+        await #expect(throws: MeetingSessionStoreError.unsafeTrackAudio(.localSpeaker)) {
+            _ = try await store.audioURL(sessionID: session.id, role: .localSpeaker)
+        }
+    }
+
     @Test func meetingHistoryRecoveryUpdatesOnlyLinkedProductSessions() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingHistoryRecovery-\(UUID())", isDirectory: true)
@@ -3502,6 +3567,70 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func confirmedMeetingDeletionRemovesHistoryAndEntireSessionDirectory() async throws {
+        let harness = makeCoordinatorHarness(recordingSource: .mixed)
+        let store = MeetingSessionStore(
+            recordingLocationStore: harness.recordingLocationStore
+        )
+        var session = makeValidMixedRecordingSession()
+        session.status = .completed
+        session.finalTranscript = "[You] Delete me"
+        session.mergedTimelineRelativePath = MeetingTranscriptMergeRunner.timelineRelativePath
+        session.completionMode = .allTracks
+        session.transcriptInsertionState = .deferred
+        session.transcriptInsertionAttemptCount = 0
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/track-\(index).json"
+        }
+        let paths = try await store.prepareSession(id: session.id)
+        for track in session.tracks {
+            try Data("original-\(track.role.rawValue)".utf8).write(
+                to: paths.sessionDirectory.appendingPathComponent(track.audioRelativePath!)
+            )
+            try Data("track transcript".utf8).write(
+                to: paths.sessionDirectory.appendingPathComponent(track.transcriptRelativePath!)
+            )
+        }
+        try Data("derived".utf8).write(
+            to: paths.derivedDirectory.appendingPathComponent("normalized.caf")
+        )
+        try Data("timeline".utf8).write(
+            to: paths.sessionDirectory.appendingPathComponent(
+                MeetingTranscriptMergeRunner.timelineRelativePath
+            )
+        )
+        try await store.create(session)
+        let linkedJob = makePhaseFourJob(sequence: 1)
+        let unrelatedJob = makePhaseFourJob(sequence: 2)
+        try await harness.jobStore.create(linkedJob)
+        try await harness.jobStore.create(unrelatedJob)
+        var record = try DictationRecord.meetingSession(session)
+        record.jobID = linkedJob.id
+        try await harness.historyStore.upsert(record)
+        await harness.coordinator.refreshHistory()
+
+        harness.coordinator.deleteMeetingSession(record)
+        for _ in 0..<100 {
+            let historyWasDeleted = try await harness.historyStore.record(id: record.id) == nil
+            let filesWereDeleted = !FileManager.default.fileExists(
+                atPath: paths.sessionDirectory.path
+            )
+            if historyWasDeleted && filesWereDeleted { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(try await harness.historyStore.record(id: record.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: paths.sessionDirectory.path))
+        #expect(try await harness.jobStore.job(id: linkedJob.id) == nil)
+        #expect(try await harness.jobStore.job(id: unrelatedJob.id)?.id == unrelatedJob.id)
+        #expect(harness.coordinator.setupMessage
+            == "Meeting session and both original tracks were deleted.")
+    }
+
+    @MainActor
     @Test func tooShortRecordingFailsBeforeTranscriptionProvider() async throws {
         let harness = makeCoordinatorHarness(recordingSource: .systemAudio)
         harness.coordinator.settings.dictationActivationMode = .pressAndHold
@@ -5044,6 +5173,16 @@ struct FlowDictateTests {
         settings.transcriptionProviderID = transcriptionProviderID
         settings.privacyMode = privacyMode
 
+        let recordingLocationStore = configuredRecordingLocationStore(defaults: defaults)
+        let historyStore = DictationHistoryStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictateHistory-\(UUID()).json")
+        )
+        let jobStore = DictationJobStore(
+            directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictateJobs-\(UUID())", isDirectory: true)
+        )
+
         let dictationHotKeyRegistrar = MockHotKeyRegistrar()
         let coordinator = DictationCoordinator(
             settings: settings,
@@ -5061,17 +5200,11 @@ struct FlowDictateTests {
             overlay: overlay,
             focusTargetProvider: { focusTargetBox.target },
             environment: [:],
-            recordingLocationStore: configuredRecordingLocationStore(defaults: defaults),
-            historyStore: DictationHistoryStore(
-                fileURL: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("FlowDictateHistory-\(UUID()).json")
-            ),
+            recordingLocationStore: recordingLocationStore,
+            historyStore: historyStore,
             livePreviewProvider: livePreviewProvider,
             transcriptEnhancerFactory: transcriptEnhancerFactory,
-            jobStore: DictationJobStore(
-                directory: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("FlowDictateJobs-\(UUID())", isDirectory: true)
-            ),
+            jobStore: jobStore,
             processActivityManager: processActivityManager,
             meetingRecordingConsentPresenter: meetingRecordingConsentPresenter,
             mixedRecordingCoordinatorFactory: mixedRecordingCoordinatorFactory,
@@ -5091,7 +5224,10 @@ struct FlowDictateTests {
             overlay: overlay,
             focusTargetBox: focusTargetBox,
             processActivityManager: processActivityManager,
-            dictationHotKeyRegistrar: dictationHotKeyRegistrar
+            dictationHotKeyRegistrar: dictationHotKeyRegistrar,
+            recordingLocationStore: recordingLocationStore,
+            historyStore: historyStore,
+            jobStore: jobStore
         )
     }
 
@@ -5850,6 +5986,9 @@ private struct CoordinatorHarness {
     let focusTargetBox: FocusTargetBox
     let processActivityManager: MockProcessActivityManager
     let dictationHotKeyRegistrar: MockHotKeyRegistrar
+    let recordingLocationStore: RecordingLocationStore
+    let historyStore: DictationHistoryStore
+    let jobStore: DictationJobStore
 }
 
 @MainActor

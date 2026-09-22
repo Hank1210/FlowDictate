@@ -18,6 +18,11 @@ nonisolated struct MeetingHistoryTrackSummary: Codable, Equatable, Identifiable,
         [.finalized, .transcriptionPending, .transcribing, .transcribed].contains(status)
     }
 
+    var canPlayAudio: Bool {
+        byteCount > 0
+            && ![.preparing, .recording, .unavailable].contains(status)
+    }
+
     var statusTitle: String {
         switch status {
         case .preparing: "Preparing"
@@ -117,6 +122,10 @@ nonisolated struct MeetingHistorySummary: Codable, Equatable, Sendable {
         }
         return tracks.allSatisfy { $0.status == .transcribed }
             && [.good, .degraded].contains(synchronizationQuality)
+    }
+
+    var canDeleteSession: Bool {
+        [.completed, .partial, .paused, .failed, .cancelled].contains(status)
     }
 
     var statusTitle: String {

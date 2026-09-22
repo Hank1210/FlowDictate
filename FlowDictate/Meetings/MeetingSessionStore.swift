@@ -11,6 +11,9 @@ nonisolated struct MeetingSessionPaths: Sendable, Equatable {
 nonisolated enum MeetingSessionStoreError: LocalizedError, Equatable {
     case sessionAlreadyExists(UUID)
     case mismatchedSessionIdentifier(expected: UUID, actual: UUID)
+    case sessionNotFound(UUID)
+    case missingTrackAudio(RecordingTrackRole)
+    case unsafeTrackAudio(RecordingTrackRole)
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +21,12 @@ nonisolated enum MeetingSessionStoreError: LocalizedError, Equatable {
             "A meeting session already exists for \(id.uuidString)."
         case let .mismatchedSessionIdentifier(expected, actual):
             "Meeting session directory \(expected.uuidString) contains manifest \(actual.uuidString)."
+        case let .sessionNotFound(id):
+            "Meeting session \(id.uuidString) was not found."
+        case let .missingTrackAudio(role):
+            "The \(role.rawValue) original track is not available."
+        case let .unsafeTrackAudio(role):
+            "The \(role.rawValue) original track is outside the meeting tracks directory."
         }
     }
 }
@@ -76,6 +85,51 @@ actor MeetingSessionStore {
         return try await fileIO.perform {
             guard fileManager.value.fileExists(atPath: manifestURL.path) else { return nil }
             return try Self.decodeManifest(at: manifestURL, expectedID: sessionID)
+        }
+    }
+
+    func audioURL(
+        sessionID: UUID,
+        role: RecordingTrackRole
+    ) async throws -> URL {
+        let paths = try paths(for: sessionID)
+        let fileManager = SerialFileManagerReference(fileManager)
+        return try await fileIO.perform {
+            guard fileManager.value.fileExists(atPath: paths.manifestURL.path) else {
+                throw MeetingSessionStoreError.sessionNotFound(sessionID)
+            }
+            let manifest = try Self.decodeManifest(
+                at: paths.manifestURL,
+                expectedID: sessionID
+            )
+            guard let relativePath = manifest.tracks.first(where: { $0.role == role })?
+                .audioRelativePath else {
+                throw MeetingSessionStoreError.missingTrackAudio(role)
+            }
+            let candidate = paths.sessionDirectory.appendingPathComponent(relativePath)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            let safeDirectory = paths.tracksDirectory.standardizedFileURL
+                .resolvingSymlinksInPath()
+            guard Self.isDescendant(candidate, of: safeDirectory) else {
+                throw MeetingSessionStoreError.unsafeTrackAudio(role)
+            }
+            guard fileManager.value.fileExists(atPath: candidate.path) else {
+                throw MeetingSessionStoreError.missingTrackAudio(role)
+            }
+            return candidate
+        }
+    }
+
+    /// Permanently removes exactly one UUID-scoped meeting directory. Missing
+    /// sessions are treated as already deleted so History cleanup can finish.
+    func delete(sessionID: UUID) async throws {
+        let paths = try paths(for: sessionID)
+        let fileManager = SerialFileManagerReference(fileManager)
+        try await fileIO.perform {
+            guard fileManager.value.fileExists(atPath: paths.sessionDirectory.path) else {
+                return
+            }
+            try fileManager.value.removeItem(at: paths.sessionDirectory)
         }
     }
 
@@ -171,6 +225,13 @@ actor MeetingSessionStore {
             )
         }
         return try manifest.validated()
+    }
+
+    private nonisolated static func isDescendant(_ candidate: URL, of directory: URL) -> Bool {
+        let directoryPath = directory.path.hasSuffix("/")
+            ? directory.path
+            : directory.path + "/"
+        return candidate.path.hasPrefix(directoryPath)
     }
 
     private nonisolated static var encoder: JSONEncoder {
