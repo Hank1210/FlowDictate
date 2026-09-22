@@ -3,6 +3,7 @@ import Foundation
 import os
 
 nonisolated protocol MixedRecordingSessionStoring: Sendable {
+    func recordingRootURL() async throws -> URL
     func prepareSession(id: UUID) async throws -> MeetingSessionPaths
     func create(_ manifest: MixedRecordingSession) async throws
     func save(_ manifest: MixedRecordingSession) async throws
@@ -137,6 +138,7 @@ nonisolated enum MixedRecordingCoordinatorError: LocalizedError, Sendable, Equat
     case alreadyActive
     case notRecording
     case transitionInProgress
+    case insufficientRecordingStorage(requiredBytes: Int64, availableBytes: Int64)
     case invalidRecorderRole(expected: RecordingTrackRole, actual: RecordingTrackRole)
     case trackFailed(
         role: RecordingTrackRole,
@@ -152,6 +154,8 @@ nonisolated enum MixedRecordingCoordinatorError: LocalizedError, Sendable, Equat
             "No mixed recording session is active."
         case .transitionInProgress:
             "The mixed recording session is already finalizing."
+        case let .insufficientRecordingStorage(required, available):
+            "Mixed recording needs at least \(required / 1_000_000) MB of free disk space; \(max(0, available) / 1_000_000) MB is available. Free space before starting."
         case let .invalidRecorderRole(expected, actual):
             "The mixed recorder role is \(actual.rawValue); expected \(expected.rawValue)."
         case let .trackFailed(role, phase, message):
@@ -160,7 +164,27 @@ nonisolated enum MixedRecordingCoordinatorError: LocalizedError, Sendable, Equat
     }
 }
 
+private nonisolated enum MixedRecordingStorageCapacity {
+    static func availableBytes(at recordingRoot: URL) throws -> Int64 {
+        let fileManager = FileManager.default
+        var location = recordingRoot.standardizedFileURL
+        while !fileManager.fileExists(atPath: location.path) {
+            let parent = location.deletingLastPathComponent()
+            guard parent.path != location.path else { break }
+            location = parent
+        }
+        let attributes = try fileManager.attributesOfFileSystem(forPath: location.path)
+        guard let freeBytes = (attributes[.systemFreeSize] as? NSNumber)?.int64Value else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return freeBytes
+    }
+}
+
 actor MixedRecordingSessionCoordinator {
+    /// Five minutes of two 96 kHz mono Float32 originals plus a working reserve.
+    static let minimumRecordingStorageBytes: Int64 = 500_000_000
+
     private let microphoneRecorder: any MixedTrackRecording
     private let systemAudioRecorder: any MixedTrackRecording
     private let store: any MixedRecordingSessionStoring
@@ -168,6 +192,7 @@ actor MixedRecordingSessionCoordinator {
     private let qualityAnalyzer: MeetingQualityAnalyzer
     private let now: @Sendable () -> Date
     private let hostTime: @Sendable () -> UInt64
+    private let availableStorageBytes: @Sendable (URL) throws -> Int64
 
     private(set) var state: MixedRecordingCoordinatorState = .idle
     private var activeSession: MixedRecordingSession?
@@ -180,7 +205,10 @@ actor MixedRecordingSessionCoordinator {
         synchronizationAnalyzer: SynchronizationAnalyzer = SynchronizationAnalyzer(),
         qualityAnalyzer: MeetingQualityAnalyzer = MeetingQualityAnalyzer(),
         now: @escaping @Sendable () -> Date = Date.init,
-        hostTime: @escaping @Sendable () -> UInt64 = { mach_continuous_time() }
+        hostTime: @escaping @Sendable () -> UInt64 = { mach_continuous_time() },
+        availableStorageBytes: @escaping @Sendable (URL) throws -> Int64 = {
+            try MixedRecordingStorageCapacity.availableBytes(at: $0)
+        }
     ) {
         self.microphoneRecorder = microphoneRecorder
         self.systemAudioRecorder = systemAudioRecorder
@@ -189,6 +217,7 @@ actor MixedRecordingSessionCoordinator {
         self.qualityAnalyzer = qualityAnalyzer
         self.now = now
         self.hostTime = hostTime
+        self.availableStorageBytes = availableStorageBytes
     }
 
     func setLevelHandler(_ handler: MixedRecordingLevelHandler?) async {
@@ -238,6 +267,14 @@ actor MixedRecordingSessionCoordinator {
         state = .preparing(request.sessionID)
 
         do {
+            let recordingRoot = try await store.recordingRootURL()
+            let available = try availableStorageBytes(recordingRoot)
+            guard available >= Self.minimumRecordingStorageBytes else {
+                throw MixedRecordingCoordinatorError.insufficientRecordingStorage(
+                    requiredBytes: Self.minimumRecordingStorageBytes,
+                    availableBytes: available
+                )
+            }
             let paths = try await store.prepareSession(id: request.sessionID)
             var session = makePreparingSession(request: request)
             try await store.create(session)

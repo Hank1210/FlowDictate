@@ -47,6 +47,10 @@ actor MeetingSessionStore {
         self.fileManager = fileManager
     }
 
+    func recordingRootURL() throws -> URL {
+        try resolvedRootURL()
+    }
+
     func prepareSession(id: UUID) async throws -> MeetingSessionPaths {
         let paths = try paths(for: id)
         let fileManager = SerialFileManagerReference(fileManager)

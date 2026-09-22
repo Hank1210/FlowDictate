@@ -2321,6 +2321,39 @@ struct FlowDictateTests {
         #expect(recovered.transcriptInsertionAttemptCount == 1)
     }
 
+    @Test func mixedCoordinatorRejectsLowDiskSpaceBeforePreparingEitherTrack() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedStorage-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(role: .localSpeaker, events: events),
+            systemAudioRecorder: MockMixedTrackRecorder(role: .systemAudio, events: events),
+            store: store,
+            availableStorageBytes: { _ in 0 }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: "de"
+        )
+
+        await #expect(throws: MixedRecordingCoordinatorError.insufficientRecordingStorage(
+            requiredBytes: MixedRecordingSessionCoordinator.minimumRecordingStorageBytes,
+            availableBytes: 0
+        )) {
+            _ = try await coordinator.start(request)
+        }
+        let recordedEvents = await events.values
+        #expect(!recordedEvents.contains { event in
+            if case .prepare = event { return true }
+            if case .start = event { return true }
+            return false
+        })
+        #expect(await coordinator.state == .idle)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
     @Test func mixedCoordinatorStartsBothTracksAfterSharedPreparationBarrier() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMixedStart-\(UUID())", isDirectory: true)
