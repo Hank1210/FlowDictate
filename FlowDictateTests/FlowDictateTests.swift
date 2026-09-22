@@ -5367,6 +5367,110 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func longFormLowStorageBeforeAndDuringSegmentsKeepsCompletedWork() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateLongFormStorage-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeLongFormTrackTranscriptionFixture(
+            rootURL: root,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: TranscriptionProviderRegistry.local.capabilities.engineID,
+            modelID: "parakeet-tdt-0.6b-v3-coreml",
+            privacyMode: .offline
+        )
+        let track = try #require(fixture.session.tracks.first)
+        let relativePath = try #require(track.audioRelativePath)
+        let audioURL = fixture.paths.sessionDirectory.appendingPathComponent(relativePath)
+        let history = DictationHistoryStore(
+            fileURL: root.appendingPathComponent("storage-test-history.json")
+        )
+        let sessions = TranscriptionSessionStore(
+            rootURL: root.appendingPathComponent("storage-test-sessions", isDirectory: true)
+        )
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+        let now = Date()
+        let record = DictationRecord.newRecording(
+            id: UUID(), startedAt: now.addingTimeInterval(-5), endedAt: now,
+            duration: 5, status: .recorded, audioRelativePath: relativePath,
+            audioFileSize: track.byteCount, providerID: "Test", modelID: "test",
+            language: "en", targetBundleIdentifier: nil, targetApplicationName: nil,
+            sourceMetadata: AudioSourceMetadata(
+                source: .microphone, sampleRate: 16_000, channelCount: 1
+            )
+        )
+        try await history.upsert(record)
+
+        let noStorageProvider = SequenceTranscriptionProvider(texts: ["Should not run"])
+        let noStorageRunner = LongFormTranscriptionRunner(
+            historyStore: history, sessionStore: sessions,
+            configuration: configuration, capacityProvider: { _ in 0 }
+        )
+        var pendingRecord = record
+        do {
+            _ = try await noStorageRunner.runIfNeeded(
+                record: record, audioURL: audioURL, language: "en",
+                maximumAttempts: 1, provider: noStorageProvider, progress: { _ in }
+            )
+            Issue.record("Expected insufficient storage before segment planning")
+            return
+        } catch let failure as TranscriptionRunFailure {
+            pendingRecord = failure.record
+        }
+        #expect(noStorageProvider.requestCount == 0)
+        #expect(pendingRecord.errorCategory == .insufficientWorkingStorage)
+        #expect(try await sessions.load(recordID: record.id) == nil)
+
+        let capacity = StorageCapacityProbe(values: [1_000_000, 1_000_000, 0])
+        let firstProvider = SequenceTranscriptionProvider(texts: ["First segment kept."])
+        let firstRunner = LongFormTranscriptionRunner(
+            historyStore: history, sessionStore: sessions,
+            configuration: configuration,
+            capacityProvider: { url in capacity.availableCapacity(at: url) }
+        )
+        do {
+            _ = try await firstRunner.runIfNeeded(
+                record: pendingRecord, audioURL: audioURL, language: "en",
+                maximumAttempts: 1, provider: firstProvider, progress: { _ in }
+            )
+            Issue.record("Expected storage exhaustion before the second segment")
+            return
+        } catch let failure as TranscriptionRunFailure {
+            pendingRecord = failure.record
+        }
+        let partial = try #require(try await sessions.load(recordID: record.id))
+        #expect(capacity.callCount == 3)
+        #expect(firstProvider.requestCount == 1)
+        #expect(partial.completedSegmentCount == 1)
+        #expect(partial.segments[0].transcript == "First segment kept.")
+        #expect(pendingRecord.errorCategory == .insufficientWorkingStorage)
+
+        let resumeProvider = SequenceTranscriptionProvider(texts: ["Should not run"])
+        do {
+            _ = try await noStorageRunner.runIfNeeded(
+                record: pendingRecord, audioURL: audioURL, language: "en",
+                maximumAttempts: 1, provider: resumeProvider, progress: { _ in }
+            )
+            Issue.record("Expected insufficient storage on resume")
+            return
+        } catch let failure as TranscriptionRunFailure {
+            #expect(failure.record.errorCategory == .insufficientWorkingStorage)
+        }
+        let resumed = try #require(try await sessions.load(recordID: record.id))
+        #expect(resumeProvider.requestCount == 0)
+        #expect(resumed.completedSegmentCount == 1)
+        #expect(resumed.segments[0].transcript == "First segment kept.")
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    @MainActor
     @Test func phaseFourProviderCapabilitiesAndPrivacyPolicyAreExplicit() throws {
         let registry = TranscriptionProviderRegistry()
         let local = try #require(registry.descriptor(for: .local))
@@ -6830,6 +6934,22 @@ private nonisolated final class RetryingMockTranscriptionProvider: Transcription
             provider: "Test",
             model: "test-model"
         )
+    }
+}
+
+@MainActor
+private final class StorageCapacityProbe {
+    private let values: [Int64]
+    private(set) var callCount = 0
+
+    init(values: [Int64]) {
+        self.values = values
+    }
+
+    func availableCapacity(at _: URL) -> Int64 {
+        let value = values[min(callCount, values.count - 1)]
+        callCount += 1
+        return value
     }
 }
 

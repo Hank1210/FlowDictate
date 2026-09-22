@@ -6,6 +6,7 @@ import os
 final class LongFormTranscriptionRunner {
     typealias Sleeper = @MainActor (Duration) async throws -> Void
     typealias ProgressHandler = @MainActor (LongFormProgress) -> Void
+    typealias CapacityProvider = @MainActor @Sendable (URL) throws -> Int64
 
     private let historyStore: DictationHistoryStore
     private let sessionStore: TranscriptionSessionStore
@@ -18,6 +19,7 @@ final class LongFormTranscriptionRunner {
     private let promptBuilder: TranscriptionPromptBuilder
     private let configuration: LongFormConfiguration
     private let sleeper: Sleeper
+    private let capacityProvider: CapacityProvider?
 
     init(
         historyStore: DictationHistoryStore,
@@ -25,12 +27,14 @@ final class LongFormTranscriptionRunner {
         configuration: LongFormConfiguration = .default,
         inspector: AudioAssetInspector = AudioAssetInspector(),
         boundaryDetector: SilenceBoundaryDetector = SilenceBoundaryDetector(),
+        capacityProvider: CapacityProvider? = nil,
         sleeper: @escaping Sleeper = { try await Task.sleep(for: $0) }
     ) {
         self.historyStore = historyStore
         self.sessionStore = sessionStore
         self.configuration = configuration
         self.inspector = inspector
+        self.capacityProvider = capacityProvider
         modeResolver = TranscriptionModeResolver(configuration: configuration)
         planner = AudioSegmentPlanner(configuration: configuration)
         self.boundaryDetector = boundaryDetector
@@ -86,7 +90,7 @@ final class LongFormTranscriptionRunner {
         } else {
             progress(.planning)
             let planningStarted = ContinuousClock.now
-            let available = try inspector.availableCapacity(at: audioURL.deletingLastPathComponent())
+            let available = try availableCapacity(at: audioURL.deletingLastPathComponent())
             let required = modeResolver.requiredWorkingBytes(for: inspection)
             guard available >= required else {
                 throw await failWithoutManifest(
@@ -154,6 +158,14 @@ final class LongFormTranscriptionRunner {
                     )
                 }
                 try Task.checkCancellation()
+                let available = try availableCapacity(at: audioURL.deletingLastPathComponent())
+                let required = modeResolver.requiredWorkingBytes(for: inspection)
+                guard available >= required else {
+                    throw LongFormTranscriptionError.insufficientWorkingStorage(
+                        requiredBytes: required,
+                        availableBytes: available
+                    )
+                }
                 let total = manifest.segments.count
                 progress(.preparing(segment: index, total: total))
                 manifest.status = .transcribing
@@ -370,6 +382,11 @@ final class LongFormTranscriptionRunner {
     private func persist(_ record: DictationRecord) async throws {
         do { try await historyStore.upsert(record) }
         catch { throw TranscriptionPersistenceFailure(underlyingError: error, record: record) }
+    }
+
+    private func availableCapacity(at url: URL) throws -> Int64 {
+        if let capacityProvider { return try capacityProvider(url) }
+        return try inspector.availableCapacity(at: url)
     }
 
     private func failWithoutManifest(
