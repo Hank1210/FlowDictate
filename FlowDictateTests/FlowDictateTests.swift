@@ -148,6 +148,62 @@ struct FlowDictateTests {
         #expect(fileManager.removalCount == 1)
     }
 
+    @Test func openAIUploadsOnlySelectedAudioInMultipartBody() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateUploadScope-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let microphoneURL = directory.appendingPathComponent("microphone.m4a")
+        let systemAudioURL = directory.appendingPathComponent("system-audio.m4a")
+        let unrelatedVideoURL = directory.appendingPathComponent("screen-video.mov")
+        let microphoneBytes = Data(repeating: 0x11, count: 2_048)
+        let systemAudioBytes = Data(repeating: 0x22, count: 2_048)
+        let unrelatedVideoBytes = Data(repeating: 0x33, count: 2_048)
+        try microphoneBytes.write(to: microphoneURL)
+        try systemAudioBytes.write(to: systemAudioURL)
+        try unrelatedVideoBytes.write(to: unrelatedVideoURL)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MeetingPolicyOpenAIURLProtocol.self]
+        let fileManager = CapturingMultipartFileManager()
+        let provider = OpenAITranscriptionProvider(
+            apiKey: "test-key",
+            endpoint: URL(string: "https://meeting-policy.invalid/audio/transcriptions")!,
+            session: URLSession(configuration: configuration),
+            uploadPreparer: PassThroughAudioUploadPreparer(),
+            fileManager: fileManager
+        )
+
+        _ = try await provider.transcribe(
+            TranscriptionRequest(audioURL: microphoneURL, language: nil)
+        )
+        _ = try await provider.transcribe(
+            TranscriptionRequest(audioURL: systemAudioURL, language: nil)
+        )
+        for _ in 0..<100 where fileManager.capturedBodies.count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let bodies = fileManager.capturedBodies
+        #expect(bodies.count == 2)
+        let microphoneBody = try #require(bodies.first {
+            $0.range(of: microphoneBytes) != nil
+        })
+        let systemAudioBody = try #require(bodies.first {
+            $0.range(of: systemAudioBytes) != nil
+        })
+        #expect(microphoneBody.range(of: systemAudioBytes) == nil)
+        #expect(systemAudioBody.range(of: microphoneBytes) == nil)
+        for body in bodies {
+            let text = String(decoding: body, as: UTF8.self)
+            #expect(text.contains("name=\"model\""))
+            #expect(text.contains("name=\"file\""))
+            #expect(!text.contains("name=\"language\""))
+            #expect(!text.contains("name=\"prompt\""))
+            #expect(!text.contains("name=\"video\""))
+            #expect(body.range(of: unrelatedVideoBytes) == nil)
+        }
+    }
+
     @MainActor
     @Test func audioUploadPreparerCreatesAndCleansCompactM4A() async throws {
         let source = FileManager.default.temporaryDirectory
@@ -7573,6 +7629,27 @@ private nonisolated final class SlowRemovalFileManager: FileManager, @unchecked 
         lock.lock()
         storedRemovalCount += 1
         lock.unlock()
+    }
+}
+
+private nonisolated final class CapturingMultipartFileManager: FileManager, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedBodies: [Data] = []
+
+    var capturedBodies: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedBodies
+    }
+
+    override func removeItem(at URL: URL) throws {
+        if URL.lastPathComponent.hasPrefix("FlowDictate-Multipart-") {
+            let body = try Data(contentsOf: URL)
+            lock.lock()
+            storedBodies.append(body)
+            lock.unlock()
+        }
+        try super.removeItem(at: URL)
     }
 }
 
