@@ -1920,6 +1920,65 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func meetingTrackProviderPolicyMatrixFreezesModeForBothRoles() async throws {
+        let scenarios: [(
+            provider: TranscriptionProviderID,
+            privacy: PrivacyMode,
+            allowed: Bool
+        )] = [
+            (.local, .offline, true),
+            (.local, .localWithOptionalCloudEnhancement, true),
+            (.local, .cloudTranscription, true),
+            (.openAI, .offline, false),
+            (.openAI, .localWithOptionalCloudEnhancement, false),
+            (.openAI, .cloudTranscription, true)
+        ]
+        for scenario in scenarios {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictateMeetingPolicy-\(UUID())", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fixture = try await makeTrackTranscriptionFixture(rootURL: root)
+            var session = fixture.session
+            session.providerID = scenario.provider.rawValue
+            session.engineID = scenario.provider == .local
+                ? TranscriptionProviderRegistry.local.capabilities.engineID
+                : TranscriptionProviderRegistry.openAI.capabilities.engineID
+            session.modelID = scenario.provider == .local
+                ? "parakeet-tdt-0.6b-v3-coreml"
+                : "gpt-4o-mini-transcribe"
+            session.privacyMode = scenario.privacy
+            try await fixture.store.save(session)
+            let provider = MockTranscriptionProvider()
+            let resolver = TrackProviderResolverProbe(provider: provider)
+            let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { request in
+                await resolver.resolve(request)
+            }
+            let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+
+            let result = try await runner.run(sessionID: session.id)
+            let requests = await resolver.requests
+            #expect(result.privacyMode == scenario.privacy)
+            if scenario.allowed {
+                #expect(result.status == .merging)
+                #expect(result.tracks.allSatisfy { $0.status == .transcribed })
+                #expect(requests.map(\.role) == [.localSpeaker, .systemAudio])
+                #expect(requests.allSatisfy {
+                    $0.providerID == scenario.provider.rawValue
+                        && $0.privacyMode == scenario.privacy
+                })
+                #expect(provider.transcribeCount == 2)
+            } else {
+                #expect(result.status == .failed)
+                #expect(result.tracks.allSatisfy {
+                    $0.status == .failed && $0.errorCategory == .networkBlocked
+                })
+                #expect(requests.isEmpty)
+                #expect(provider.transcribeCount == 0)
+            }
+        }
+    }
+
+    @MainActor
     @Test func missingLocalModelPausesMeetingWithoutCloudFallback() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackMissingModel-\(UUID())", isDirectory: true)
@@ -6603,6 +6662,7 @@ struct FlowDictateTests {
 private actor TrackProviderResolverProbe {
     private let provider: any TranscriptionProvider
     private(set) var resolveCount = 0
+    private(set) var requests: [TrackTranscriptionRequest] = []
 
     init(provider: any TranscriptionProvider) {
         self.provider = provider
@@ -6610,6 +6670,7 @@ private actor TrackProviderResolverProbe {
 
     func resolve(_ request: TrackTranscriptionRequest) -> any TranscriptionProvider {
         resolveCount += 1
+        requests.append(request)
         return provider
     }
 }
