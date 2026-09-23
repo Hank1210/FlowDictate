@@ -2810,6 +2810,28 @@ struct FlowDictateTests {
         #expect(warnings.values[2].message.contains("could not be written"))
     }
 
+    @Test func mixedTrackFailureOriginKeepsDiagnosticsContentFreeAndConservative() {
+        let cases: [(any Error, MixedTrackFailureOrigin)] = [
+            (MicrophoneTrackRecorderError.writerFailed("synthetic", outOfSpace: true), .writer),
+            (SystemAudioTrackRecorderError.writerFailed("synthetic", outOfSpace: false), .writer),
+            (MicrophoneTrackRecorderError.unavailableInput, .device),
+            (SystemAudioTrackRecorderError.operationFailed(
+                operation: "synthetic", status: -1
+            ), .device),
+            (MicrophoneTrackRecorderError.noAudioReceived, .source),
+            (SystemAudioTrackRecorderError.permissionDenied, .source),
+            (MicrophoneTrackRecorderError.conversionFailed("synthetic"), .other),
+            (MockMixedTrackError.requested("synthetic"), .other)
+        ]
+        for (error, expectedOrigin) in cases {
+            #expect(MixedTrackFailureOrigin.classify(error) == expectedOrigin)
+        }
+        #expect(MixedTrackFailureOrigin.classify(NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(ENOSPC)
+        )) == .writer)
+    }
+
     @Test func mixedCoordinatorPersistsPartialSessionWhenOneTrackCannotStop() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMixedPartial-\(UUID())", isDirectory: true)

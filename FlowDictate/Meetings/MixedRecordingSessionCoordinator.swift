@@ -25,6 +25,36 @@ nonisolated enum MixedTrackWarningKind: String, Codable, Hashable, Sendable {
     case writerFailed
 }
 
+nonisolated enum MixedTrackFailureOrigin: String, Sendable, Equatable {
+    case writer
+    case device
+    case source
+    case other
+
+    static func classify(_ error: Error) -> Self {
+        if let microphoneError = error as? MicrophoneTrackRecorderError {
+            switch microphoneError {
+            case .writerFailed: return .writer
+            case .unavailableInput: return .device
+            case .noAudioReceived: return .source
+            default: return .other
+            }
+        }
+        if let systemAudioError = error as? SystemAudioTrackRecorderError {
+            switch systemAudioError {
+            case .writerFailed: return .writer
+            case .operationFailed, .cleanupTimedOut: return .device
+            case .permissionDenied, .unavailable, .noAudioReceived, .interrupted:
+                return .source
+            default: return .other
+            }
+        }
+        if error is AudioDeviceServiceError { return .device }
+        if MixedRecordingWriteFailure.isOutOfSpace(error) { return .writer }
+        return .other
+    }
+}
+
 nonisolated enum MixedRecordingWarning: Codable, Hashable, Sendable, Identifiable {
     case track(role: RecordingTrackRole, kind: MixedTrackWarningKind)
     case lowStorage
@@ -375,7 +405,8 @@ actor MixedRecordingSessionCoordinator {
                     role: .localSpeaker,
                     phase: .start,
                     message: failure.message,
-                    category: failure.category
+                    category: failure.category,
+                    origin: failure.origin
                 )
             }
             if case let .failure(failure) = systemAudioOutcome {
@@ -385,7 +416,8 @@ actor MixedRecordingSessionCoordinator {
                     role: .systemAudio,
                     phase: .start,
                     message: failure.message,
-                    category: failure.category
+                    category: failure.category,
+                    origin: failure.origin
                 )
             }
 
@@ -484,7 +516,7 @@ actor MixedRecordingSessionCoordinator {
             case let .failure(failure):
                 FlowLogger.meetingSignposter.emitEvent(
                     "Meeting Track Lost", id: signpostID,
-                    "role: \(role.rawValue, privacy: .public), category: \(failure.category.rawValue, privacy: .public)"
+                    "role: \(role.rawValue, privacy: .public), origin: \(failure.origin.rawValue, privacy: .public), category: \(failure.category.rawValue, privacy: .public)"
                 )
             }
         }
@@ -722,13 +754,15 @@ actor MixedRecordingSessionCoordinator {
         phase: MixedRecordingCoordinatorPhase,
         error: Error
     ) async throws -> Never {
+        let failure = Self.failure(for: error, role: role, phase: phase)
         try await failStart(
             operationID: operationID,
             session: &session,
             role: role,
             phase: phase,
             message: error.localizedDescription,
-            category: Self.failure(for: error, role: role, phase: phase).category
+            category: failure.category,
+            origin: failure.origin
         )
     }
 
@@ -738,7 +772,8 @@ actor MixedRecordingSessionCoordinator {
         role: RecordingTrackRole,
         phase: MixedRecordingCoordinatorPhase,
         message: String,
-        category: DictationErrorCategory
+        category: DictationErrorCategory,
+        origin: MixedTrackFailureOrigin
     ) async throws -> Never {
         guard activeOperationID == operationID else { throw CancellationError() }
         for index in session.tracks.indices {
@@ -756,7 +791,7 @@ actor MixedRecordingSessionCoordinator {
         try await store.save(session)
         FlowLogger.meetingSignposter.emitEvent(
             "Meeting Track Lost", id: .exclusive,
-            "role: \(role.rawValue, privacy: .public), phase: \(phase.rawValue, privacy: .public)"
+            "role: \(role.rawValue, privacy: .public), phase: \(phase.rawValue, privacy: .public), origin: \(origin.rawValue, privacy: .public), category: \(category.rawValue, privacy: .public)"
         )
         activeSession = session
         throw MixedRecordingCoordinatorError.trackFailed(
@@ -819,7 +854,8 @@ actor MixedRecordingSessionCoordinator {
         }
         return MixedTrackOperationFailure(
             message: error.localizedDescription,
-            category: category
+            category: category,
+            origin: MixedTrackFailureOrigin.classify(error)
         )
     }
 }
@@ -834,4 +870,5 @@ nonisolated private enum MixedTrackOperationOutcome<Value: Sendable>: Sendable {
 nonisolated private struct MixedTrackOperationFailure: Sendable {
     var message: String
     var category: DictationErrorCategory
+    var origin: MixedTrackFailureOrigin
 }
