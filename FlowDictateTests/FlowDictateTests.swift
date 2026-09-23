@@ -2078,6 +2078,56 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func meetingPrivacyPolicyControlsActualOpenAIHTTPUploads() async throws {
+        for privacyMode in [
+            PrivacyMode.offline,
+            .localWithOptionalCloudEnhancement,
+            .cloudTranscription
+        ] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictateMeetingHTTPPolicy-\(UUID())", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fixture = try await makeLongFormTrackTranscriptionFixture(
+                rootURL: root,
+                providerID: TranscriptionProviderID.openAI.rawValue,
+                engineID: TranscriptionProviderRegistry.openAI.capabilities.engineID,
+                modelID: "gpt-4o-mini-transcribe",
+                privacyMode: privacyMode
+            )
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MeetingPolicyOpenAIURLProtocol.self]
+            let provider = OpenAITranscriptionProvider(
+                apiKey: "test-key",
+                endpoint: URL(string: "https://meeting-policy.invalid/audio/transcriptions")!,
+                session: URLSession(configuration: configuration),
+                uploadPreparer: PassThroughAudioUploadPreparer()
+            )
+            let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { request in
+                #expect(request.privacyMode == privacyMode)
+                return provider
+            }
+            let before = MeetingPolicyOpenAIURLProtocol.requestCount
+            let result = try await TrackTranscriptionRunner(
+                store: fixture.store,
+                executor: executor
+            ).run(sessionID: fixture.session.id)
+            let requestCount = MeetingPolicyOpenAIURLProtocol.requestCount - before
+
+            if privacyMode == .cloudTranscription {
+                #expect(result.status == .merging)
+                #expect(result.tracks.allSatisfy { $0.status == .transcribed })
+                #expect(requestCount == 2)
+            } else {
+                #expect(result.status == .failed)
+                #expect(result.tracks.allSatisfy {
+                    $0.status == .failed && $0.errorCategory == .networkBlocked
+                })
+                #expect(requestCount == 0)
+            }
+        }
+    }
+
+    @MainActor
     @Test func missingLocalModelPausesMeetingWithoutCloudFallback() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackMissingModel-\(UUID())", isDirectory: true)
@@ -7468,6 +7518,33 @@ private nonisolated final class SuccessfulOpenAIURLProtocol: URLProtocol, @unche
             self,
             didLoad: Data(#"{"text":"Cleanup stays off the response path"}"#.utf8)
         )
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private nonisolated final class MeetingPolicyOpenAIURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let counter = LockedTestCounter()
+
+    static var requestCount: Int { counter.value }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "meeting-policy.invalid"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.counter.increment()
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"text":"Meeting policy HTTP fixture"}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 
