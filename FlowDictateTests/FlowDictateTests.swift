@@ -1363,6 +1363,105 @@ struct FlowDictateTests {
         }
     }
 
+    @Test func interruptedCaptureRecoversReadableTrackWhenOtherOriginalIsCorruptOrMissing() async throws {
+        let scenarios: [(
+            damagedRole: RecordingTrackRole,
+            writeCorruptFile: Bool,
+            category: DictationErrorCategory
+        )] = [
+            (.systemAudio, true, .audioCorrupt),
+            (.localSpeaker, false, .storageUnavailable)
+        ]
+        for scenario in scenarios {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictatePartialCaptureRecovery-\(UUID())", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = MeetingSessionStore(rootURL: root)
+            var session = makeValidMixedRecordingSession()
+            session.status = .paused
+            session.synchronization = nil
+            session.qualityReport = nil
+            let paths = try await store.prepareSession(id: session.id)
+            let corruptBytes = Data("unreadable preserved original".utf8)
+            var readableURL: URL?
+            var damagedURL: URL?
+            var readableBytes: Data?
+
+            for index in session.tracks.indices {
+                let role = session.tracks[index].role
+                let relativePath = role == .localSpeaker
+                    ? "tracks/microphone.caf" : "tracks/system-audio.caf"
+                session.tracks[index].status = .interrupted
+                session.tracks[index].audioRelativePath = relativePath
+                session.tracks[index].formatIdentifier = nil
+                session.tracks[index].sampleRate = 0
+                session.tracks[index].channelCount = 0
+                session.tracks[index].lastHostTime = nil
+                session.tracks[index].durationMilliseconds = 0
+                session.tracks[index].byteCount = 0
+                session.tracks[index].timestampAnchors = [TrackTimestampAnchor(
+                    hostTime: role == .localSpeaker ? 1_010 : 1_000,
+                    trackFramePosition: 0,
+                    sessionTimeMilliseconds: role == .localSpeaker ? 10 : 0
+                )]
+                let url = paths.sessionDirectory.appendingPathComponent(relativePath)
+                if role == scenario.damagedRole {
+                    damagedURL = url
+                    if scenario.writeCorruptFile {
+                        try corruptBytes.write(to: url)
+                    }
+                } else {
+                    try writeImpulseCAF(url: url, impulseFrame: 10)
+                    readableURL = url
+                    readableBytes = try Data(contentsOf: url)
+                }
+            }
+            try await store.create(session)
+            let recovery = InterruptedMeetingCaptureRecovery(
+                store: store,
+                now: { Date(timeIntervalSince1970: 1_800_000_100) }
+            )
+
+            let recovered = try await recovery.recover(sessionID: session.id)
+            let damaged = try #require(recovered.tracks.first {
+                $0.role == scenario.damagedRole
+            })
+            let readable = try #require(recovered.tracks.first {
+                $0.role != scenario.damagedRole
+            })
+            #expect(recovered.status == .paused)
+            #expect(recovered.lastErrorCategory == scenario.category)
+            #expect(damaged.status == .unavailable)
+            #expect(damaged.errorCategory == scenario.category)
+            #expect(readable.status == .finalized)
+            #expect(readable.byteCount > 0)
+            let readableFile = try #require(readableURL)
+            let originalReadableBytes = try #require(readableBytes)
+            let damagedFile = try #require(damagedURL)
+            #expect(try Data(contentsOf: readableFile) == originalReadableBytes)
+            if scenario.writeCorruptFile {
+                #expect(try Data(contentsOf: damagedFile) == corruptBytes)
+            } else {
+                #expect(!FileManager.default.fileExists(atPath: damagedFile.path))
+            }
+            #expect(try await recovery.recover(sessionID: session.id) == recovered)
+
+            let executor = MockTrackTranscriptionExecutor(behaviors: [
+                readable.role: [.success("Recovered surviving track")]
+            ])
+            let processed = try await TrackTranscriptionRunner(
+                store: store,
+                executor: executor,
+                now: { Date(timeIntervalSince1970: 1_800_000_101) }
+            ).run(sessionID: session.id)
+            #expect(processed.status == .partial)
+            #expect(processed.lastErrorCategory == scenario.category)
+            #expect(processed.tracks.first(where: { $0.role == readable.role })?.status == .transcribed)
+            #expect(processed.tracks.first(where: { $0.role == scenario.damagedRole })?.status == .unavailable)
+            #expect(await executor.requests.map(\.role) == [readable.role])
+        }
+    }
+
     @Test func meetingProcessingWorkflowPublishesTranscriptionAndMergeBoundaries() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMeetingWorkflow-\(UUID())", isDirectory: true)

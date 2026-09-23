@@ -327,7 +327,9 @@ actor TrackTranscriptionRunner {
             session.lastErrorMessage = nil
         } else if transcribedCount > 0 {
             session.status = .partial
-            let failed = session.tracks.first { $0.status == .failed }
+            let failed = session.tracks.first {
+                $0.status == .failed || $0.status == .unavailable
+            }
             session.lastErrorCategory = failed?.errorCategory
             session.lastErrorMessage = failed?.errorMessage
         } else {

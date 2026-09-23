@@ -55,11 +55,16 @@ actor InterruptedMeetingCaptureRecovery: MeetingInterruptedCaptureRecovering {
         }
 
         let paths = try await store.prepareSession(id: sessionID)
-        var repairedTrackCount = 0
+        var processedTrackCount = 0
         var recoveredIncompleteCaptureMetadata = false
 
         for index in session.tracks.indices where session.tracks[index].status == .interrupted {
             let track = session.tracks[index]
+            guard track.audioRelativePath != nil else {
+                markUnavailable(&session.tracks[index], category: .storageUnavailable)
+                processedTrackCount += 1
+                continue
+            }
             let sourceURL = try sourceURL(
                 for: track,
                 sessionDirectory: paths.sessionDirectory,
@@ -69,10 +74,13 @@ actor InterruptedMeetingCaptureRecovery: MeetingInterruptedCaptureRecovering {
             do {
                 inspection = try await inspector.inspect(sourceURL)
             } catch {
-                throw InterruptedMeetingCaptureRecoveryError.unreadableAudio(
-                    track.role,
-                    error.localizedDescription
+                markUnavailable(
+                    &session.tracks[index],
+                    category: FileManager.default.fileExists(atPath: sourceURL.path)
+                        ? .audioCorrupt : .storageUnavailable
                 )
+                processedTrackCount += 1
+                continue
             }
 
             recoveredIncompleteCaptureMetadata = recoveredIncompleteCaptureMetadata
@@ -92,10 +100,14 @@ actor InterruptedMeetingCaptureRecovery: MeetingInterruptedCaptureRecovering {
             session.tracks[index].byteCount = inspection.byteCount
             session.tracks[index].errorCategory = nil
             session.tracks[index].errorMessage = nil
-            repairedTrackCount += 1
+            processedTrackCount += 1
         }
 
-        guard repairedTrackCount > 0 else { return session }
+        guard processedTrackCount > 0 else { return session }
+        if let unavailable = session.tracks.first(where: { $0.status == .unavailable }) {
+            session.lastErrorCategory = unavailable.errorCategory
+            session.lastErrorMessage = "At least one preserved meeting track could not be read after capture was interrupted."
+        }
         var synchronization = synchronizationAnalyzer.analyze(tracks: session.tracks)
         // A process crash prevents the recorders from persisting their final
         // timing anchors and gap/quality counters. A shared start anchor still
@@ -111,6 +123,15 @@ actor InterruptedMeetingCaptureRecovery: MeetingInterruptedCaptureRecovering {
         session.updatedAt = max(now(), session.updatedAt)
         try await store.save(session)
         return session
+    }
+
+    private func markUnavailable(
+        _ track: inout MeetingAudioTrack,
+        category: DictationErrorCategory
+    ) {
+        track.status = .unavailable
+        track.errorCategory = category
+        track.errorMessage = "The preserved original could not be read after capture was interrupted."
     }
 
     private func sourceURL(
