@@ -191,6 +191,26 @@ private nonisolated enum MixedRecordingStorageCapacity {
     }
 }
 
+nonisolated enum MixedRecordingWriteFailure {
+    static func isOutOfSpace(_ error: Error) -> Bool {
+        var current = error as NSError
+        for _ in 0..<4 {
+            if current.domain == NSCocoaErrorDomain,
+               current.code == CocoaError.fileWriteOutOfSpace.rawValue {
+                return true
+            }
+            if current.domain == NSPOSIXErrorDomain, current.code == ENOSPC {
+                return true
+            }
+            guard let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError else {
+                break
+            }
+            current = underlying
+        }
+        return false
+    }
+}
+
 actor MixedRecordingSessionCoordinator {
     /// Roughly thirty seconds of two 96 kHz mono Float32 originals plus reserve.
     static let minimumRecordingStorageBytes: Int64 = 50_000_000
@@ -348,22 +368,24 @@ actor MixedRecordingSessionCoordinator {
             )
             try ensureActive(operationID)
 
-            if case let .failure(message) = microphoneOutcome {
+            if case let .failure(failure) = microphoneOutcome {
                 try await failStart(
                     operationID: operationID,
                     session: &session,
                     role: .localSpeaker,
                     phase: .start,
-                    message: message
+                    message: failure.message,
+                    category: failure.category
                 )
             }
-            if case let .failure(message) = systemAudioOutcome {
+            if case let .failure(failure) = systemAudioOutcome {
                 try await failStart(
                     operationID: operationID,
                     session: &session,
                     role: .systemAudio,
                     phase: .start,
-                    message: message
+                    message: failure.message,
+                    category: failure.category
                 )
             }
 
@@ -459,10 +481,10 @@ actor MixedRecordingSessionCoordinator {
                         )
                     }
                 }
-            case .failure:
+            case let .failure(failure):
                 FlowLogger.meetingSignposter.emitEvent(
                     "Meeting Track Lost", id: signpostID,
-                    "role: \(role.rawValue, privacy: .public)"
+                    "role: \(role.rawValue, privacy: .public), category: \(failure.category.rawValue, privacy: .public)"
                 )
             }
         }
@@ -485,7 +507,10 @@ actor MixedRecordingSessionCoordinator {
             : successfulTrackCount == 1 ? .partial : .failed
         session.updatedAt = now()
         if successfulTrackCount < 2 {
-            session.lastErrorCategory = .interrupted
+            let categories = session.tracks.compactMap(\.errorCategory)
+            session.lastErrorCategory = categories.contains(.storageFull)
+                ? .storageFull
+                : categories.contains(.storageUnavailable) ? .storageUnavailable : .interrupted
             session.lastErrorMessage = "One or more mixed recording tracks could not be finalized."
         }
         do {
@@ -640,12 +665,10 @@ actor MixedRecordingSessionCoordinator {
         switch outcome {
         case let .success(result):
             applyCaptureResult(result, to: &session.tracks[index])
-        case let .failure(message):
+        case let .failure(failure):
             session.tracks[index].status = .failed
-            session.tracks[index].errorCategory = role == .systemAudio
-                ? .systemAudioInterrupted
-                : .audioDevice
-            session.tracks[index].errorMessage = message
+            session.tracks[index].errorCategory = failure.category
+            session.tracks[index].errorMessage = failure.message
         }
     }
 
@@ -704,7 +727,8 @@ actor MixedRecordingSessionCoordinator {
             session: &session,
             role: role,
             phase: phase,
-            message: error.localizedDescription
+            message: error.localizedDescription,
+            category: Self.failure(for: error, role: role, phase: phase).category
         )
     }
 
@@ -713,24 +737,21 @@ actor MixedRecordingSessionCoordinator {
         session: inout MixedRecordingSession,
         role: RecordingTrackRole,
         phase: MixedRecordingCoordinatorPhase,
-        message: String
+        message: String,
+        category: DictationErrorCategory
     ) async throws -> Never {
         guard activeOperationID == operationID else { throw CancellationError() }
         for index in session.tracks.indices {
             let isFailure = session.tracks[index].role == role
             session.tracks[index].status = isFailure ? .unavailable : .interrupted
-            session.tracks[index].errorCategory = isFailure
-                ? (role == .systemAudio ? .systemAudioUnavailable : .audioDevice)
-                : .interrupted
+            session.tracks[index].errorCategory = isFailure ? category : .interrupted
             session.tracks[index].errorMessage = isFailure
                 ? message
                 : "The other track failed before mixed capture could start."
         }
         session.status = .failed
         session.updatedAt = now()
-        session.lastErrorCategory = role == .systemAudio
-            ? .systemAudioUnavailable
-            : .audioDevice
+        session.lastErrorCategory = category
         session.lastErrorMessage = message
         try await store.save(session)
         FlowLogger.meetingSignposter.emitEvent(
@@ -763,7 +784,7 @@ actor MixedRecordingSessionCoordinator {
         do {
             return .success(try await recorder.start(requestedHostTime: requestedHostTime))
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(failure(for: error, role: recorder.role, phase: .start))
         }
     }
 
@@ -773,8 +794,33 @@ actor MixedRecordingSessionCoordinator {
         do {
             return .success(try await recorder.stop())
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(failure(for: error, role: recorder.role, phase: .stop))
         }
+    }
+
+    private nonisolated static func failure(
+        for error: Error,
+        role: RecordingTrackRole,
+        phase: MixedRecordingCoordinatorPhase
+    ) -> MixedTrackOperationFailure {
+        let category: DictationErrorCategory
+        if let writerError = error as? MicrophoneTrackRecorderError,
+           case let .writerFailed(_, outOfSpace) = writerError {
+            category = outOfSpace ? .storageFull : .storageUnavailable
+        } else if let writerError = error as? SystemAudioTrackRecorderError,
+                  case let .writerFailed(_, outOfSpace) = writerError {
+            category = outOfSpace ? .storageFull : .storageUnavailable
+        } else if MixedRecordingWriteFailure.isOutOfSpace(error) {
+            category = .storageFull
+        } else {
+            category = role == .systemAudio
+                ? (phase == .stop ? .systemAudioInterrupted : .systemAudioUnavailable)
+                : .audioDevice
+        }
+        return MixedTrackOperationFailure(
+            message: error.localizedDescription,
+            category: category
+        )
     }
 }
 
@@ -782,5 +828,10 @@ extension MixedRecordingSessionCoordinator: MixedRecordingSessionCoordinating {}
 
 nonisolated private enum MixedTrackOperationOutcome<Value: Sendable>: Sendable {
     case success(Value)
-    case failure(String)
+    case failure(MixedTrackOperationFailure)
+}
+
+nonisolated private struct MixedTrackOperationFailure: Sendable {
+    var message: String
+    var category: DictationErrorCategory
 }

@@ -314,7 +314,10 @@ nonisolated final class ScreenCaptureKitTrackOutput: NSObject, @unchecked Sendab
         } catch let error as SystemAudioTrackRecorderError {
             record(error)
         } catch {
-            record(.writerFailed(error.localizedDescription))
+            record(.writerFailed(
+                error.localizedDescription,
+                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(error)
+            ))
         }
     }
 

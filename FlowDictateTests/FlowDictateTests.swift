@@ -2556,7 +2556,7 @@ struct FlowDictateTests {
         let systemAudio = MockMixedTrackRecorder(
             role: .systemAudio,
             events: events,
-            stopError: .requested("system track finalization failed")
+            stopError: MockMixedTrackError.requested("system track finalization failed")
         )
         let coordinator = MixedRecordingSessionCoordinator(
             microphoneRecorder: microphone,
@@ -2604,6 +2604,132 @@ struct FlowDictateTests {
         #expect(await coordinator.state == .idle)
     }
 
+    @Test func mixedCoordinatorPersistsTypedWriterFailuresWithoutDeletingOriginals() async throws {
+        let scenarios: [(
+            role: RecordingTrackRole,
+            error: any Error & Sendable,
+            category: DictationErrorCategory
+        )] = [
+            (
+                .localSpeaker,
+                MicrophoneTrackRecorderError.writerFailed("disk full", outOfSpace: true),
+                .storageFull
+            ),
+            (
+                .systemAudio,
+                SystemAudioTrackRecorderError.writerFailed("write failed", outOfSpace: false),
+                .storageUnavailable
+            )
+        ]
+        for scenario in scenarios {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FlowDictateMixedWriterFailure-\(UUID())", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = MeetingSessionStore(rootURL: root)
+            let events = MixedTrackTestEventLog()
+            let microphone = MockMixedTrackRecorder(
+                role: .localSpeaker,
+                events: events,
+                stopError: scenario.role == .localSpeaker ? scenario.error : nil
+            )
+            let systemAudio = MockMixedTrackRecorder(
+                role: .systemAudio,
+                events: events,
+                stopError: scenario.role == .systemAudio ? scenario.error : nil
+            )
+            let coordinator = MixedRecordingSessionCoordinator(
+                microphoneRecorder: microphone,
+                systemAudioRecorder: systemAudio,
+                store: store,
+                now: { Date(timeIntervalSince1970: 1_800_000_000) }
+            )
+            let request = MixedRecordingSessionRequest(
+                providerID: "local", engineID: "fluid-audio",
+                modelID: "test-model", language: "de"
+            )
+
+            _ = try await coordinator.start(request)
+            let session = try await coordinator.stop()
+            let failedTrack = try #require(session.tracks.first {
+                $0.role == scenario.role
+            })
+            let survivingTrack = try #require(session.tracks.first {
+                $0.role != scenario.role
+            })
+            #expect(session.status == .partial)
+            #expect(failedTrack.status == .failed)
+            #expect(failedTrack.errorCategory == scenario.category)
+            #expect(survivingTrack.status == .finalized)
+            #expect(session.lastErrorCategory == scenario.category)
+            for track in session.tracks {
+                let relativePath = try #require(track.audioRelativePath)
+                let audioURL = root.appendingPathComponent(request.sessionID.uuidString)
+                    .appendingPathComponent(relativePath)
+                #expect(FileManager.default.fileExists(atPath: audioURL.path))
+            }
+            #expect(try await store.load(sessionID: session.id) == session)
+        }
+    }
+
+    @Test func mixedRecordingRecognizesNestedOutOfSpaceErrors() {
+        let diskFull = NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(ENOSPC)
+        )
+        let wrapped = NSError(
+            domain: NSCocoaErrorDomain,
+            code: CocoaError.fileWriteUnknown.rawValue,
+            userInfo: [NSUnderlyingErrorKey: diskFull]
+        )
+        #expect(MixedRecordingWriteFailure.isOutOfSpace(wrapped))
+        #expect(!MixedRecordingWriteFailure.isOutOfSpace(
+            NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue)
+        ))
+    }
+
+    @Test func mixedCoordinatorPersistsWriterFailureDuringTrackStart() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMixedWriterStart-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingSessionStore(rootURL: root)
+        let events = MixedTrackTestEventLog()
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(role: .localSpeaker, events: events),
+            systemAudioRecorder: MockMixedTrackRecorder(
+                role: .systemAudio,
+                events: events,
+                startError: SystemAudioTrackRecorderError.writerFailed(
+                    "disk full", outOfSpace: true
+                )
+            ),
+            store: store,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        let request = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: "de"
+        )
+
+        await #expect(throws: MixedRecordingCoordinatorError.trackFailed(
+            role: .systemAudio,
+            phase: .start,
+            message: "The system audio original could not be written: disk full"
+        )) {
+            _ = try await coordinator.start(request)
+        }
+        let saved = try #require(try await store.load(sessionID: request.sessionID))
+        #expect(saved.status == .failed)
+        #expect(saved.lastErrorCategory == .storageFull)
+        #expect(saved.tracks.first(where: { $0.role == .systemAudio })?.errorCategory == .storageFull)
+        #expect(saved.tracks.first(where: { $0.role == .localSpeaker })?.status == .interrupted)
+        for track in saved.tracks {
+            let relativePath = try #require(track.audioRelativePath)
+            let audioURL = root.appendingPathComponent(request.sessionID.uuidString)
+                .appendingPathComponent(relativePath)
+            #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        }
+    }
+
     @Test func mixedCoordinatorStartFailureCancelsBothTracksAndPersistsFailure() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateMixedStartFailure-\(UUID())", isDirectory: true)
@@ -2614,7 +2740,7 @@ struct FlowDictateTests {
         let systemAudio = MockMixedTrackRecorder(
             role: .systemAudio,
             events: events,
-            startError: .requested("system source disappeared")
+            startError: MockMixedTrackError.requested("system source disappeared")
         )
         let coordinator = MixedRecordingSessionCoordinator(
             microphoneRecorder: microphone,
@@ -2697,7 +2823,7 @@ struct FlowDictateTests {
         let coordinator = MixedRecordingSessionCoordinator(
             microphoneRecorder: MockMixedTrackRecorder(
                 role: .localSpeaker, events: events,
-                stopError: .requested("microphone writer failed")
+                stopError: MockMixedTrackError.requested("microphone writer failed")
             ),
             systemAudioRecorder: MockMixedTrackRecorder(
                 role: .systemAudio, events: events
@@ -6653,8 +6779,8 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
 
     private let events: MixedTrackTestEventLog
     private let prepareError: MockMixedTrackError?
-    private let startError: MockMixedTrackError?
-    private let stopError: MockMixedTrackError?
+    private let startError: (any Error & Sendable)?
+    private let stopError: (any Error & Sendable)?
     private let stopGate: MockMixedStopGate?
     private let returnsCaptureOnCancel: Bool
     private var outputURL: URL?
@@ -6665,8 +6791,8 @@ private actor MockMixedTrackRecorder: MixedTrackRecording {
         role: RecordingTrackRole,
         events: MixedTrackTestEventLog,
         prepareError: MockMixedTrackError? = nil,
-        startError: MockMixedTrackError? = nil,
-        stopError: MockMixedTrackError? = nil,
+        startError: (any Error & Sendable)? = nil,
+        stopError: (any Error & Sendable)? = nil,
         stopGate: MockMixedStopGate? = nil,
         returnsCaptureOnCancel: Bool = false
     ) {

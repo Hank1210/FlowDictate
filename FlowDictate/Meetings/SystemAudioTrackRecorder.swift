@@ -16,7 +16,7 @@ nonisolated enum SystemAudioTrackRecorderError: LocalizedError, Sendable, Equata
     case captureCancelled
     case interrupted(String)
     case conversionFailed(String)
-    case writerFailed(String)
+    case writerFailed(String, outOfSpace: Bool)
     case operationFailed(operation: String, status: OSStatus)
     case cleanupTimedOut
 
@@ -48,7 +48,7 @@ nonisolated enum SystemAudioTrackRecorderError: LocalizedError, Sendable, Equata
             "System audio capture stopped unexpectedly: \(message)"
         case let .conversionFailed(message):
             "System audio could not be converted to mono Float32 PCM: \(message)"
-        case let .writerFailed(message):
+        case let .writerFailed(message, _):
             "The system audio original could not be written: \(message)"
         case let .operationFailed(operation, status):
             "Core Audio could not \(operation) (OSStatus \(status))."
@@ -585,8 +585,12 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             failure = error
             reportFailureIfNeeded(error)
         } catch {
-            failure = .writerFailed(error.localizedDescription)
-            reportFailureIfNeeded(.writerFailed(error.localizedDescription))
+            let writerError = SystemAudioTrackRecorderError.writerFailed(
+                error.localizedDescription,
+                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(error)
+            )
+            failure = writerError
+            reportFailureIfNeeded(writerError)
         }
     }
 

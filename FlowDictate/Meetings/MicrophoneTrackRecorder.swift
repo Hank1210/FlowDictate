@@ -11,7 +11,7 @@ nonisolated enum MicrophoneTrackRecorderError: LocalizedError, Sendable, Equatab
     case noAudioReceived
     case captureCancelled
     case conversionFailed(String)
-    case writerFailed(String)
+    case writerFailed(String, outOfSpace: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -29,7 +29,7 @@ nonisolated enum MicrophoneTrackRecorderError: LocalizedError, Sendable, Equatab
             "Microphone capture was cancelled."
         case let .conversionFailed(message):
             "The microphone audio could not be converted to mono Float32 PCM: \(message)"
-        case let .writerFailed(message):
+        case let .writerFailed(message, _):
             "The microphone original could not be written: \(message)"
         }
     }
@@ -270,8 +270,12 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
             failure = error
             reportFailureIfNeeded(error)
         } catch {
-            failure = .writerFailed(error.localizedDescription)
-            reportFailureIfNeeded(.writerFailed(error.localizedDescription))
+            let writerError = MicrophoneTrackRecorderError.writerFailed(
+                error.localizedDescription,
+                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(error)
+            )
+            failure = writerError
+            reportFailureIfNeeded(writerError)
         }
     }
 
