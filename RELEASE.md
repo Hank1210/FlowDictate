@@ -15,7 +15,7 @@ The script performs an unsigned universal Release build, applies an ad hoc signa
 - `FlowDictate-4.1.0-Community-macOS.zip`
 - `FlowDictate-4.1.0-Community-macOS.zip.sha256`
 
-The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, System Audio Recording Only, Screen & System Audio Recording or Keychain permission to be granted again.
+The ZIP contains the app, German and English installation guides (`INSTALLATION-DE.md` and `INSTALLATION-EN.md`), the project MIT license, third-party notices and license, Privacy notice and Changelog. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, System Audio Recording Only, Screen & System Audio Recording or Keychain permission to be granted again.
 
 Verify the generated archive before uploading it:
 
