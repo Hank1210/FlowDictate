@@ -51,14 +51,14 @@ struct HotKeyConfiguration: Codable, Identifiable, Hashable, Sendable {
 
     static let optionShiftZ = HotKeyConfiguration(
         id: "option-shift-z",
-        keyCode: UInt32(kVK_ANSI_Z),
+        keyCode: keyCode(for: "z", fallback: UInt32(kVK_ANSI_Z)),
         modifiers: UInt32(optionKey | shiftKey),
         displayName: "Option + Shift + Z"
     )
 
     static let controlShiftZ = HotKeyConfiguration(
         id: "control-shift-z",
-        keyCode: UInt32(kVK_ANSI_Z),
+        keyCode: keyCode(for: "z", fallback: UInt32(kVK_ANSI_Z)),
         modifiers: UInt32(controlKey | shiftKey),
         displayName: "Control + Shift + Z"
     )
@@ -66,6 +66,40 @@ struct HotKeyConfiguration: Codable, Identifiable, Hashable, Sendable {
     static let dictationPresets = [optionSpace, controlSpace, optionD]
     static let cancelPresets = [optionShiftSpace, controlShiftSpace, optionShiftD]
     static let restorePresets = [optionShiftZ, controlShiftZ]
+
+    static func normalizedRestorePreset(_ saved: Self?) -> Self {
+        switch saved?.id {
+        case optionShiftZ.id: optionShiftZ
+        case controlShiftZ.id: controlShiftZ
+        default: saved ?? optionShiftZ
+        }
+    }
+
+    private static func keyCode(for character: String, fallback: UInt32) -> UInt32 {
+        let source = TISCopyCurrentKeyboardLayoutInputSource().takeRetainedValue()
+        guard let property = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+            return fallback
+        }
+        let data = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(data) else { return fallback }
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+
+        for keyCode in UInt16(0)..<UInt16(128) {
+            var deadKeyState: UInt32 = 0
+            var length = 0
+            var output = [UniChar](repeating: 0, count: 4)
+            let status = UCKeyTranslate(
+                layout, keyCode, UInt16(kUCKeyActionDown), 0,
+                UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit),
+                &deadKeyState, output.count, &length, &output
+            )
+            if status == noErr,
+               String(utf16CodeUnits: output, count: length).lowercased() == character {
+                return UInt32(keyCode)
+            }
+        }
+        return fallback
+    }
 
     static func custom(keyCode: UInt32, modifiers: UInt32, keyName: String) -> Self {
         let modifierName = [

@@ -9,8 +9,8 @@ import Foundation
 nonisolated final class SerialFileIO: @unchecked Sendable {
     private let queue: DispatchQueue
 
-    init(label: String) {
-        queue = DispatchQueue(label: label, qos: .utility)
+    init(label: String, qos: DispatchQoS = .utility) {
+        queue = DispatchQueue(label: label, qos: qos)
     }
 
     func perform<Value: Sendable>(

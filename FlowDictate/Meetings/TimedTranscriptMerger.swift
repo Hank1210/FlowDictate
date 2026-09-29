@@ -118,6 +118,7 @@ nonisolated struct TimedTranscriptMerger: Sendable {
         transcript: MeetingTrackTranscript,
         track: MeetingAudioTrack
     ) throws -> [TrackTranscriptEntry] {
+        if transcript.isSilent == true { return [] }
         let explicit = transcript.timedEntries ?? []
         let sourceDuration = max(
             1,
@@ -232,19 +233,121 @@ nonisolated struct TimedTranscriptMerger: Sendable {
         return UUID(uuid: bytes)
     }
 
+    private struct RenderedTurn {
+        var role: RecordingTrackRole
+        var firstSourceIndex: Int
+        var startMilliseconds: Int64
+        var endMilliseconds: Int64
+        var text: String
+        var wordPrecise: Bool
+    }
+
     private static func render(_ entries: [TimedTranscriptEntry]) -> String {
-        var turns: [(role: RecordingTrackRole, text: String)] = []
-        for entry in entries {
-            if let last = turns.indices.last, turns[last].role == entry.role {
-                turns[last].text = joined(turns[last].text, entry.text)
-            } else {
-                turns.append((entry.role, entry.text))
+        // Keep the persisted timeline word-precise. Only its readable projection
+        // groups nearby words into bounded turns. Split continuous speech at
+        // the other speaker's entry and exit, so a long paragraph cannot be
+        // displayed ahead of an utterance that happened inside it.
+        var turns: [RenderedTurn] = []
+        for role in RecordingTrackRole.allCases {
+            var roleTurns: [RenderedTurn] = []
+            let otherSpeakerBoundaries = speechBoundaries(ofOtherRoleThan: role, in: entries)
+            var boundaryIndex = 0
+            for entry in entries where entry.role == role {
+                if let last = roleTurns.indices.last {
+                    while boundaryIndex < otherSpeakerBoundaries.count,
+                          otherSpeakerBoundaries[boundaryIndex]
+                            <= roleTurns[last].startMilliseconds {
+                        boundaryIndex += 1
+                    }
+                    var crossesSpeakerBoundary = false
+                    while boundaryIndex < otherSpeakerBoundaries.count,
+                          otherSpeakerBoundaries[boundaryIndex]
+                            <= entry.sessionStartMilliseconds {
+                        if roleTurns[last].endMilliseconds - roleTurns[last].startMilliseconds >= 3_000 {
+                            crossesSpeakerBoundary = true
+                            break
+                        }
+                        // A very short utterance stays intact. Do not split
+                        // it several words later for a boundary now in the past.
+                        boundaryIndex += 1
+                    }
+                    if roleTurns[last].wordPrecise,
+                       entry.precision == .word,
+                       entry.sessionStartMilliseconds - roleTurns[last].endMilliseconds <= 800,
+                       entry.sessionEndMilliseconds - roleTurns[last].startMilliseconds <= 20_000,
+                       !crossesSpeakerBoundary,
+                       !(roleTurns[last].endMilliseconds - roleTurns[last].startMilliseconds >= 15_000
+                         && endsSentence(roleTurns[last].text)) {
+                        roleTurns[last].endMilliseconds = max(
+                            roleTurns[last].endMilliseconds,
+                            entry.sessionEndMilliseconds
+                        )
+                        roleTurns[last].text = joined(roleTurns[last].text, entry.text)
+                        continue
+                    }
+                }
+                roleTurns.append(RenderedTurn(
+                    role: role,
+                    firstSourceIndex: entry.sourceIndex,
+                    startMilliseconds: entry.sessionStartMilliseconds,
+                    endMilliseconds: entry.sessionEndMilliseconds,
+                    text: entry.text,
+                    wordPrecise: entry.precision == .word
+                ))
             }
+            turns.append(contentsOf: roleTurns)
+        }
+        turns.sort { left, right in
+            if left.startMilliseconds != right.startMilliseconds {
+                return left.startMilliseconds < right.startMilliseconds
+            }
+            if left.role != right.role {
+                return roleOrder(left.role) < roleOrder(right.role)
+            }
+            return left.firstSourceIndex < right.firstSourceIndex
         }
         return turns.map { turn in
             let label = turn.role == .localSpeaker ? "You" : "System Audio"
-            return "[\(label)] \(turn.text)"
+            let hasPreciseOverlap = turn.wordPrecise && turns.contains { other in
+                guard other.role != turn.role, other.wordPrecise else { return false }
+                let overlap = min(turn.endMilliseconds, other.endMilliseconds)
+                    - max(turn.startMilliseconds, other.startMilliseconds)
+                return overlap >= 150
+            }
+            let suffix = hasPreciseOverlap
+                ? " · overlaps \(turn.role == .localSpeaker ? "System Audio" : "You")"
+                : ""
+            return "[\(label)\(suffix)] \(turn.text)"
         }.joined(separator: "\n")
+    }
+
+    private static func speechBoundaries(
+        ofOtherRoleThan role: RecordingTrackRole,
+        in entries: [TimedTranscriptEntry]
+    ) -> [Int64] {
+        var boundaries: [Int64] = []
+        var speechStart: Int64?
+        var speechEnd: Int64 = 0
+        for entry in entries where entry.role != role && entry.precision == .word {
+            if let start = speechStart,
+               entry.sessionStartMilliseconds - speechEnd > 800 {
+                boundaries.append(contentsOf: [start, speechEnd])
+                speechStart = entry.sessionStartMilliseconds
+                speechEnd = entry.sessionEndMilliseconds
+            } else {
+                speechStart = speechStart ?? entry.sessionStartMilliseconds
+                speechEnd = max(speechEnd, entry.sessionEndMilliseconds)
+            }
+        }
+        if let speechStart { boundaries.append(contentsOf: [speechStart, speechEnd]) }
+        return boundaries
+    }
+
+    private static func endsSentence(_ text: String) -> Bool {
+        let closingPunctuation = CharacterSet(charactersIn: "\"'”’)]}")
+        let last = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: closingPunctuation).last
+        return last.map { ".!?…".contains($0) } ?? false
     }
 
     private static func joined(_ left: String, _ right: String) -> String {

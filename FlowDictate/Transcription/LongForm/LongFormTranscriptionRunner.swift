@@ -14,12 +14,14 @@ final class LongFormTranscriptionRunner {
     private let modeResolver: TranscriptionModeResolver
     private let planner: AudioSegmentPlanner
     private let boundaryDetector: SilenceBoundaryDetector
+    private let silentSegmentDetector: SilentAudioSegmentDetector
     private let exporter: AudioSegmentExporter
     private let merger: PartialTranscriptMerger
     private let promptBuilder: TranscriptionPromptBuilder
     private let configuration: LongFormConfiguration
     private let sleeper: Sleeper
     private let capacityProvider: CapacityProvider?
+    private(set) var latestTimedUnits: [TranscriptionTimedUnit] = []
 
     init(
         historyStore: DictationHistoryStore,
@@ -27,6 +29,7 @@ final class LongFormTranscriptionRunner {
         configuration: LongFormConfiguration = .default,
         inspector: AudioAssetInspector = AudioAssetInspector(),
         boundaryDetector: SilenceBoundaryDetector = SilenceBoundaryDetector(),
+        silentSegmentDetector: SilentAudioSegmentDetector = SilentAudioSegmentDetector(),
         capacityProvider: CapacityProvider? = nil,
         sleeper: @escaping Sleeper = { try await Task.sleep(for: $0) }
     ) {
@@ -38,6 +41,7 @@ final class LongFormTranscriptionRunner {
         modeResolver = TranscriptionModeResolver(configuration: configuration)
         planner = AudioSegmentPlanner(configuration: configuration)
         self.boundaryDetector = boundaryDetector
+        self.silentSegmentDetector = silentSegmentDetector
         exporter = AudioSegmentExporter(configuration: configuration)
         merger = PartialTranscriptMerger()
         promptBuilder = TranscriptionPromptBuilder(characterLimit: configuration.promptCharacterLimit)
@@ -51,8 +55,11 @@ final class LongFormTranscriptionRunner {
         language: String?,
         maximumAttempts: Int,
         provider: any TranscriptionProvider,
+        allowsEmptyTranscript: Bool = false,
+        retainCompletedSession: Bool = false,
         progress: @escaping ProgressHandler
     ) async throws -> DictationRecord? {
+        latestTimedUnits = []
         let existing = try await sessionStore.load(recordID: record.id)
         if existing == nil,
            record.duration <= Double(configuration.targetDurationMilliseconds) / 1_000,
@@ -147,7 +154,8 @@ final class LongFormTranscriptionRunner {
             updated.updatedAt = Date()
             try await persist(updated)
 
-            for index in manifest.segments.indices where manifest.segments[index].status != .succeeded {
+            for index in manifest.segments.indices
+                where ![.succeeded, .silent].contains(manifest.segments[index].status) {
                 let segmentSignpost = FlowLogger.transcriptionSignposter.beginInterval(
                     "Transcription Segment", id: .exclusive,
                     "record: \(record.id.uuidString, privacy: .public), index: \(index), total: \(manifest.segments.count)"
@@ -193,6 +201,7 @@ final class LongFormTranscriptionRunner {
 
                 let attempts = max(maximumAttempts, 1)
                 var result: TranscriptionResult?
+                var verifiedSilent = false
                 for attempt in 1...attempts {
                     try Task.checkCancellation()
                     progress(.transcribing(segment: index, total: total, attempt: attempt))
@@ -220,6 +229,33 @@ final class LongFormTranscriptionRunner {
                         break
                     } catch {
                         if Task.isCancelled { throw CancellationError() }
+                        if let providerError = error as? TranscriptionProviderError,
+                           case .emptyTranscript = providerError,
+                           (try? await silentSegmentDetector.isSilent(
+                            in: audioURL,
+                            segment: manifest.segments[index]
+                           )) == true {
+                            try Task.checkCancellation()
+                            manifest.segments[index].status = .silent
+                            manifest.segments[index].transcript = nil
+                            manifest.segments[index].timedUnits = nil
+                            manifest.segments[index].errorCategory = nil
+                            manifest.segments[index].errorMessage = nil
+                            manifest.updatedAt = Date()
+                            try await sessionStore.save(manifest)
+                            await sessionStore.removeWorkFile(
+                                recordID: record.id, segmentIndex: index
+                            )
+                            updateSummary(record: &updated, manifest: manifest)
+                            updated.updatedAt = Date()
+                            try await persist(updated)
+                            FlowLogger.transcription.info(
+                                "Verified silent segment \(index + 1, privacy: .public)/\(total, privacy: .public)"
+                            )
+                            verifiedSilent = true
+                            break
+                        }
+                        if Task.isCancelled { throw CancellationError() }
                         let retry = attempt < attempts && DictationFailureClassifier.isRetryable(error)
                         if retry {
                             try await sleeper(attempt == 1 ? .milliseconds(500) : .milliseconds(1_500))
@@ -232,9 +268,11 @@ final class LongFormTranscriptionRunner {
                     }
                 }
 
+                if verifiedSilent { continue }
                 guard let result else { throw LongFormTranscriptionError.invalidSessionState }
                 manifest.segments[index].status = .succeeded
                 manifest.segments[index].transcript = result.text
+                manifest.segments[index].timedUnits = result.timedUnits
                 manifest.segments[index].errorCategory = nil
                 manifest.segments[index].errorMessage = nil
                 manifest.providerID = result.provider
@@ -260,6 +298,9 @@ final class LongFormTranscriptionRunner {
             manifest.updatedAt = Date()
             try await sessionStore.save(manifest)
             let text = try merger.merge(manifest.segments)
+            guard allowsEmptyTranscript || !text.isEmpty else {
+                throw LongFormTranscriptionError.transcriptMergeFailed
+            }
             FlowLogger.transcription.info(
                 "Merged \(manifest.segments.count, privacy: .public) segments in \(String(describing: mergeStarted.duration(to: .now)), privacy: .public)"
             )
@@ -283,7 +324,10 @@ final class LongFormTranscriptionRunner {
             updated.errorMessage = nil
             updated.updatedAt = Date()
             try await persist(updated)
-            try await sessionStore.delete(recordID: record.id)
+            latestTimedUnits = Self.timedUnits(from: manifest.segments)
+            if !retainCompletedSession {
+                try await sessionStore.delete(recordID: record.id)
+            }
             return updated
         } catch is CancellationError {
             manifest.normalizeInterruptedWork()
@@ -313,6 +357,60 @@ final class LongFormTranscriptionRunner {
             try? await historyStore.upsert(updated)
             throw TranscriptionRunFailure(underlyingError: error, record: updated)
         }
+    }
+
+    /// Convert provider-relative timing into the original track's clock. If a
+    /// provider has no word timing, retain the real segment interval rather
+    /// than pretending its entire track is one simultaneous utterance.
+    static func timedUnits(from segments: [TranscriptionSegment]) -> [TranscriptionTimedUnit] {
+        var result: [TranscriptionTimedUnit] = []
+        for segment in segments where segment.status == .succeeded {
+            let duration = segment.durationMilliseconds
+            let units = segment.timedUnits ?? []
+            let validUnits = units.compactMap { unit -> TranscriptionTimedUnit? in
+                guard !unit.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      unit.startMilliseconds >= 0,
+                      unit.startMilliseconds < duration,
+                      unit.endMilliseconds > unit.startMilliseconds,
+                      unit.endMilliseconds <= duration + 250 else { return nil }
+                return TranscriptionTimedUnit(
+                    text: unit.text,
+                    startMilliseconds: unit.startMilliseconds,
+                    // The provider can round its final word slightly past
+                    // the exported file's measured end (47 ms in the real
+                    // 120-minute session). Never extend the original track.
+                    endMilliseconds: min(unit.endMilliseconds, duration),
+                    precision: unit.precision
+                )
+            }
+            if !validUnits.isEmpty {
+                result.append(contentsOf: validUnits.compactMap { unit in
+                    // A word that begins inside the overlap can extend past
+                    // the logical boundary and sort before the preceding
+                    // segment's final word. Keep only words beginning on the
+                    // new side of that boundary.
+                    guard unit.startMilliseconds >= segment.overlapBeforeMilliseconds else {
+                        return nil
+                    }
+                    return TranscriptionTimedUnit(
+                        text: unit.text,
+                        startMilliseconds: segment.startMilliseconds + unit.startMilliseconds,
+                        endMilliseconds: segment.startMilliseconds + unit.endMilliseconds,
+                        precision: unit.precision
+                    )
+                })
+            } else if let text = segment.transcript?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !text.isEmpty {
+                result.append(TranscriptionTimedUnit(
+                    text: text,
+                    startMilliseconds: segment.startMilliseconds
+                        + segment.overlapBeforeMilliseconds,
+                    endMilliseconds: segment.endMilliseconds,
+                    precision: .segment
+                ))
+            }
+        }
+        return result
     }
 
     func recoverInterruptedSessions() async {

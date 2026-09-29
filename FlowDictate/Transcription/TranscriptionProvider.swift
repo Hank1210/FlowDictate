@@ -18,7 +18,7 @@ nonisolated enum TranscriptTimestampPrecision: String, Codable, Sendable, Equata
     case trackChunk
 }
 
-nonisolated struct TranscriptionTimedUnit: Equatable, Sendable {
+nonisolated struct TranscriptionTimedUnit: Codable, Equatable, Sendable {
     let text: String
     let startMilliseconds: Int64
     let endMilliseconds: Int64

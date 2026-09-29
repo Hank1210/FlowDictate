@@ -48,6 +48,8 @@ final class TranscriptionRunner {
         language: String?,
         maximumAttempts: Int,
         provider: any TranscriptionProvider,
+        allowsEmptyTranscript: Bool = false,
+        retainCompletedLongFormSession: Bool = false,
         deferSuccessfulPersistence: Bool = false,
         progress: @escaping @MainActor (LongFormProgress) -> Void = { _ in }
     ) async throws -> DictationRecord {
@@ -58,8 +60,11 @@ final class TranscriptionRunner {
             language: language,
             maximumAttempts: maximumAttempts,
             provider: provider,
+            allowsEmptyTranscript: allowsEmptyTranscript,
+            retainCompletedSession: retainCompletedLongFormSession,
             progress: progress
         ) {
+            latestTimedUnits = longFormRunner.latestTimedUnits
             return result
         }
         var updated = record

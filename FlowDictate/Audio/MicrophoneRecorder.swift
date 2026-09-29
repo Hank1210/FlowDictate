@@ -16,6 +16,8 @@ enum AudioRecorderError: LocalizedError {
     case alreadyRecording
     case notRecording
     case unavailableInput
+    case noAudioReceived
+    case captureFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +27,10 @@ enum AudioRecorderError: LocalizedError {
             "No recording is in progress."
         case .unavailableInput:
             "No usable microphone input is available."
+        case .noAudioReceived:
+            "The microphone started but delivered no audio buffers. Check the selected input device."
+        case let .captureFailed(message):
+            "Microphone capture failed: \(message)"
         }
     }
 }
@@ -104,16 +110,21 @@ extension AudioRecording {
 final class MicrophoneRecorder: AudioRecording {
     private let store: AudioStore
     private var engine: AVAudioEngine?
-    private var audioFile: AVAudioFile?
+    private var selectedInput: SelectedMicrophoneInput?
+    private var sink: MicrophoneRecordingSink?
     private var recordingID: UUID?
     private var recordingURL: URL?
     private var startedAt: Date?
     private var selectedDeviceID: AudioDeviceID?
 
     var levelHandler: (@MainActor (Float) -> Void)?
-    var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
+    var previewBufferHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)? {
+        didSet { sink?.setPreviewHandler(previewBufferHandler) }
+    }
 
-    var isRecording: Bool { engine?.isRunning == true }
+    var isRecording: Bool {
+        engine?.isRunning == true || selectedInput?.isRunning == true
+    }
 
     convenience init(locationStore: RecordingLocationStore? = nil) {
         self.init(store: AudioStore(locationStore: locationStore))
@@ -132,71 +143,59 @@ final class MicrophoneRecorder: AudioRecording {
 
         let id = UUID()
         let url = try store.makeRecordingURL(id: id)
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-
-        if let selectedDeviceID, let audioUnit = inputNode.audioUnit {
-            var deviceID = selectedDeviceID
-            let status = AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &deviceID,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
-            guard status == noErr else {
-                throw AudioDeviceServiceError.propertyUnavailable(status)
-            }
+        let selectedInput = try selectedDeviceID.map {
+            try SelectedMicrophoneInput(deviceID: $0)
         }
-
-        let hardwareFormat = inputNode.inputFormat(forBus: 0)
-        let tapFormat = inputNode.outputFormat(forBus: 0)
-        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0,
+        let engine = selectedInput == nil ? AVAudioEngine() : nil
+        let inputNode = engine?.inputNode
+        let tapFormat = selectedInput?.format ?? inputNode?.outputFormat(forBus: 0)
+        guard let tapFormat,
               tapFormat.sampleRate > 0, tapFormat.channelCount > 0 else {
             throw AudioRecorderError.unavailableInput
         }
         FlowLogger.audio.info(
-            "Opening microphone: hardware \(hardwareFormat.sampleRate, privacy: .public) Hz/\(hardwareFormat.channelCount, privacy: .public) ch, tap \(tapFormat.sampleRate, privacy: .public) Hz/\(tapFormat.channelCount, privacy: .public) ch"
+            "Opening microphone: \(tapFormat.sampleRate, privacy: .public) Hz/\(tapFormat.channelCount, privacy: .public) ch, selected input \(selectedInput != nil, privacy: .public)"
         )
 
         let file = try AVAudioFile(forWriting: url, settings: tapFormat.settings)
-        let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
-            do {
-                try file.write(from: buffer)
-            } catch {
-                FlowLogger.audio.error("Audio file write failed: \(error.localizedDescription, privacy: .public)")
+        let sink = MicrophoneRecordingSink(
+            file: file,
+            previewHandler: previewBufferHandler,
+            levelHandler: { [weak self] level in
+                Task { @MainActor [weak self] in self?.levelHandler?(level) }
             }
-
-            if let previewBufferHandler = self.previewBufferHandler,
-               let previewBuffer = LivePreviewAudioBuffer(copying: buffer) {
-                previewBufferHandler(previewBuffer)
-            }
-
-            guard levelUpdateGate.shouldPublish(
-                at: ProcessInfo.processInfo.systemUptime
-            ) else { return }
-            guard let channel = buffer.floatChannelData?[0] else { return }
-            let frameCount = Int(buffer.frameLength)
-            guard frameCount > 0 else { return }
-            let samples = UnsafeBufferPointer(start: channel, count: frameCount)
-            let normalized = AudioLevelMeter.normalizedRMS(samples)
-            Task { @MainActor [weak self] in
-                self?.levelHandler?(normalized)
+        )
+        if let selectedInput {
+            selectedInput.setHandlers(
+                onBuffer: { buffer, _ in sink.append(buffer) },
+                onError: { status in sink.recordCaptureError(status) }
+            )
+        } else if let inputNode {
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) {
+                buffer, _ in sink.append(buffer)
             }
         }
 
         do {
-            engine.prepare()
-            try engine.start()
+            engine?.prepare()
+            if let selectedInput {
+                try selectedInput.start()
+            } else {
+                try engine?.start()
+            }
+            try await sink.waitForFirstBuffer(timeout: .seconds(2))
         } catch {
-            inputNode.removeTap(onBus: 0)
+            if let inputNode { inputNode.removeTap(onBus: 0) }
+            engine?.stop()
+            selectedInput?.stop()
+            sink.close()
+            try? FileManager.default.removeItem(at: url)
             throw error
         }
 
         self.engine = engine
-        audioFile = file
+        self.selectedInput = selectedInput
+        self.sink = sink
         recordingID = id
         recordingURL = url
         startedAt = Date()
@@ -205,20 +204,23 @@ final class MicrophoneRecorder: AudioRecording {
 
     func stop() async throws -> AudioRecordingResult {
         guard
-            let engine,
+            engine != nil || selectedInput != nil,
             let id = recordingID,
             let url = recordingURL,
-            let startedAt
+            let startedAt,
+            let sink
         else {
             throw AudioRecorderError.notRecording
         }
 
-        let recordedFormat = audioFile?.processingFormat
-
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        audioFile = nil
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        selectedInput?.stop()
+        let recordedDuration = sink.close()
+        let recordedFormat = sink.format
         self.engine = nil
+        self.selectedInput = nil
+        self.sink = nil
         recordingID = nil
         recordingURL = nil
         self.startedAt = nil
@@ -228,16 +230,103 @@ final class MicrophoneRecorder: AudioRecording {
             id: id,
             url: url,
             startedAt: startedAt,
-            duration: Date().timeIntervalSince(startedAt),
+            duration: recordedDuration,
             sourceMetadata: AudioSourceMetadata(
                 source: .microphone,
-                sampleRate: recordedFormat?.sampleRate ?? 0,
-                channelCount: Int(recordedFormat?.channelCount ?? 0)
+                sampleRate: recordedFormat.sampleRate,
+                channelCount: Int(recordedFormat.channelCount)
             )
         )
         FlowLogger.audio.info(
             "Recording stopped after \(result.duration, format: .fixed(precision: 2)) seconds"
         )
         return result
+    }
+}
+
+/// Serializes file writes from either microphone backend and measures written PCM,
+/// not elapsed wall time. This prevents empty files reaching the transcription model.
+nonisolated final class MicrophoneRecordingSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var file: AVAudioFile?
+    private var writtenFrames: Int64 = 0
+    private var failure: AudioRecorderError?
+    private var previewHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?
+    private let levelHandler: @Sendable (Float) -> Void
+    private let levelGate = AudioLevelUpdateGate(updatesPerSecond: 10)
+    let format: AVAudioFormat
+
+    init(
+        file: AVAudioFile,
+        previewHandler: (@Sendable (LivePreviewAudioBuffer) -> Void)?,
+        levelHandler: @escaping @Sendable (Float) -> Void
+    ) {
+        self.file = file
+        format = file.processingFormat
+        self.previewHandler = previewHandler
+        self.levelHandler = levelHandler
+    }
+
+    func setPreviewHandler(_ handler: (@Sendable (LivePreviewAudioBuffer) -> Void)?) {
+        lock.withLock { previewHandler = handler }
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard failure == nil, let file, buffer.frameLength > 0 else { return }
+        do {
+            try file.write(from: buffer)
+            writtenFrames += Int64(buffer.frameLength)
+        } catch {
+            failure = .captureFailed(error.localizedDescription)
+            FlowLogger.audio.error(
+                "Audio file write failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+        if let previewHandler,
+           let previewBuffer = LivePreviewAudioBuffer(copying: buffer) {
+            previewHandler(previewBuffer)
+        }
+        if levelGate.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
+            levelHandler(AudioLevelMeter.normalizedRMS(buffer))
+        }
+    }
+
+    func recordCaptureError(_ status: OSStatus) {
+        lock.lock()
+        if failure == nil {
+            failure = .captureFailed("Core Audio input returned \(status).")
+        }
+        lock.unlock()
+    }
+
+    func waitForFirstBuffer(timeout: Duration) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            try Task.checkCancellation()
+            let (frames, failure) = snapshot()
+            if let failure { throw failure }
+            if frames > 0 { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw AudioRecorderError.noAudioReceived
+    }
+
+    @discardableResult
+    func close() -> TimeInterval {
+        lock.lock()
+        file = nil
+        let duration = Double(writtenFrames) / format.sampleRate
+        lock.unlock()
+        return duration
+    }
+
+    private func snapshot() -> (Int64, AudioRecorderError?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (writtenFrames, failure)
     }
 }

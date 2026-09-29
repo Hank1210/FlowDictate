@@ -45,11 +45,19 @@ actor LocalModelManager {
             .appendingPathComponent("active", isDirectory: true)
     }
 
+    private var repositoryFolderName: String {
+        #if arch(arm64)
+        Repo.parakeetV3.folderName
+        #else
+        "parakeet-tdt-0.6b-v3"
+        #endif
+    }
+
     /// FluidAudio treats `activeDirectory` as an anchor and stores the actual
     /// repository in a sibling directory named after the Hugging Face repo.
     var repositoryDirectory: URL {
         activeDirectory.deletingLastPathComponent()
-            .appendingPathComponent(descriptor.id, isDirectory: true)
+            .appendingPathComponent(repositoryFolderName, isDirectory: true)
     }
 
     func refreshState() -> LocalModelState {
@@ -142,7 +150,7 @@ actor LocalModelManager {
     /// be verified without downloading the model in unit tests.
     func promoteDownloadedModel(from stagingRoot: URL) throws {
         let stagedRepository = stagingRoot.appendingPathComponent(
-            descriptor.id,
+            repositoryFolderName,
             isDirectory: true
         )
         guard fileManager.fileExists(atPath: stagedRepository.path) else {

@@ -4,7 +4,7 @@
   <img src="FlowDictate/Assets.xcassets/AppIcon.appiconset/AppIcon_1024.png" alt="FlowDictate app icon" width="180">
 </p>
 
-FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. Version 4.0 adds optional on-device final transcription and restart-safe persistent processing. One dictation is recorded and processed at a time for predictable performance and insertion.
+FlowDictate is a native macOS menu bar dictation utility built with Swift, SwiftUI and AppKit. Version 4.1 adds opt-in microphone-plus-system-audio recording with separate original tracks, a role-labelled transcript and restart-safe processing. One dictation or meeting is recorded and processed at a time.
 
 FlowDictate is an independent open-source project. It is not affiliated with or endorsed by OpenAI or Apple.
 
@@ -45,6 +45,8 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - versioned dictionary and writing-style JSON import/export
 - a dedicated macOS app icon for Finder, Accessibility settings and installed builds
 - selectable microphone or digital System Audio recording, with separate permission guidance and a local five-second source test
+- opt-in `Microphone + System Audio` meetings with a separate consent confirmation, two original audio tracks, independent level and quality warnings, a shared timeline and partial/retry recovery
+- meeting History actions for separate track playback, export, non-destructive archiving, confirmed session deletion and retention that protects unfinished work
 - recording-source metadata in the overlay and History; microphone remains the migration-safe default
 - app-specific profiles selected by bundle identifier for language, transcription model, writing style, spoken formatting and insertion preference
 - automatic direct Accessibility insertion with a bounded clipboard fallback; Microsoft Word uses its reliable clipboard path immediately, `Clipboard only` remains available per app and protected password fields are never written
@@ -52,7 +54,9 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - optional local usage statistics calculated from History, with Total, 30-day and 14-day views plus a non-destructive reset
 - a daily, disableable GitHub release check that only opens the release page and never installs automatically
 
-The optional combined microphone-plus-system-audio mixer, bulk export and profile import/export remain follow-up scope. Cloud audio streaming is not used.
+Mixed recording does not create a combined original audio file or identify individual remote speakers: `You` means the microphone track and `System Audio` means the captured output. Bulk export and profile import/export remain follow-up scope. Cloud audio streaming is not used.
+
+Known 4.1 limitation: in the real 30-, 60- and 120-minute meeting tests, short gaps occurred on the System Audio track (65 ms, 33 ms and 422 ms total respectively; the longest single gap was 137 ms). A gap can omit part of a word. The app keeps both originals, reports capture quality and supports recovery; it does not claim lossless capture on every Mac or audio route.
 
 Long or oversized recordings are prepared as local M4A segments and transcribed sequentially. Successful segments are persisted before the next upload, so a pause, temporary failure or app restart continues at the first unfinished segment.
 
@@ -62,6 +66,7 @@ Long or oversized recordings are prepared as local M4A segments and transcribed 
 - macOS 14 or later
 - Apple Silicon for local final transcription, or an OpenAI API key on Apple Silicon and Intel Macs
 - approximately 750 MB of additional storage for the optional local model
+- for mixed meetings, about 1.4 GB per hour for two uncompressed original tracks at 48 kHz; aligned working copies and transcription artifacts need additional space
 
 ## Configure and run
 
@@ -69,7 +74,7 @@ Long or oversized recordings are prepared as local M4A segments and transcribed 
 2. Follow the first-run setup assistant.
 3. Confirm `Documents/Recordings` or choose another recordings folder.
 4. Choose local transcription and download the model, or enter the owner's OpenAI API key; the key is stored in macOS Keychain.
-5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for microphone Live Preview. Screen & System Audio Recording permission is requested only if System Audio is selected or tested.
+5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for microphone Live Preview. Standalone System Audio uses Screen & System Audio Recording; mixed meetings use System Audio Recording Only on macOS 14.2+ and the ScreenCaptureKit permission on macOS 14.0/14.1.
 6. Place the cursor in another application and press Option + Space.
 7. Speak, then press Option + Space again to transcribe and insert the text.
 
@@ -81,7 +86,7 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 
 - **General:** launch at login and permission status
 - **Dictation:** shortcuts, toggle/press-and-hold activation, Live Preview, overlay size, position, text limit and Preview test
-- **Audio:** microphone/System Audio source, permissions, five-second source test, input device and live level
+- **Audio:** microphone, System Audio or mixed source, source-specific permissions, five-second source tests, input device, live levels and meeting consent
 - **Transcription:** privacy mode, local/OpenAI provider, local model management, optional Keychain credential and language
 - **Smart Dictation:** spoken formatting, personal dictionary, writing styles, optional enhancement model and fallback behavior
 - **Storage:** recordings folder, retention and Phase 1 migration
@@ -89,7 +94,7 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 - **Productivity:** local usage statistics and Community update notices
 - **Advanced:** clipboard restoration delay and automatic retries
 
-If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload in the folder selected during setup. History metadata remains local in the app's Application Support container.
+If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload in the folder selected during setup. Mixed sessions keep their two originals and derived/transcription files in a `MeetingSessions` subfolder there. History metadata remains local in the app's Application Support container.
 
 New installations keep at most 1,000 visible history entries and 365 days by default. Existing installations remain unlimited until the user chooses limits. A history entry whose audio must still be retained is archived instead of being treated as an orphan; its compact archive marker is removed after the separate audio-retention rule removes the file.
 
@@ -103,20 +108,20 @@ For a free build intended for personal use and a trusted circle, run:
 
 It creates an ad hoc signed universal ZIP for Apple Silicon and Intel Macs. No paid Apple Developer membership is required. Because the build is not notarized, recipients must approve its first launch manually as described in `COMMUNITY_INSTALLATION.md` (German) or `COMMUNITY_INSTALLATION_EN.md` (English).
 
-For version 4.0.2 the generated files are:
+For version 4.1.0 the generated files are:
 
-- `FlowDictate-4.0.2-Community-macOS.zip`
-- `FlowDictate-4.0.2-Community-macOS.zip.sha256`
+- `FlowDictate-4.1.0-Community-macOS.zip`
+- `FlowDictate-4.1.0-Community-macOS.zip.sha256`
 
 `scripts/build-release.sh` remains available for a future Developer ID signed and notarized release. Both workflows are documented in `RELEASE.md`.
 
 Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history. Phase 4.0 implementation and release gates are described in [FlowDictate_PRD_Phase_4_0.md](FlowDictate_PRD_Phase_4_0.md).
+See [CHANGELOG.md](CHANGELOG.md) for version history. Phase 4.1 implementation and release gates are described in [ARBEITSPLAN_PHASE_4_1.md](ARBEITSPLAN_PHASE_4_1.md).
 
-## Updating from 2.0
+## Updating an existing installation
 
-Quit FlowDictate, replace the existing app in `Applications`, and open the new app once using right-click → Open. Settings, the selected recordings folder and the Keychain credential remain local. History is migrated to the Phase 3.2 schema on first use; FlowDictate creates a one-time `dictations-pre-3.2.json` backup before writing the migrated file. macOS may request Accessibility, Microphone, Speech Recognition or Keychain approval again because Community builds use an ad hoc signature.
+Quit FlowDictate, replace the existing app in `Applications`, and open the new app once using right-click → Open. Settings, the selected recordings folder and the Keychain credential remain local. Before the first schema-7 History write, FlowDictate creates a one-time `dictations-pre-4.1.json` backup. Existing single-track entries remain single-track. macOS may request Accessibility, Microphone, System Audio, Speech Recognition or Keychain approval again because Community builds use an ad hoc signature.
 
 ## Privacy
 

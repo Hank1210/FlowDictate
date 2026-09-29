@@ -35,7 +35,7 @@ actor DictationHistoryStore {
 
     private let fileURL: URL
     private let fileManager: FileManager
-    private let fileIO = SerialFileIO(label: "de.euler.FlowDictate.history-file-io")
+    private let fileIO = SerialFileIO(label: "de.euler.FlowDictate.history-file-io", qos: .userInitiated)
     private var recordsByID: [UUID: DictationRecord] = [:]
     private var loaded = false
     private var loadTask: Task<LoadSnapshot?, Error>?

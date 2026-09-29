@@ -7,7 +7,8 @@ FlowDictate does not include analytics, advertising, telemetry or a developer-op
 - The OpenAI API key is stored in the user's macOS Keychain.
 - Recordings are stored in the folder selected during setup. The recommended default is `Documents/Recordings`.
 - Dictation history and recovery metadata remain in the app's local Application Support container.
-- Resumable long-form session manifests and temporary audio segments remain in Application Support. A temporary segment is deleted after successful transcription; the manifest is deleted after the complete transcript is safely stored.
+- Ordinary resumable long-form session manifests and temporary audio segments remain in Application Support. A temporary segment is deleted after successful transcription; the manifest is deleted after the complete transcript is safely stored.
+- Mixed meetings keep separate microphone and System Audio original tracks under `MeetingSessions` in the selected recordings folder. That session also contains its manifest, derived working files, track transcript artifacts and role-labelled timeline. A completed meeting can therefore use substantially more storage than a single dictation.
 - Personal dictionary entries and custom writing styles are stored locally in the Application Support container.
 - App profiles are stored locally by application bundle identifier. FlowDictate does not store window titles or document contents for profile selection.
 - Usage statistics are calculated locally from History and are not telemetry.
@@ -20,11 +21,15 @@ On supported Apple-Silicon Macs, FlowDictate can transcribe final recordings loc
 
 The **Fully offline** mode blocks transcription, enhancement, credential-validation and update-check network operations. **Local transcription** keeps audio local and permits cloud text enhancement only when separately enabled. **Cloud transcription** permits the explicitly selected cloud provider to receive audio. A failed local transcription never silently falls back to OpenAI.
 
-## Optional System Audio capture
+## Optional System Audio and mixed capture
 
-System Audio capture is off by default and requires explicit selection plus macOS **Screen & System Audio Recording** permission. FlowDictate registers only an audio output with ScreenCaptureKit: it does not register a video output and does not save screenshots, windows or display frames.
+System Audio capture is off by default and requires explicit selection. Standalone System Audio uses macOS **Screen & System Audio Recording** permission and ScreenCaptureKit. Mixed recording uses the **System Audio Recording Only** permission with an audio-only Core Audio process tap on macOS 14.2+; on macOS 14.0/14.1 it uses ScreenCaptureKit's audio-only compatibility path. No path requests or saves video frames, screenshots or window images.
 
 The five-second System Audio test writes a temporary local audio file only to validate the source. It does not contact OpenAI, does not add a History record and deletes the test file after completion or failure. Normal System Audio dictations follow the same local storage, transcription and retention rules as microphone recordings.
+
+`Microphone + System Audio` requires a separate confirmation before recording. FlowDictate reminds the user to inform participants and obtain any consent required for their context; confirmation does not itself start capture. The overlay remains visible while recording. The two original tracks stay separate. `You` labels the microphone capture and `System Audio` labels output from other apps; FlowDictate does not identify individual speakers. Mixed sessions can be resumed or partially retried from retained originals. Automatic retention protects unfinished or uncertain insertion states; archiving is non-destructive, while the separately confirmed `Delete Meeting and Files` action removes the scoped session artifacts.
+
+Provider and privacy settings are frozen separately for each meeting track. Local transcription does not upload either audio track. Cloud transcription sends only the explicitly selected track audio to OpenAI when the active privacy mode permits it; an offline or local failure never silently changes provider. Optional AI writing styles may separately send transcript text as described below.
 
 ## Data sent to OpenAI
 

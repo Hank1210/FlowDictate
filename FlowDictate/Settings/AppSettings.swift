@@ -267,8 +267,9 @@ final class AppSettings: ObservableObject {
             ?? HotKeyConfiguration.cancelPresets.first { $0.id == cancelID }
             ?? .optionShiftSpace
 
-        restoreHotKey = Self.savedHotKey(defaults, key: Key.restoreHotKeyData)
-            ?? .optionShiftZ
+        restoreHotKey = HotKeyConfiguration.normalizedRestorePreset(
+            Self.savedHotKey(defaults, key: Key.restoreHotKeyData)
+        )
 
         inputDeviceUID = defaults.string(forKey: Key.inputDeviceUID)
         recordingAudioSource = RecordingAudioSource(

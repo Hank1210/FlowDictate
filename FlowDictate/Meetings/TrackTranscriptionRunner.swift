@@ -28,6 +28,7 @@ nonisolated struct TrackTranscriptionOutput: Sendable, Equatable {
     var segmentCount: Int
     var completedSegmentCount: Int
     var timedEntries: [TrackTranscriptEntry]?
+    var isSilent: Bool
 
     init(
         transcript: String,
@@ -35,7 +36,8 @@ nonisolated struct TrackTranscriptionOutput: Sendable, Equatable {
         modelID: String,
         segmentCount: Int,
         completedSegmentCount: Int,
-        timedEntries: [TrackTranscriptEntry]? = nil
+        timedEntries: [TrackTranscriptEntry]? = nil,
+        isSilent: Bool = false
     ) {
         self.transcript = transcript
         self.providerID = providerID
@@ -43,6 +45,7 @@ nonisolated struct TrackTranscriptionOutput: Sendable, Equatable {
         self.segmentCount = segmentCount
         self.completedSegmentCount = completedSegmentCount
         self.timedEntries = timedEntries
+        self.isSilent = isSilent
     }
 }
 
@@ -85,13 +88,19 @@ nonisolated struct MeetingTrackTranscript: Codable, Sendable, Equatable {
     /// Optional provider/segment timing. Older 4.1 development artifacts decode
     /// without it and safely fall back to one track-wide chunk.
     var timedEntries: [TrackTranscriptEntry]?
+    /// Optional for older development artifacts. Only a verified no-speech
+    /// meeting track may persist an empty transcript.
+    var isSilent: Bool? = nil
     var createdAt: Date
 
     func validated() throws -> Self {
         guard schemaVersion == Self.currentSchemaVersion,
               !providerID.isEmpty,
               !modelID.isEmpty,
-              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (!transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || isSilent == true),
+              !(isSilent == true && !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+              !(isSilent == true && timedEntries?.isEmpty == false),
               segmentCount > 0,
               completedSegmentCount == segmentCount else {
             throw TrackTranscriptionRunnerError.invalidOutput(role)
@@ -273,6 +282,7 @@ actor TrackTranscriptionRunner {
                     segmentCount: output.segmentCount,
                     completedSegmentCount: output.completedSegmentCount,
                     timedEntries: output.timedEntries,
+                    isSilent: output.isSilent ? true : nil,
                     createdAt: max(now(), session.updatedAt)
                 ).validated()
                 let relativePath = Self.transcriptRelativePath(for: role)

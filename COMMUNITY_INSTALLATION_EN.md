@@ -2,14 +2,14 @@
 
 This is the free, ad hoc signed edition. It has not been notarized by Apple, so macOS displays a security warning the first time it is opened.
 
-This guide applies to FlowDictate 3.3.0 Community.
+This guide applies to FlowDictate 4.1.0 Community.
 
 ## Verify the download
 
 Download the ZIP and the matching `.sha256` file from the same GitHub Release. Open Terminal, change to the download folder, and verify the archive:
 
 ```sh
-shasum -a 256 -c FlowDictate-3.3.0-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-4.1.0-Community-macOS.zip.sha256
 ```
 
 Terminal must report `OK`. Do not install the app if verification fails.
@@ -30,11 +30,13 @@ Only approve FlowDictate if you received the ZIP file directly from someone you 
 2. Choose transcription: on Apple Silicon, you can download the local Parakeet model and work without an API key. Alternatively, enter your own OpenAI API key; it is stored exclusively in the macOS Keychain. On Intel Macs, OpenAI remains the available final-transcription path.
 3. Grant Microphone and Accessibility permissions.
 4. Grant Speech Recognition only if you want to use the optional local Live Preview.
-5. To record system audio, allow FlowDictate under `System Settings → Privacy & Security → Screen & System Audio Recording`. Depending on your macOS version, the permission may be labelled `Screen Recording` or `System Audio Only`.
+5. Standalone System Audio dictation needs `Screen & System Audio Recording` permission. Combined microphone-plus-system-audio recording uses the separate `System Audio Recording Only` switch on macOS 14.2+; on macOS 14.0/14.1 it uses the ScreenCaptureKit permission. FlowDictate captures audio only, never video.
 6. Quit and reopen FlowDictate if macOS asks you to do so after granting a new permission.
 7. Configure your preferred keyboard shortcuts.
 
 The ZIP file contains neither an API key nor a speech model or any credentials belonging to the person who created it. The optional model download shows its source, size and license in Transcription settings.
+
+For `Microphone + System Audio`, explicitly select that source and confirm the separate reminder to inform participants and obtain any required consent. Confirmation does not start recording. Each meeting keeps two original tracks plus working and transcript files in `MeetingSessions` under your selected recordings folder. At 48 kHz, the originals alone use about 1.4 GB per hour; allow extra space for working files. Short System Audio gaps can occur and are shown as quality warnings in History. `You` identifies the microphone track, not an individual-speaker detector.
 
 ## Updating
 
@@ -52,7 +54,7 @@ Always test the exact Community ZIP that will be published. A separately built o
 6. Renew only the permission for the feature that is actually failing. Follow **Repairing permissions** below.
 7. After changing permissions, quit FlowDictate completely and open it again.
 
-When updating from a version earlier than 3.2.0, existing History data is extended automatically. Before saving the new format for the first time, FlowDictate creates a one-time `dictations-pre-3.2.json` backup in the local History folder. Recordings and the selected recordings folder are not moved.
+Before writing the new History schema for the first time, FlowDictate creates a one-time `dictations-pre-4.1.json` backup in the local History folder. Existing single-track entries remain single-track; the selected recordings folder is not moved.
 
 Live Preview is optional and requires Apple's on-device speech recognition. Local final transcription, spoken corrections, formatting and the personal dictionary run on the Mac. `Fully offline` blocks transcription, enhancement and update-check network access. Only an explicitly selected cloud path sends audio or text to OpenAI; a local failure never triggers an automatic cloud upload.
 
@@ -76,6 +78,7 @@ Feature-to-permission reference:
 - No microphone recording: **Microphone**
 - Recording starts, but keyboard shortcuts or text insertion do not work: **Accessibility**
 - No local Live Preview: **Speech Recognition**
-- No system audio recording or no selectable audio sources: **Screen & System Audio Recording**
+- No standalone System Audio recording: **Screen & System Audio Recording**
+- No System Audio track in a combined recording: on macOS 14.2+ **System Audio Recording Only**; on 14.0/14.1 **Screen & System Audio Recording**
 
 Do not reset every privacy permission at once. This preserves permissions that still work and keeps the update process as short as possible.

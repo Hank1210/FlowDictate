@@ -41,6 +41,7 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     private let inputDeviceID: AudioDeviceID?
     private let firstBufferTimeout: Duration
     private var engine: AVAudioEngine?
+    private var selectedInput: SelectedMicrophoneInput?
     private var sink: MicrophoneTrackCaptureSink?
     private var levelHandler: MixedTrackLevelHandler?
     private var warningHandler: MixedTrackWarningHandler?
@@ -66,32 +67,18 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     }
 
     func prepare(outputURL: URL) async throws {
-        guard engine == nil else { throw MicrophoneTrackRecorderError.alreadyPrepared }
+        guard engine == nil, selectedInput == nil else {
+            throw MicrophoneTrackRecorderError.alreadyPrepared
+        }
         guard outputURL.pathExtension.lowercased() == "caf" else {
             throw MicrophoneTrackRecorderError.invalidOutputURL
         }
 
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        if let inputDeviceID, let audioUnit = inputNode.audioUnit {
-            var deviceID = inputDeviceID
-            let status = AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &deviceID,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
-            guard status == noErr else {
-                throw AudioDeviceServiceError.propertyUnavailable(status)
-            }
-        }
-
-        let hardwareFormat = inputNode.inputFormat(forBus: 0)
-        let sourceFormat = inputNode.outputFormat(forBus: 0)
-        guard hardwareFormat.sampleRate > 0,
-              hardwareFormat.channelCount > 0,
+        let selectedInput = try inputDeviceID.map { try SelectedMicrophoneInput(deviceID: $0) }
+        let engine = selectedInput == nil ? AVAudioEngine() : nil
+        let inputNode = engine?.inputNode
+        let sourceFormat = selectedInput?.format ?? inputNode?.outputFormat(forBus: 0)
+        guard let sourceFormat,
               sourceFormat.sampleRate > 0,
               sourceFormat.channelCount > 0 else {
             throw MicrophoneTrackRecorderError.unavailableInput
@@ -112,37 +99,49 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
             levelHandler: levelHandler,
             warningHandler: warningHandler
         )
-        inputNode.installTap(onBus: 0, bufferSize: 4_096, format: sourceFormat) {
-            buffer,
-            time
-            in
-            sink.append(buffer, at: time)
+        if let selectedInput {
+            selectedInput.setHandlers(
+                onBuffer: { buffer, time in sink.append(buffer, at: time) },
+                onError: { status in sink.recordCaptureError(status) }
+            )
+        } else if let engine, let inputNode {
+            inputNode.installTap(onBus: 0, bufferSize: 4_096, format: sourceFormat) {
+                buffer, time in sink.append(buffer, at: time)
+            }
+            hasInstalledTap = true
+            engine.prepare()
         }
-        hasInstalledTap = true
-        engine.prepare()
         self.engine = engine
+        self.selectedInput = selectedInput
         self.sink = sink
     }
 
     func start(requestedHostTime: UInt64) async throws -> MixedTrackStartResult {
-        guard let engine, let sink, !isRecording else {
+        guard engine != nil || selectedInput != nil,
+              let sink, !isRecording else {
             throw MicrophoneTrackRecorderError.notPrepared
         }
         sink.begin(requestedHostTime: requestedHostTime)
         do {
-            try engine.start()
+            if let selectedInput {
+                try selectedInput.start()
+            } else {
+                try engine?.start()
+            }
             isRecording = true
             let anchor = try await sink.waitForFirstAnchor(timeout: firstBufferTimeout)
             return MixedTrackStartResult(firstAnchor: anchor)
         } catch {
-            engine.stop()
+            engine?.stop()
+            selectedInput?.stop()
             isRecording = false
             throw error
         }
     }
 
     func stop() async throws -> MixedTrackCaptureResult {
-        guard engine != nil, let sink, isRecording else {
+        guard engine != nil || selectedInput != nil,
+              let sink, isRecording else {
             throw MicrophoneTrackRecorderError.notPrepared
         }
         stopEngine()
@@ -151,7 +150,7 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     }
 
     func cancel() async -> MixedTrackCaptureResult? {
-        guard engine != nil || sink != nil else { return nil }
+        guard engine != nil || selectedInput != nil || sink != nil else { return nil }
         sink?.cancelPendingStart()
         stopEngine()
         defer { reset() }
@@ -160,17 +159,18 @@ actor MicrophoneTrackRecorder: MixedTrackRecording {
     }
 
     private func stopEngine() {
-        guard let engine else { return }
-        if hasInstalledTap {
+        if hasInstalledTap, let engine {
             engine.inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
         }
-        engine.stop()
+        engine?.stop()
+        selectedInput?.stop()
         isRecording = false
     }
 
     private func reset() {
         engine = nil
+        selectedInput = nil
         sink = nil
         hasInstalledTap = false
         isRecording = false
@@ -191,7 +191,7 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
     private var hasBegun = false
     private var levelHandler: MixedTrackLevelHandler?
     private var warningHandler: MixedTrackWarningHandler?
-    private var didReportClipping = false
+    private var clippingWarningGate = AudioLevelUpdateGate(updatesPerSecond: 1)
     private var didReportFailure = false
     private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
@@ -243,7 +243,7 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
             sampleRate: outputFormat.sampleRate
         )
         failure = nil
-        didReportClipping = false
+        clippingWarningGate = AudioLevelUpdateGate(updatesPerSecond: 1)
         didReportFailure = false
         hasBegun = true
         lock.unlock()
@@ -259,10 +259,8 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
             try file.write(from: outputBuffer)
             let clippedFrameCount = metrics.clippedFrameCount
             metrics.record(buffer: outputBuffer, time: time)
-            if !didReportClipping,
-               clippedFrameCount == 0,
-               metrics.clippedFrameCount > 0 {
-                didReportClipping = true
+            if metrics.clippedFrameCount > clippedFrameCount,
+               clippingWarningGate.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
                 warningHandler?(.clipping)
             }
             publishLevelIfNeeded(from: outputBuffer)
@@ -272,11 +270,25 @@ nonisolated final class MicrophoneTrackCaptureSink: @unchecked Sendable {
         } catch {
             let writerError = MicrophoneTrackRecorderError.writerFailed(
                 error.localizedDescription,
-                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(error)
+                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(
+                    error,
+                    writingTo: outputURL
+                )
             )
             failure = writerError
             reportFailureIfNeeded(writerError)
         }
+    }
+
+    func recordCaptureError(_ status: OSStatus) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard hasBegun, failure == nil else { return }
+        let error = MicrophoneTrackRecorderError.conversionFailed(
+            "Core Audio input returned \(status)."
+        )
+        failure = error
+        reportFailureIfNeeded(error)
     }
 
     private func reportFailureIfNeeded(_ error: MicrophoneTrackRecorderError) {

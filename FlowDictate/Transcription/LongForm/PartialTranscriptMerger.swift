@@ -32,17 +32,30 @@ nonisolated struct PartialTranscriptMerger: Sendable {
         guard !segments.isEmpty,
               segments.enumerated().allSatisfy({ $0.offset == $0.element.index }),
               segments.allSatisfy({
-                  $0.status == .succeeded
-                      && $0.transcript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                  ($0.status == .succeeded
+                      && $0.transcript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                    || ($0.status == .silent
+                        && $0.transcript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
               }) else {
             throw LongFormTranscriptionError.transcriptMergeFailed
         }
-        var result = segments[0].transcript!.trimmingCharacters(in: .whitespacesAndNewlines)
-        for segment in segments.dropFirst() {
+        var result = ""
+        var previousWasSilent = false
+        for segment in segments {
+            guard segment.status == .succeeded else {
+                previousWasSilent = true
+                continue
+            }
             let next = segment.transcript!.trimmingCharacters(in: .whitespacesAndNewlines)
-            result = mergeBoundary(left: result, right: next)
+            if result.isEmpty {
+                result = next
+            } else if previousWasSilent {
+                result += " " + next
+            } else {
+                result = mergeBoundary(left: result, right: next)
+            }
+            previousWasSilent = false
         }
-        guard !result.isEmpty else { throw LongFormTranscriptionError.transcriptMergeFailed }
         return result
     }
 

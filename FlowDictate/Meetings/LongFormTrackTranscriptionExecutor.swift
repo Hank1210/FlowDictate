@@ -47,10 +47,19 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
 
         if let completed = try await historyStore.record(id: request.transcriptionSessionID),
            completed.status == .transcribed,
-           completed.originalTranscript?.trimmingCharacters(
+           completed.originalTranscript != nil,
+           (completed.originalTranscript?.trimmingCharacters(
                in: .whitespacesAndNewlines
-           ).isEmpty == false {
-            return try output(from: completed, role: request.role)
+           ).isEmpty == false || completed.transcriptionSegmentCount != nil) {
+            let savedSegments = try await sessionStore.load(
+                recordID: request.transcriptionSessionID
+            )?.segments ?? []
+            return try output(
+                from: completed,
+                role: request.role,
+                durationMilliseconds: request.durationMilliseconds,
+                timedUnits: LongFormTranscriptionRunner.timedUnits(from: savedSegments)
+            )
         }
 
         guard let providerID = TranscriptionProviderID(rawValue: request.providerID) else {
@@ -78,7 +87,9 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
             audioURL: request.audioURL,
             language: request.language,
             maximumAttempts: maximumAttempts,
-            provider: provider
+            provider: provider,
+            allowsEmptyTranscript: true,
+            retainCompletedLongFormSession: true
         )
         return try output(
             from: completed,
@@ -119,7 +130,8 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
         timedUnits: [TranscriptionTimedUnit] = []
     ) throws -> TrackTranscriptionOutput {
         guard let transcript = record.originalTranscript,
-              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || record.transcriptionSegmentCount != nil else {
             throw TrackTranscriptionRunnerError.invalidOutput(role)
         }
         let segmentCount = max(record.transcriptionSegmentCount ?? 1, 1)
@@ -127,8 +139,7 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
             ? 1
             : record.completedTranscriptionSegmentCount
         let timedEntries: [TrackTranscriptEntry]?
-        if record.transcriptionSegmentCount == nil,
-           let durationMilliseconds,
+        if let durationMilliseconds,
            !timedUnits.isEmpty {
             let valid = timedUnits.enumerated().compactMap { index, unit -> TrackTranscriptEntry? in
                 guard unit.startMilliseconds >= 0,
@@ -155,7 +166,8 @@ final class LongFormTrackTranscriptionExecutor: TrackTranscriptionExecuting {
             modelID: record.modelID,
             segmentCount: segmentCount,
             completedSegmentCount: completedSegmentCount,
-            timedEntries: timedEntries
+            timedEntries: timedEntries,
+            isSilent: transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         )
     }
 }

@@ -28,6 +28,10 @@ protocol TextInserting: AnyObject {
 
 @MainActor
 final class PasteboardTextInserter: TextInserting {
+    static func usesTargetedPaste(for bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == "com.openai.codex"
+    }
+
     private let pasteboard: NSPasteboard
     private var restoreDelay: Duration
     private var pendingRestorationTask: Task<Void, Never>?
@@ -48,10 +52,33 @@ final class PasteboardTextInserter: TextInserting {
     }
 
     func insert(_ text: String, into target: FocusTarget) async throws {
+        let insertionStarted = ContinuousClock.now
         await waitForModifierRelease()
-        guard await target.activate() else { throw TextInsertionError.targetUnavailable }
+        let modifierReleaseCompleted = ContinuousClock.now
+        guard await target.activate() else {
+            FlowLogger.insertion.notice(
+                "Paste target activation failed after \(String(describing: modifierReleaseCompleted.duration(to: .now)), privacy: .public)"
+            )
+            throw TextInsertionError.targetUnavailable
+        }
+        let targetActivationCompleted = ContinuousClock.now
+        let isChatGPT = Self.usesTargetedPaste(for: target.bundleIdentifier)
+        if isChatGPT {
+            // A menu-bar Restore action can report ChatGPT frontmost before its
+            // web composer has regained keyboard focus.
+            try await Task.sleep(for: .milliseconds(250))
+            guard await target.activate() else {
+                FlowLogger.insertion.notice(
+                    "Paste target reactivation failed after \(String(describing: targetActivationCompleted.duration(to: .now)), privacy: .public)"
+                )
+                throw TextInsertionError.targetUnavailable
+            }
+        }
+        let focusSettleCompleted = ContinuousClock.now
 
         pendingRestorationTask?.cancel()
+        FlowLogger.insertion.info("Clipboard snapshot starting")
+        let snapshotStarted = ContinuousClock.now
         let snapshot: PasteboardSnapshot
         if let pendingOriginalSnapshot,
            pendingInjectedChangeCount == pasteboard.changeCount {
@@ -62,6 +89,7 @@ final class PasteboardTextInserter: TextInserting {
         pendingRestorationTask = nil
         pendingOriginalSnapshot = nil
         pendingInjectedChangeCount = nil
+        let snapshotCompleted = ContinuousClock.now
 
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
@@ -69,9 +97,10 @@ final class PasteboardTextInserter: TextInserting {
             throw TextInsertionError.clipboardWriteFailed
         }
         let injectedChangeCount = pasteboard.changeCount
+        let clipboardWriteCompleted = ContinuousClock.now
 
         do {
-            try postPasteShortcut()
+            try await postPasteShortcut(to: target)
         } catch {
             snapshot.restore(to: pasteboard)
             throw error
@@ -79,13 +108,15 @@ final class PasteboardTextInserter: TextInserting {
 
         pendingOriginalSnapshot = snapshot
         pendingInjectedChangeCount = injectedChangeCount
-        let delay = restoreDelay
+        let delay = isChatGPT ? max(restoreDelay, .seconds(2)) : restoreDelay
         pendingRestorationTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             self?.restoreClipboardIfUnchanged(expectedChangeCount: injectedChangeCount)
         }
-        FlowLogger.insertion.info("Transcript pasted; clipboard restoration scheduled")
+        FlowLogger.insertion.info(
+            "Paste shortcut posted for \(target.bundleIdentifier ?? "unknown", privacy: .public); modifiers=\(String(describing: insertionStarted.duration(to: modifierReleaseCompleted)), privacy: .public), activation=\(String(describing: modifierReleaseCompleted.duration(to: targetActivationCompleted)), privacy: .public), settle=\(String(describing: targetActivationCompleted.duration(to: focusSettleCompleted)), privacy: .public), snapshot=\(String(describing: snapshotStarted.duration(to: snapshotCompleted)), privacy: .public), clipboardWrite=\(String(describing: snapshotCompleted.duration(to: clipboardWriteCompleted)), privacy: .public), eventPost=\(String(describing: clipboardWriteCompleted.duration(to: .now)), privacy: .public), total=\(String(describing: insertionStarted.duration(to: .now)), privacy: .public); clipboard restoration scheduled"
+        )
     }
 
     private func restoreClipboardIfUnchanged(expectedChangeCount: Int) {
@@ -128,7 +159,8 @@ final class PasteboardTextInserter: TextInserting {
         }
     }
 
-    private func postPasteShortcut() throws {
+    private func postPasteShortcut(to target: FocusTarget) async throws {
+        let creationStarted = ContinuousClock.now
         guard
             let source = CGEventSource(stateID: .combinedSessionState),
             let keyDown = CGEvent(
@@ -147,7 +179,23 @@ final class PasteboardTextInserter: TextInserting {
 
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        let creationCompleted = ContinuousClock.now
+        if Self.usesTargetedPaste(for: target.bundleIdentifier) {
+            // Route to the app selected for insertion, not whichever process
+            // temporarily owns the event stream while the menu closes.
+            keyDown.postToPid(target.processIdentifier)
+            let keyDownCompleted = ContinuousClock.now
+            try? await Task.sleep(for: .milliseconds(30))
+            keyUp.postToPid(target.processIdentifier)
+            FlowLogger.insertion.info(
+                "Targeted paste event timing: create=\(String(describing: creationStarted.duration(to: creationCompleted)), privacy: .public), keyDown=\(String(describing: creationCompleted.duration(to: keyDownCompleted)), privacy: .public), keyUp=\(String(describing: keyDownCompleted.duration(to: .now)), privacy: .public)"
+            )
+        } else {
+            keyDown.post(tap: .cghidEventTap)
+            keyUp.post(tap: .cghidEventTap)
+            FlowLogger.insertion.info(
+                "Global paste event timing: \(String(describing: creationStarted.duration(to: .now)), privacy: .public)"
+            )
+        }
     }
 }

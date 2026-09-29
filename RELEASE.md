@@ -1,6 +1,6 @@
 # FlowDictate Release Guide
 
-FlowDictate 4.0.2 runs as a standalone macOS menu bar app. A release contains neither API keys nor speech models. Each installation chooses local transcription or supplies its own OpenAI key during onboarding.
+FlowDictate 4.1.0 is prepared as a standalone macOS menu bar app. A release contains neither API keys nor speech models. Each installation chooses local transcription or supplies its own OpenAI key during onboarding. `Microphone + System Audio` is opt-in and keeps two separate original tracks.
 
 ## Free Community release
 
@@ -12,16 +12,16 @@ The Community release is intended for personal Macs and a trusted circle. It doe
 
 The script performs an unsigned universal Release build, applies an ad hoc signature with the required sandbox entitlements, verifies that signature, and creates these files in `dist/`:
 
-- `FlowDictate-4.0.2-Community-macOS.zip`
-- `FlowDictate-4.0.2-Community-macOS.zip.sha256`
+- `FlowDictate-4.1.0-Community-macOS.zip`
+- `FlowDictate-4.1.0-Community-macOS.zip.sha256`
 
-The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, Screen & System Audio Recording or Keychain permission to be granted again.
+The ZIP contains the app plus German and English installation guides named `INSTALLATION-DE.md` and `INSTALLATION-EN.md`. Gatekeeper cannot establish an Apple developer identity for this build, so the recipient must use right-click → Open or approve it under Privacy & Security. Updates may require Microphone, Accessibility, Speech Recognition, System Audio Recording Only, Screen & System Audio Recording or Keychain permission to be granted again.
 
 Verify the generated archive before uploading it:
 
 ```sh
 cd dist
-shasum -a 256 -c FlowDictate-4.0.2-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-4.1.0-Community-macOS.zip.sha256
 ```
 
 ## GitHub release checklist
@@ -30,7 +30,7 @@ shasum -a 256 -c FlowDictate-4.0.2-Community-macOS.zip.sha256
 2. Run the automated tests and the manual Preview/recording smoke test.
 3. Run `./scripts/build-community-release.sh` on a clean checkout.
 4. Verify the SHA-256 checksum and test the ZIP on a second macOS account or Mac.
-5. Create the annotated tag `v4.0.2` from the reviewed commit.
+5. Create the annotated tag `v4.1.0` from the reviewed commit.
 6. Create a GitHub Release for that tag using the reviewed release notes.
 7. Attach only the Community ZIP and its `.sha256` file. GitHub supplies source archives automatically.
 8. Keep the release marked as a prerelease until the downloaded asset has passed the installation test; then publish it as the latest stable release.
@@ -39,7 +39,7 @@ Do not commit the generated `dist/` or `build/` directories. They are intentiona
 
 ## Updating an existing installation
 
-The 4.0.2 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on OpenAI until changed deliberately. History creates a one-time `dictations-pre-4.0.json` backup before writing schema 6. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
+The 4.1.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on their selected provider until changed deliberately. History creates a one-time `dictations-pre-4.1.json` backup before writing schema 7, and existing single-track entries remain unchanged. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
 
 The following sections describe the optional paid Developer ID workflow.
 
@@ -74,9 +74,9 @@ The script submits the ZIP, waits for Apple's result, staples the ticket to the 
 2. Move `FlowDictate.app` to Applications.
 3. Launch it and complete onboarding.
 4. Confirm `Documents/Recordings` or choose another folder.
-5. Add that person's OpenAI API key.
-6. Grant Microphone and Accessibility permissions. Grant Speech Recognition only when testing Live Preview, and Screen & System Audio Recording only when testing System Audio.
-7. Verify Live Preview, final OpenAI transcription, Smart Dictation, System Audio and insertion in TextEdit or Notes.
+5. Choose local transcription on Apple Silicon or add that person's OpenAI API key.
+6. Grant Microphone and Accessibility permissions. Grant Speech Recognition only when testing Live Preview. Standalone System Audio uses Screen & System Audio Recording; mixed capture uses System Audio Recording Only on macOS 14.2+ or ScreenCaptureKit permission on 14.0/14.1.
+7. Verify Live Preview, final transcription, Smart Dictation, a short mixed meeting and insertion in TextEdit or Notes.
 8. Interrupt processing, relaunch, and verify recovery in History.
 
 Never distribute builds containing an `.env` file, Xcode Scheme secret, personal API key, or notarization credential.
@@ -88,3 +88,9 @@ Before a Phase 3.4 release, test the exact generated Community ZIP with a record
 ## Additional Phase 4.0 gate
 
 Before a Phase 4.0 release, verify the exact generated ZIP on Apple Silicon with no API key: install the local model, transcribe short German and English recordings, run a long segmented recording, and complete at least three consecutive dictations. Confirm that each new recording becomes available after the previous dictation finishes, safe deferred insertion after relaunch, Fully offline network blocking, inline correction commands and model removal protection. Verify that the x86_64 slice builds with the OpenAI path even though local transcription is unavailable; perform a physical Intel launch test when suitable hardware is available and otherwise document that residual risk explicitly. Do not tag or publish until the available packaged-app tests pass and any unavailable hardware gate has been consciously accepted.
+
+## Additional Phase 4.1 gate
+
+Before calling the 4.1.0 ZIP final, review the exact extracted archive on a fresh macOS user account, grant only the required permissions, verify a short single-source and mixed recording, the role-labelled result, History recovery/deletion, and normal insertion. Use the same ZIP for the following several-day user trial; any code change requires a new ZIP and checksum. Verify both architectures, the ad hoc signature, bundled notices and the checksum, and confirm the archive contains no recordings, transcripts, downloaded models, credentials or private test notes.
+
+The earlier real 30-, 60- and 120-minute mixed sessions establish original-track preservation, bounded capture RAM and recoverability, but they recorded short System Audio gaps (65 ms, 33 ms and 422 ms total). The zero-buffer-loss budget was not met. The project owner does not plan additional long recordings solely to repeat those scenarios with the exact ZIP. This is an explicit release-gate deviation, not a pass; its product impact and the public known limitation must be accepted before publication. Any remaining unmeasured latency or drift targets likewise require an explicit decision rather than a checked box without evidence. Publication, merge to `main`, tag and asset upload require a separate instruction.

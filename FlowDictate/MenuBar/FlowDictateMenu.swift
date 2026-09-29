@@ -532,7 +532,7 @@ struct FlowDictateSettingsView: View {
                         }
                     }
                     .disabled(!coordinator.isRecording)
-                    Text("Development display test: while a full mixed recording is active, these controls verify persistent, accessible overlay warnings. They do not alter or discard either original track.")
+                    Text("Development display test: while a full mixed recording is active, the clipping warning clears after about five seconds; track-loss warnings remain visible. These controls do not alter or discard either original track.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 #endif

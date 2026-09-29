@@ -16,6 +16,7 @@ nonisolated enum TranscriptionSegmentStatus: String, Codable, Sendable {
     case ready
     case uploading
     case succeeded
+    case silent
     case failed
     case interrupted
 }
@@ -73,6 +74,9 @@ nonisolated struct TranscriptionSegment: Codable, Sendable, Identifiable, Equata
     var preparedRelativePath: String?
     var preparedByteCount: Int64?
     var transcript: String?
+    /// Provider timing relative to this segment's exported audio. Optional so
+    /// interrupted sessions written by older builds remain readable.
+    var timedUnits: [TranscriptionTimedUnit]? = nil
     var attemptCount: Int
     var lastAttemptAt: Date?
     var errorCategory: DictationErrorCategory?
@@ -102,12 +106,12 @@ nonisolated struct TranscriptionSessionManifest: Codable, Sendable, Equatable {
     var lastErrorMessage: String?
 
     var completedSegmentCount: Int {
-        segments.prefix(while: { $0.status == .succeeded }).count
+        segments.prefix(while: { [.succeeded, .silent].contains($0.status) }).count
     }
 
     var partialTranscript: String? {
         let values = segments
-            .prefix(while: { $0.status == .succeeded })
+            .prefix(while: { [.succeeded, .silent].contains($0.status) })
             .compactMap(\.transcript)
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !values.isEmpty else { return nil }
@@ -159,6 +163,10 @@ nonisolated struct TranscriptionSessionManifest: Codable, Sendable, Equatable {
                 guard segment.transcript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
                     throw LongFormTranscriptionError.invalidSessionState
                 }
+            } else if segment.status == .silent {
+                guard segment.transcript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+                    throw LongFormTranscriptionError.invalidSessionState
+                }
             }
         }
         guard segments[0].startMilliseconds == 0,
@@ -166,8 +174,10 @@ nonisolated struct TranscriptionSessionManifest: Codable, Sendable, Equatable {
             throw LongFormTranscriptionError.invalidSegmentPlan
         }
         if status == .completed {
-            guard segments.allSatisfy({ $0.status == .succeeded }),
-                  mergedTranscript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            guard segments.allSatisfy({ [.succeeded, .silent].contains($0.status) }),
+                  let mergedTranscript,
+                  !mergedTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || segments.allSatisfy({ $0.status == .silent }) else {
                 throw LongFormTranscriptionError.invalidSessionState
             }
         }

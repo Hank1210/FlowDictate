@@ -70,6 +70,11 @@ nonisolated enum MixedRecordingWarning: Codable, Hashable, Sendable, Identifiabl
         }
     }
 
+    var isTransientClipping: Bool {
+        if case .track(_, .clipping) = self { return true }
+        return false
+    }
+
     var message: String {
         switch self {
         case let .track(role, .clipping):
@@ -83,6 +88,39 @@ nonisolated enum MixedRecordingWarning: Codable, Hashable, Sendable, Identifiabl
         case .lowStorage:
             "Low disk space on the recording volume — long meetings may stop early. Free space when possible."
         }
+    }
+}
+
+nonisolated struct MixedCaptureWarningState {
+    static let clippingDisplaySeconds: TimeInterval = 5
+
+    private(set) var warnings: [MixedRecordingWarning] = []
+    private var lastClippingTime: [MixedRecordingWarning: TimeInterval] = [:]
+
+    var hasTransientWarnings: Bool { !lastClippingTime.isEmpty }
+
+    mutating func receive(_ warning: MixedRecordingWarning, at time: TimeInterval) -> Bool {
+        if warning.isTransientClipping {
+            lastClippingTime[warning] = time
+        }
+        guard !warnings.contains(warning) else { return false }
+        warnings.append(warning)
+        return true
+    }
+
+    mutating func expire(at time: TimeInterval) -> Bool {
+        let expired = lastClippingTime.filter {
+            time - $0.value >= Self.clippingDisplaySeconds
+        }.map(\.key)
+        guard !expired.isEmpty else { return false }
+        for warning in expired { lastClippingTime.removeValue(forKey: warning) }
+        warnings.removeAll { expired.contains($0) }
+        return true
+    }
+
+    mutating func reset() {
+        warnings.removeAll()
+        lastClippingTime.removeAll()
     }
 }
 
@@ -222,7 +260,7 @@ private nonisolated enum MixedRecordingStorageCapacity {
 }
 
 nonisolated enum MixedRecordingWriteFailure {
-    static func isOutOfSpace(_ error: Error) -> Bool {
+    static func isOutOfSpace(_ error: Error, writingTo outputURL: URL? = nil) -> Bool {
         var current = error as NSError
         for _ in 0..<4 {
             if current.domain == NSCocoaErrorDomain,
@@ -237,7 +275,16 @@ nonisolated enum MixedRecordingWriteFailure {
             }
             current = underlying
         }
-        return false
+        // AVAudioFile can surface a full filesystem as a generic AudioFile
+        // position error. Only infer exhaustion when this writer's volume is
+        // actually nearly full; the error code alone is not specific enough.
+        guard let outputURL,
+              let attributes = try? FileManager.default.attributesOfFileSystem(
+                forPath: outputURL.deletingLastPathComponent().path
+              ),
+              let freeBytes = (attributes[.systemFreeSize] as? NSNumber)?.int64Value
+        else { return false }
+        return freeBytes < 1_048_576
     }
 }
 

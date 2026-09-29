@@ -17,6 +17,85 @@ import Testing
 @testable import FlowDictate
 
 struct FlowDictateTests {
+    @Test func selectedMicrophoneRenderBufferAdvertisesWritablePCMBytes() throws {
+        for channels: AVAudioChannelCount in [1, 2] {
+            let format = try #require(AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 48_000,
+                channels: channels,
+                interleaved: false
+            ))
+            let buffer = try #require(SelectedMicrophoneInput.makeRenderBuffer(
+                format: format,
+                frameCount: 1_024
+            ))
+            #expect(buffer.frameLength == 1_024)
+            let audioBuffers = buffer.mutableAudioBufferList.pointee
+            #expect(audioBuffers.mNumberBuffers == channels)
+            #expect(audioBuffers.mBuffers.mData != nil)
+            #expect(audioBuffers.mBuffers.mDataByteSize ==
+                1_024 * UInt32(MemoryLayout<Float>.size))
+        }
+    }
+
+    @Test func microphoneRecordingSinkMeasuresWrittenAudioAndRejectsEmptyCapture() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMicSink-\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        let sink = MicrophoneRecordingSink(
+            file: file,
+            previewHandler: nil,
+            levelHandler: { _ in }
+        )
+        do {
+            try await sink.waitForFirstBuffer(timeout: .milliseconds(20))
+            Issue.record("An empty microphone capture must fail before transcription")
+        } catch AudioRecorderError.noAudioReceived {
+            // Expected: elapsed time is not captured audio.
+        }
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800))
+        buffer.frameLength = 4_800
+        sink.append(buffer)
+        try await sink.waitForFirstBuffer(timeout: .milliseconds(20))
+        #expect(abs(sink.close() - 0.1) < 0.000_001)
+    }
+
+    @Test func microphoneRecordingSinkForwardsPreviewWhenAttachedAfterCaptureStarts() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateMicPreview-\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        let sink = MicrophoneRecordingSink(file: file, previewHandler: nil, levelHandler: { _ in })
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800))
+        buffer.frameLength = 4_800
+        let previewCount = LockedTestCounter()
+
+        sink.append(buffer)
+        #expect(previewCount.value == 0)
+        sink.setPreviewHandler { preview in
+            if preview.frameCount == 4_800 { previewCount.increment() }
+        }
+        sink.append(buffer)
+        #expect(previewCount.value == 1)
+        sink.setPreviewHandler(nil)
+        sink.append(buffer)
+        #expect(previewCount.value == 1)
+        #expect(abs(sink.close() - 0.3) < 0.000_001)
+    }
+
     @Test func dictationStateStartRules() {
         #expect(DictationState.idle.acceptsStart)
         #expect(DictationState.failed(message: "test", retainedAudioURL: nil).acceptsStart)
@@ -306,6 +385,36 @@ struct FlowDictateTests {
         #expect(restored.livePreviewCharacterLimit == 320)
         #expect(restored.overlayPosition == .bottomCenter)
         #expect(restored.usageStatisticsResetDate == statisticsResetDate)
+    }
+
+    @MainActor
+    @Test func restorePresetUsesCurrentLayoutAndNormalizesLegacyKeyCode() throws {
+        let source = TISCopyCurrentKeyboardLayoutInputSource().takeRetainedValue()
+        let property = try #require(TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData))
+        let data = Unmanaged<CFData>.fromOpaque(property).takeUnretainedValue()
+        let bytes = try #require(CFDataGetBytePtr(data))
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var deadKeyState: UInt32 = 0
+        var length = 0
+        var output = [UniChar](repeating: 0, count: 4)
+        let status = UCKeyTranslate(
+            layout, UInt16(HotKeyConfiguration.optionShiftZ.keyCode),
+            UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+            OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeyState,
+            output.count, &length, &output
+        )
+        #expect(status == noErr)
+        #expect(String(utf16CodeUnits: output, count: length).lowercased() == "z")
+
+        let legacy = HotKeyConfiguration(
+            id: "option-shift-z", keyCode: UInt32(kVK_ANSI_Z),
+            modifiers: UInt32(optionKey | shiftKey), displayName: "Option + Shift + Z"
+        )
+        #expect(HotKeyConfiguration.normalizedRestorePreset(legacy) == .optionShiftZ)
+        let custom = HotKeyConfiguration.custom(
+            keyCode: UInt32(kVK_ANSI_Z), modifiers: UInt32(optionKey | shiftKey), keyName: "Y"
+        )
+        #expect(HotKeyConfiguration.normalizedRestorePreset(custom) == custom)
     }
 
     @MainActor
@@ -1910,6 +2019,115 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func longFormTrackKeepsWordTimingAcrossSegmentsAndCachedResume() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateLongFormTiming-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeLongFormTrackTranscriptionFixture(
+            rootURL: root,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: TranscriptionProviderRegistry.local.capabilities.engineID,
+            modelID: "timed-local-test",
+            privacyMode: .offline
+        )
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+        let provider = TimedTrackTranscriptionProvider()
+        let executor = LongFormTrackTranscriptionExecutor(
+            maximumAttempts: 1,
+            longFormConfiguration: configuration
+        ) { _ in provider }
+        let runner = TrackTranscriptionRunner(store: fixture.store, executor: executor)
+        let result = try await runner.run(sessionID: fixture.session.id)
+        #expect(result.status == .merging)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for track in result.tracks {
+            let relativePath = try #require(track.transcriptRelativePath)
+            let artifact = try decoder.decode(
+                MeetingTrackTranscript.self,
+                from: Data(contentsOf: fixture.paths.sessionDirectory
+                    .appendingPathComponent(relativePath))
+            )
+            let entries = try #require(artifact.timedEntries)
+            #expect(entries.map(\.precision) == [.word, .word, .word, .word])
+            #expect(entries.map(\.startMilliseconds) == [100, 400, 2_000, 2_300])
+
+            let request = TrackTranscriptionRequest(
+                meetingSessionID: fixture.session.id,
+                trackID: track.id,
+                role: track.role,
+                audioURL: fixture.paths.sessionDirectory.appendingPathComponent(
+                    try #require(track.audioRelativePath)
+                ),
+                audioRelativePath: try #require(track.audioRelativePath),
+                durationMilliseconds: track.durationMilliseconds,
+                byteCount: track.byteCount,
+                sampleRate: track.sampleRate,
+                channelCount: track.channelCount,
+                transcriptionDirectory: fixture.paths.transcriptionDirectory,
+                transcriptionSessionID: try #require(track.transcriptionSessionID),
+                providerID: fixture.session.providerID,
+                engineID: fixture.session.engineID,
+                modelID: fixture.session.modelID,
+                language: fixture.session.language,
+                privacyMode: try #require(fixture.session.privacyMode),
+                profileID: fixture.session.profileID
+            )
+            let cached = try await executor.transcribe(request)
+            #expect(cached.timedEntries == entries)
+        }
+    }
+
+    @MainActor
+    @Test func longFormTimingDropsWordsStartingInsideSegmentOverlap() async throws {
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        var segments = try await AudioSegmentPlanner(configuration: configuration)
+            .plan(durationMilliseconds: 4_000)
+        #expect(segments.count == 2)
+        segments[0].status = .succeeded
+        segments[0].transcript = "Previous."
+        segments[0].timedUnits = [TranscriptionTimedUnit(
+            text: "Previous.", startMilliseconds: 1_970,
+            endMilliseconds: 1_990, precision: .word
+        )]
+        segments[1].status = .succeeded
+        segments[1].transcript = "Overlap Next. Edge."
+        segments[1].timedUnits = [
+            TranscriptionTimedUnit(
+                text: "Overlap", startMilliseconds: 50,
+                endMilliseconds: 120, precision: .word
+            ),
+            TranscriptionTimedUnit(
+                text: "Next.", startMilliseconds: 120,
+                endMilliseconds: 250, precision: .word
+            ),
+            TranscriptionTimedUnit(
+                text: "Edge.", startMilliseconds: 2_070,
+                endMilliseconds: 2_147, precision: .word
+            )
+        ]
+
+        let units = LongFormTranscriptionRunner.timedUnits(from: segments)
+        #expect(units.map(\.text) == ["Previous.", "Next.", "Edge."])
+        #expect(units.map(\.startMilliseconds) == [1_970, 2_020, 3_970])
+        #expect(units.last?.endMilliseconds == 4_000)
+    }
+
+    @MainActor
     @Test func twoTrackLongFormRestartSkipsSuccessfulSegmentsForLocalAndOpenAI() async throws {
         let scenarios: [(
             name: String,
@@ -1959,6 +2177,23 @@ struct FlowDictateTests {
                 modelID: scenario.modelID,
                 privacyMode: scenario.privacyMode
             )
+            // The deliberately empty second provider response must remain a
+            // failure for audible audio; a silent fixture would now be skipped.
+            let audibleFormat = try #require(AVAudioFormat(
+                standardFormatWithSampleRate: 16_000, channels: 1
+            ))
+            for track in fixture.session.tracks {
+                let relativePath = try #require(track.audioRelativePath)
+                let url = fixture.paths.sessionDirectory.appendingPathComponent(relativePath)
+                let file = try AVAudioFile(forWriting: url, settings: audibleFormat.settings)
+                let buffer = try #require(AVAudioPCMBuffer(
+                    pcmFormat: audibleFormat, frameCapacity: 80_000
+                ))
+                buffer.frameLength = buffer.frameCapacity
+                let samples = try #require(buffer.floatChannelData?[0])
+                for frame in 0..<Int(buffer.frameLength) { samples[frame] = 0.05 }
+                try file.write(from: buffer)
+            }
             let firstMicrophone = SequenceTranscriptionProvider(
                 texts: ["Microphone shared boundary phrase."],
                 providerID: scenario.resultProviderID,
@@ -2043,6 +2278,55 @@ struct FlowDictateTests {
                 #expect(artifact.completedSegmentCount == 2)
             }
         }
+    }
+
+    @MainActor
+    @Test func meetingLongFormAcceptsSilentMicrophoneTrackWithoutLosingSystemSpeech() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSilentMeetingTrack-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeLongFormTrackTranscriptionFixture(
+            rootURL: root,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: TranscriptionProviderRegistry.local.capabilities.engineID,
+            modelID: "parakeet-tdt-0.6b-v3-coreml",
+            privacyMode: .offline
+        )
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+        let microphone = SequenceTranscriptionProvider(texts: ["", ""])
+        let systemAudio = SequenceTranscriptionProvider(texts: ["Remote first.", "Remote second."])
+        let executor = LongFormTrackTranscriptionExecutor(
+            maximumAttempts: 1, longFormConfiguration: configuration
+        ) { request in
+            request.role == .localSpeaker ? microphone : systemAudio
+        }
+        let completed = try await TrackTranscriptionRunner(
+            store: fixture.store, executor: executor
+        ).run(sessionID: fixture.session.id)
+        #expect(completed.status == .merging)
+        #expect(completed.tracks.allSatisfy { $0.status == .transcribed })
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let microphoneTrack = try #require(completed.tracks.first { $0.role == .localSpeaker })
+        let relativePath = try #require(microphoneTrack.transcriptRelativePath)
+        let transcript = try decoder.decode(
+            MeetingTrackTranscript.self,
+            from: Data(contentsOf: fixture.paths.sessionDirectory.appendingPathComponent(relativePath))
+        )
+        #expect(transcript.isSilent == true)
+        #expect(transcript.transcript.isEmpty)
+        #expect(transcript.segmentCount == 2)
+        #expect(transcript.completedSegmentCount == 2)
+        #expect(microphone.requestCount == 2)
+        #expect(systemAudio.requestCount == 2)
     }
 
     @MainActor
@@ -2303,9 +2587,149 @@ struct FlowDictateTests {
         #expect(first.renderedText == """
             [You] Microphone first.
             [System Audio] System overlap.
-            [You] Shared sentence.
-            [System Audio] Shared sentence.
+            [You · overlaps System Audio] Shared sentence.
+            [System Audio · overlaps You] Shared sentence.
             """)
+    }
+
+    @Test func timedTranscriptMergeRendersOverlappingWordsAsReadableSpeakerTurns() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let systemWords: [(Int64, String)] = [
+            (0, "Remote"), (300, "speaker"), (600, "explains"),
+            (900, "the"), (1_200, "plan.")
+        ]
+        let microphoneWords: [(Int64, String)] = [
+            (900, "I"), (1_200, "agree"), (1_500, "now.")
+        ]
+        func entries(_ words: [(Int64, String)]) -> [TrackTranscriptEntry] {
+            words.enumerated().map { index, word in
+                TrackTranscriptEntry(
+                    index: index,
+                    startMilliseconds: word.0,
+                    endMilliseconds: word.0 + 220,
+                    text: word.1,
+                    precision: .word
+                )
+            }
+        }
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session, role: .systemAudio,
+            text: "Remote speaker explains the plan.", entries: entries(systemWords)
+        )
+        let microphone = makeMeetingTrackTranscript(
+            session: session, role: .localSpeaker,
+            text: "I agree now.", entries: entries(microphoneWords)
+        )
+
+        let timeline = try TimedTranscriptMerger().merge(
+            session: session, transcripts: [microphone, systemAudio],
+            createdAt: session.updatedAt
+        )
+
+        #expect(timeline.entries.count == 8)
+        #expect(timeline.entries.allSatisfy { $0.precision == .word })
+        #expect(timeline.renderedText == """
+            [System Audio · overlaps You] Remote speaker explains the plan.
+            [You · overlaps System Audio] I agree now.
+            """)
+    }
+
+    @Test func timedTranscriptMergeInterleavesLongSpeechAtSpeakerEntry() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+            session.tracks[index].durationMilliseconds = 30_000
+            session.tracks[index].lastHostTime = session.tracks[index].firstHostTime! + 30_000
+            session.tracks[index].timestampAnchors[1].hostTime =
+                session.tracks[index].lastHostTime!
+            session.tracks[index].timestampAnchors[1].trackFramePosition = 1_440_000
+        }
+        let systemWords = (0...20).map { index in
+            TrackTranscriptEntry(
+                index: index,
+                startMilliseconds: Int64(index * 1_000),
+                endMilliseconds: Int64(index * 1_000 + 220),
+                text: index == 0 ? "Remote" :
+                    index == 18 ? "end." :
+                    index == 19 ? "Next" :
+                    index == 20 ? "sentence." : "word",
+                precision: .word
+            )
+        }
+        let microphoneWords = ["I", "respond."].enumerated().map { index, word in
+            TrackTranscriptEntry(
+                index: index,
+                startMilliseconds: Int64(10_000 + index * 1_000),
+                endMilliseconds: Int64(10_220 + index * 1_000),
+                text: word,
+                precision: .word
+            )
+        }
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session, role: .systemAudio,
+            text: "Remote sentence. Next sentence.", entries: systemWords
+        )
+        let microphone = makeMeetingTrackTranscript(
+            session: session, role: .localSpeaker,
+            text: "I respond.", entries: microphoneWords
+        )
+
+        let timeline = try TimedTranscriptMerger().merge(
+            session: session, transcripts: [microphone, systemAudio],
+            createdAt: session.updatedAt
+        )
+        let lines = timeline.renderedText.components(separatedBy: "\n")
+        #expect(lines.count == 3)
+        #expect(lines[0].hasPrefix("[System Audio] Remote "))
+        #expect(lines[1] == "[You · overlaps System Audio] I respond.")
+        #expect(lines[2].hasPrefix("[System Audio · overlaps You] word"))
+        #expect(lines[2].hasSuffix("Next sentence."))
+        #expect(timeline.entries.count == 23)
+    }
+
+    @Test func timedTranscriptMergeOmitsVerifiedSilentTrack() throws {
+        var session = makeValidMixedRecordingSession()
+        session.status = .merging
+        for index in session.tracks.indices {
+            session.tracks[index].status = .transcribed
+            session.tracks[index].transcriptionSessionID = UUID()
+            session.tracks[index].transcriptRelativePath =
+                "transcription/\(session.tracks[index].role.rawValue)-transcript.json"
+        }
+        let microphone = MeetingTrackTranscript(
+            schemaVersion: MeetingTrackTranscript.currentSchemaVersion,
+            meetingSessionID: session.id,
+            trackID: session.tracks.first { $0.role == .localSpeaker }!.id,
+            role: .localSpeaker,
+            transcriptionSessionID: session.tracks.first { $0.role == .localSpeaker }!
+                .transcriptionSessionID!,
+            providerID: "local", modelID: "test", language: nil,
+            transcript: "", segmentCount: 2, completedSegmentCount: 2,
+            timedEntries: nil, isSilent: true, createdAt: session.updatedAt
+        )
+        let systemAudio = makeMeetingTrackTranscript(
+            session: session, role: .systemAudio, text: "Remote speaks.",
+            entries: [TrackTranscriptEntry(
+                index: 0, startMilliseconds: 100, endMilliseconds: 800,
+                text: "Remote speaks.", precision: .word
+            )]
+        )
+        let timeline = try TimedTranscriptMerger().merge(
+            session: session, transcripts: [microphone, systemAudio], createdAt: session.updatedAt
+        )
+        #expect(timeline.entries.count == 1)
+        #expect(timeline.renderedText == "[System Audio] Remote speaks.")
     }
 
     @Test func timedTranscriptMergeFallsBackHonestlyAndMapsGapAndDrift() throws {
@@ -2367,6 +2791,7 @@ struct FlowDictateTests {
         #expect(fallback.trackStartMilliseconds == 0)
         #expect(fallback.trackEndMilliseconds == 10_000)
         #expect(fallback.sessionStartMilliseconds == 10)
+        #expect(!timeline.renderedText.contains("overlaps"))
     }
 
     @Test func timedTranscriptMergeRejectsUnreliableSynchronization() throws {
@@ -2810,6 +3235,164 @@ struct FlowDictateTests {
         #expect(warnings.values[2].message.contains("could not be written"))
     }
 
+    @Test func mixedClippingWarningExpiresAfterLastEventButTrackLossPersists() {
+        var state = MixedCaptureWarningState()
+        let clipping = MixedRecordingWarning(role: .localSpeaker, kind: .clipping)
+        let trackLoss = MixedRecordingWarning(role: .systemAudio, kind: .sourceLost)
+
+        let firstClipping = state.receive(clipping, at: 10)
+        let firstTrackLoss = state.receive(trackLoss, at: 10)
+        let repeatedClipping = state.receive(clipping, at: 13)
+        let earlyExpiry = state.expire(at: 17.9)
+        #expect(firstClipping)
+        #expect(firstTrackLoss)
+        #expect(!repeatedClipping)
+        #expect(!earlyExpiry)
+        #expect(state.warnings == [clipping, trackLoss])
+        let finalExpiry = state.expire(at: 18)
+        #expect(finalExpiry)
+        #expect(state.warnings == [trackLoss])
+        #expect(!state.hasTransientWarnings)
+        let newClipping = state.receive(clipping, at: 20)
+        #expect(newClipping)
+        #expect(state.warnings == [trackLoss, clipping])
+
+        state.reset()
+        #expect(state.warnings.isEmpty)
+        #expect(!state.hasTransientWarnings)
+    }
+
+#if REAL_LOW_DISK
+    @Test func realLowDiskVolumeWarnsBlocksAndReportsWriterExhaustion() async throws {
+        let fileManager = FileManager.default
+        let candidates = try fileManager.contentsOfDirectory(
+            at: URL(fileURLWithPath: "/private/tmp", isDirectory: true),
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("FlowDictate-4.1-LowDisk.") }
+        let testDirectory = try #require(candidates.count == 1 ? candidates[0] : nil)
+        let mount = testDirectory.appendingPathComponent("mount", isDirectory: true)
+            .standardizedFileURL
+        let temporaryRoot = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .standardizedFileURL
+        try #require(mount.deletingLastPathComponent().deletingLastPathComponent().path
+            == temporaryRoot.path)
+        try #require(mount.lastPathComponent == "mount")
+        try #require(mount.deletingLastPathComponent().lastPathComponent
+            .hasPrefix("FlowDictate-4.1-LowDisk."))
+        let volumeAttributes = try fileManager.attributesOfFileSystem(forPath: mount.path)
+        let volumeSize = try #require(
+            (volumeAttributes[.systemSize] as? NSNumber)?.int64Value
+        )
+        try #require((64_000_000...256_000_000).contains(volumeSize))
+
+        let sessionRoot = mount.appendingPathComponent("MeetingSessions", isDirectory: true)
+        let fillURL = mount.appendingPathComponent("bounded-fill.bin")
+        let writerURL = mount.appendingPathComponent("writer-original.caf")
+        try #require(!fileManager.fileExists(atPath: sessionRoot.path))
+        try #require(!fileManager.fileExists(atPath: fillURL.path))
+        try #require(!fileManager.fileExists(atPath: writerURL.path))
+        defer {
+            try? fileManager.removeItem(at: writerURL)
+            try? fileManager.removeItem(at: fillURL)
+            try? fileManager.removeItem(at: sessionRoot)
+        }
+        func freeBytes() throws -> Int64 {
+            let attributes = try fileManager.attributesOfFileSystem(forPath: mount.path)
+            return try #require((attributes[.systemFreeSize] as? NSNumber)?.int64Value)
+        }
+
+        #expect(try freeBytes() > 50_000_000)
+        #expect(try freeBytes() < 500_000_000)
+        let events = MixedTrackTestEventLog()
+        let warnings = LockedMixedWarningLog()
+        let store = MeetingSessionStore(rootURL: sessionRoot)
+        let coordinator = MixedRecordingSessionCoordinator(
+            microphoneRecorder: MockMixedTrackRecorder(role: .localSpeaker, events: events),
+            systemAudioRecorder: MockMixedTrackRecorder(role: .systemAudio, events: events),
+            store: store
+        )
+        await coordinator.setWarningHandler { warnings.append($0) }
+        let firstRequest = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: nil
+        )
+        _ = try await coordinator.start(firstRequest)
+        #expect(warnings.values.contains(.lowStorage))
+        let stopped = try await coordinator.stop()
+        #expect(stopped.tracks.allSatisfy { $0.status == .finalized })
+
+        #expect(fileManager.createFile(atPath: fillURL.path, contents: nil))
+        let fillHandle = try FileHandle(forWritingTo: fillURL)
+        let fillChunk = Data(repeating: 0xA5, count: 1_000_000)
+        while try freeBytes() >= 48_000_000 {
+            try fillHandle.write(contentsOf: fillChunk)
+        }
+        try fillHandle.close()
+        #expect(try freeBytes() < 50_000_000)
+        let blockedRequest = MixedRecordingSessionRequest(
+            providerID: "local", engineID: "fluid-audio",
+            modelID: "test-model", language: nil
+        )
+        do {
+            _ = try await coordinator.start(blockedRequest)
+            Issue.record("Expected a real-volume low-storage start block")
+        } catch let error as MixedRecordingCoordinatorError {
+            guard case .insufficientRecordingStorage = error else {
+                Issue.record("Unexpected mixed capture error: \(error)")
+                return
+            }
+        }
+        #expect(!fileManager.fileExists(atPath: sessionRoot
+            .appendingPathComponent(blockedRequest.sessionID.uuidString).path))
+
+        let format = try #require(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let frameCount: AVAudioFrameCount = 262_144
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount))
+        buffer.frameLength = frameCount
+        let samples = try #require(buffer.floatChannelData?[0])
+        samples.initialize(repeating: 0.25, count: Int(frameCount))
+        let sink = try MicrophoneTrackCaptureSink(
+            outputURL: writerURL,
+            sourceFormat: format,
+            outputFormat: format,
+            warningHandler: { warnings.append(.track(role: .localSpeaker, kind: $0)) }
+        )
+        let hostTime = mach_continuous_time()
+        sink.begin(requestedHostTime: hostTime)
+        for index in 0..<64 {
+            sink.append(
+                buffer,
+                at: AVAudioTime(
+                    hostTime: hostTime + UInt64(index + 1) * 1_000_000,
+                    sampleTime: AVAudioFramePosition(index) * AVAudioFramePosition(frameCount),
+                    atRate: 48_000
+                )
+            )
+        }
+        do {
+            _ = try sink.finish()
+            Issue.record("Expected the isolated volume to exhaust during PCM writing")
+        } catch let error as MicrophoneTrackRecorderError {
+            guard case let .writerFailed(_, outOfSpace) = error else {
+                Issue.record("Unexpected microphone writer error: \(error)")
+                return
+            }
+            if !outOfSpace {
+                Issue.record("Writer exhaustion was not classified as out of space: \(error)")
+            }
+        }
+        #expect(warnings.values.contains(
+            .track(role: .localSpeaker, kind: .writerFailed)
+        ))
+        #expect(fileManager.fileExists(atPath: writerURL.path))
+    }
+#endif
+
     @Test func mixedTrackFailureOriginKeepsDiagnosticsContentFreeAndConservative() {
         let cases: [(any Error, MixedTrackFailureOrigin)] = [
             (MicrophoneTrackRecorderError.writerFailed("synthetic", outOfSpace: true), .writer),
@@ -2970,6 +3553,16 @@ struct FlowDictateTests {
         #expect(MixedRecordingWriteFailure.isOutOfSpace(wrapped))
         #expect(!MixedRecordingWriteFailure.isOutOfSpace(
             NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue)
+        ))
+        let genericAudioFileError = NSError(
+            domain: "com.apple.coreaudio.avfaudio",
+            code: -40
+        )
+        #expect(!MixedRecordingWriteFailure.isOutOfSpace(genericAudioFileError))
+        #expect(!MixedRecordingWriteFailure.isOutOfSpace(
+            genericAudioFileError,
+            writingTo: FileManager.default.temporaryDirectory
+                .appendingPathComponent("healthy-volume.caf")
         ))
     }
 
@@ -3518,13 +4111,14 @@ struct FlowDictateTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let manager = LocalModelManager(modelsRoot: root)
         let repository = await manager.repositoryDirectory
+        #expect(repository.lastPathComponent == "parakeet-tdt-0.6b-v3")
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
         try Data("old".utf8).write(to: repository.appendingPathComponent("marker"))
 
         let stagingRoot = repository.deletingLastPathComponent()
             .appendingPathComponent("staging-test", isDirectory: true)
         let stagedRepository = stagingRoot.appendingPathComponent(
-            LocalModelCatalog.parakeetV3.id,
+            "parakeet-tdt-0.6b-v3",
             isDirectory: true
         )
         try FileManager.default.createDirectory(at: stagedRepository, withIntermediateDirectories: true)
@@ -4661,6 +5255,55 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func restartReleasesEveryHotkeyBeforeOpeningTheNewInstance() async throws {
+        let restarter = MockApplicationRestarter()
+        let harness = makeCoordinatorHarness(applicationRestarter: restarter)
+        let registrars = [
+            harness.dictationHotKeyRegistrar,
+            harness.cancelHotKeyRegistrar,
+            harness.restoreHotKeyRegistrar
+        ]
+        #expect(registrars.allSatisfy { $0.isRegistered })
+        restarter.onOpen = {
+            #expect(registrars.allSatisfy { !$0.isRegistered })
+        }
+
+        harness.coordinator.quitAndRestart()
+        harness.coordinator.quitAndRestart()
+        #expect(registrars.allSatisfy { !$0.isRegistered })
+        for _ in 0..<100 where restarter.terminateCount == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        #expect(restarter.openCount == 1)
+        #expect(restarter.terminateCount == 1)
+        #expect(registrars.allSatisfy { $0.unregisterCount == 1 })
+    }
+
+    @MainActor
+    @Test func failedRestartRestoresEveryHotkeyInTheOriginalInstance() async throws {
+        let restarter = MockApplicationRestarter()
+        restarter.openError = NSError(domain: "FlowDictateRestartTest", code: 1)
+        let harness = makeCoordinatorHarness(applicationRestarter: restarter)
+        let registrars = [
+            harness.dictationHotKeyRegistrar,
+            harness.cancelHotKeyRegistrar,
+            harness.restoreHotKeyRegistrar
+        ]
+
+        harness.coordinator.quitAndRestart()
+        for _ in 0..<100 where registrars.contains(where: { !$0.isRegistered }) {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        #expect(restarter.openCount == 1)
+        #expect(restarter.terminateCount == 0)
+        #expect(registrars.allSatisfy { $0.isRegistered })
+        #expect(registrars.allSatisfy { $0.registerCount == 2 })
+        #expect(harness.coordinator.setupMessage?.contains("could not restart") == true)
+    }
+
+    @MainActor
     @Test func systemAudioCompletionConfirmsAndRetainsClipboardText() async throws {
         let pasteboard = NSPasteboard.general
         let originalClipboard = PasteboardSnapshot.capture(from: pasteboard)
@@ -4780,6 +5423,43 @@ struct FlowDictateTests {
         #expect(harness.provider.transcribeCount == 1)
         #expect(harness.inserter.insertCount == 1)
         #expect(harness.coordinator.state == .idle)
+    }
+
+    @MainActor
+    @Test func overlaySizeAndPositionChangesApplyImmediatelyDuringRecording() async throws {
+        let previewProvider = MockLivePreviewProvider()
+        let harness = makeCoordinatorHarness(
+            livePreviewProvider: previewProvider,
+            livePreviewEnabled: true
+        )
+        await harness.coordinator.toggleDictation()
+        #expect(harness.coordinator.state == .recording)
+        #expect(harness.recorder.previewBufferHandler != nil)
+        #expect(previewProvider.startCount == 1)
+
+        harness.coordinator.settings.overlaySize = .expanded
+        #expect(harness.overlay.configurations.last?.size == .expanded)
+        #expect(previewProvider.startCount == 1)
+        harness.coordinator.settings.overlaySize = .compact
+        #expect(harness.overlay.configurations.last?.size == .compact)
+        #expect(harness.recorder.previewBufferHandler == nil)
+        harness.coordinator.settings.overlayPosition = .bottomCenter
+        #expect(harness.overlay.configurations.last?.position == .bottomCenter)
+        #expect(harness.overlay.configurations.last?.size == .compact)
+        #expect(previewProvider.startCount == 1)
+
+        harness.coordinator.settings.overlaySize = .standard
+        #expect(harness.overlay.configurations.last?.size == .standard)
+        #expect(harness.recorder.previewBufferHandler != nil)
+        #expect(previewProvider.startCount == 2)
+        harness.coordinator.settings.overlayPosition = .bottomTrailing
+        #expect(harness.overlay.configurations.last?.position == .bottomTrailing)
+        #expect(previewProvider.startCount == 2)
+
+        harness.coordinator.requestCancel()
+        for _ in 0..<40 where harness.recorder.stopCount == 0 {
+            try await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     @MainActor
@@ -5666,6 +6346,37 @@ struct FlowDictateTests {
         #expect(ambiguous == "One ending ending but unrelated")
     }
 
+    @Test func partialTranscriptMergerPreservesSpeechAcrossVerifiedSilence() throws {
+        let segments = [
+            TranscriptionSegment(
+                id: UUID(), index: 0, startMilliseconds: 0, endMilliseconds: 2_000,
+                overlapBeforeMilliseconds: 0, status: .succeeded,
+                preparedRelativePath: nil, preparedByteCount: nil,
+                transcript: "A repeated phrase.", attemptCount: 1, lastAttemptAt: nil,
+                errorCategory: nil, errorMessage: nil
+            ),
+            TranscriptionSegment(
+                id: UUID(), index: 1, startMilliseconds: 1_900, endMilliseconds: 4_000,
+                overlapBeforeMilliseconds: 100, status: .silent,
+                preparedRelativePath: nil, preparedByteCount: nil,
+                transcript: nil, attemptCount: 1, lastAttemptAt: nil,
+                errorCategory: nil, errorMessage: nil
+            ),
+            TranscriptionSegment(
+                id: UUID(), index: 2, startMilliseconds: 3_900, endMilliseconds: 6_000,
+                overlapBeforeMilliseconds: 100, status: .succeeded,
+                preparedRelativePath: nil, preparedByteCount: nil,
+                transcript: "A repeated phrase.", attemptCount: 1, lastAttemptAt: nil,
+                errorCategory: nil, errorMessage: nil
+            )
+        ]
+        #expect(try PartialTranscriptMerger().merge(segments) ==
+            "A repeated phrase. A repeated phrase.")
+        var allSilent = segments[1]
+        allSilent.index = 0
+        #expect(try PartialTranscriptMerger().merge([allSilent]) == "")
+    }
+
     @Test func interruptedManifestBecomesResumableWithoutLosingSuccessfulText() async throws {
         let now = Date()
         var segments = try await AudioSegmentPlanner().plan(durationMilliseconds: 20 * 60 * 1_000)
@@ -5758,6 +6469,9 @@ struct FlowDictateTests {
             let file = try AVAudioFile(forWriting: audioURL, settings: format.settings)
             let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 80_000))
             buffer.frameLength = buffer.frameCapacity
+            if let samples = buffer.floatChannelData?[0] {
+                for frame in 0..<Int(buffer.frameLength) { samples[frame] = 0.05 }
+            }
             try file.write(from: buffer)
         }
         let bytes = Int64(try audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
@@ -5835,6 +6549,94 @@ struct FlowDictateTests {
         #expect(result.completedTranscriptionSegmentCount == 2)
         #expect(result.transcriptionSessionID == nil)
         #expect(progress.contains(.merging(total: 2)))
+        #expect(try await sessions.load(recordID: record.id) == nil)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    @MainActor
+    @Test func longFormResumeSkipsVerifiedSilentSegmentsButNotAudibleEmptyResponses() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSilentLongForm-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audioURL = root.appendingPathComponent("long.wav")
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        do {
+            let file = try AVAudioFile(forWriting: audioURL, settings: format.settings)
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 128_000))
+            buffer.frameLength = buffer.frameCapacity
+            let samples = try #require(buffer.floatChannelData?[0])
+            // Near-silent room noise, not just digital zeroes.
+            for frame in 0..<Int(buffer.frameLength) { samples[frame] = 0.0008 }
+            for frame in 8_000..<24_000 { samples[frame] = 0.05 }
+            for frame in 100_800..<116_800 { samples[frame] = 0.05 }
+            try file.write(from: buffer)
+        }
+        let detector = SilentAudioSegmentDetector()
+        var configuration = LongFormConfiguration.default
+        configuration.targetDurationMilliseconds = 2_000
+        configuration.minimumDurationMilliseconds = 1_000
+        configuration.maximumDurationMilliseconds = 3_000
+        configuration.boundarySearchRadiusMilliseconds = 0
+        configuration.fallbackOverlapMilliseconds = 100
+        configuration.softUploadByteLimit = 100_000
+        configuration.hardUploadByteLimit = 1_000_000
+        configuration.workingStorageReserveBytes = 0
+        let planned = try await AudioSegmentPlanner(configuration: configuration)
+            .plan(durationMilliseconds: 8_000)
+        #expect(planned.count == 4)
+        #expect(try await detector.isSilent(in: audioURL, segment: planned[1]))
+        #expect(try await detector.isSilent(in: audioURL, segment: planned[2]))
+        #expect(try await !detector.isSilent(in: audioURL, segment: planned[3]))
+
+        let history = DictationHistoryStore(fileURL: root.appendingPathComponent("history.json"))
+        let sessions = TranscriptionSessionStore(rootURL: root.appendingPathComponent("sessions"))
+        let now = Date()
+        let record = DictationRecord.newRecording(
+            id: UUID(), startedAt: now.addingTimeInterval(-8), endedAt: now, duration: 8,
+            status: .recorded, audioRelativePath: "long.wav",
+            audioFileSize: Int64(try audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0),
+            providerID: "Test", modelID: "test", language: "en",
+            targetBundleIdentifier: nil, targetApplicationName: nil,
+            sourceMetadata: AudioSourceMetadata(
+                source: .microphone, sampleRate: 16_000, channelCount: 1
+            )
+        )
+        try await history.upsert(record)
+        let runner = LongFormTranscriptionRunner(
+            historyStore: history,
+            sessionStore: sessions,
+            configuration: configuration,
+            sleeper: { _ in }
+        )
+        let firstProvider = SequenceTranscriptionProvider(texts: ["Opening.", "", "", ""])
+        let failedRecord: DictationRecord
+        do {
+            _ = try await runner.runIfNeeded(
+                record: record, audioURL: audioURL, language: "en", maximumAttempts: 1,
+                provider: firstProvider, allowsEmptyTranscript: true, progress: { _ in }
+            )
+            Issue.record("Expected an audible empty-response segment to remain failed")
+            return
+        } catch let failure as TranscriptionRunFailure {
+            failedRecord = failure.record
+        }
+        let failedManifest = try #require(try await sessions.load(recordID: record.id))
+        #expect(failedManifest.segments.map(\.status) ==
+            [.succeeded, .silent, .silent, .failed])
+        #expect(failedManifest.completedSegmentCount == 3)
+        #expect(failedRecord.partialTranscript == "Opening.")
+        #expect(firstProvider.requestCount == 4)
+
+        let resumedProvider = SequenceTranscriptionProvider(texts: ["Closing."])
+        let completed = try #require(try await runner.runIfNeeded(
+            record: failedRecord, audioURL: audioURL, language: "en", maximumAttempts: 1,
+            provider: resumedProvider, allowsEmptyTranscript: true, progress: { _ in }
+        ))
+        #expect(completed.status == .transcribed)
+        #expect(completed.finalText == "Opening. Closing.")
+        #expect(completed.completedTranscriptionSegmentCount == 4)
+        #expect(resumedProvider.requestCount == 1)
         #expect(try await sessions.load(recordID: record.id) == nil)
         #expect(FileManager.default.fileExists(atPath: audioURL.path))
     }
@@ -6097,6 +6899,48 @@ struct FlowDictateTests {
         #expect(direct.insertCount == 0)
         #expect(clipboard.insertCount == 1)
         #expect(clipboard.insertedText == "Fast Word insertion")
+    }
+
+    @MainActor
+    @Test func chatGPTUsesClipboardWhileOtherAppsRemainAccessibilityFirst() async throws {
+        #expect(PasteboardTextInserter.usesTargetedPaste(for: "com.openai.codex"))
+        for bundleIdentifier in [
+            "com.microsoft.Word",
+            "com.anthropic.claudefordesktop",
+            "com.apple.Notes",
+            "com.apple.mail",
+            "com.apple.TextEdit"
+        ] {
+            #expect(!PasteboardTextInserter.usesTargetedPaste(for: bundleIdentifier))
+        }
+        let application = NSRunningApplication(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier
+        ) ?? NSWorkspace.shared.frontmostApplication!
+        let direct = MockTextInserter()
+        let clipboard = MockTextInserter()
+        let inserter = FallbackTextInserter(direct: direct, clipboard: clipboard)
+
+        let chatGPT = FocusTarget(
+            application: application,
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: "com.openai.codex",
+            localizedName: "ChatGPT"
+        )
+        try await inserter.insert("Chat text", into: chatGPT)
+        #expect(direct.insertCount == 0)
+        #expect(clipboard.insertCount == 1)
+        #expect(clipboard.insertedText == "Chat text")
+
+        let textEdit = FocusTarget(
+            application: application,
+            processIdentifier: application.processIdentifier,
+            bundleIdentifier: "com.apple.TextEdit",
+            localizedName: "TextEdit"
+        )
+        try await inserter.insert("Other app text", into: textEdit)
+        #expect(direct.insertCount == 1)
+        #expect(direct.insertedText == "Other app text")
+        #expect(clipboard.insertCount == 1)
     }
 
     @Test func dictationJobStoreRoundTripsSequencesAndNormalizesInterruption() async throws {
@@ -6390,7 +7234,8 @@ struct FlowDictateTests {
         meetingProcessingWorkflow: (any MeetingProcessingRunning)? = nil,
         meetingTranscriptInsertionGate:
             (any MeetingTranscriptInsertionGating)? = nil,
-        mixedCaptureTestDuration: Duration = .seconds(5)
+        mixedCaptureTestDuration: Duration = .seconds(5),
+        applicationRestarter: (any ApplicationRestarting)? = nil
     ) -> CoordinatorHarness {
         let suiteName = "FlowDictateCoordinatorTests-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -6433,11 +7278,14 @@ struct FlowDictateTests {
         )
 
         let dictationHotKeyRegistrar = MockHotKeyRegistrar()
+        let cancelHotKeyRegistrar = MockHotKeyRegistrar()
+        let restoreHotKeyRegistrar = MockHotKeyRegistrar()
         let coordinator = DictationCoordinator(
             settings: settings,
             dictationHotKeyRegistrar: dictationHotKeyRegistrar,
-            cancelHotKeyRegistrar: MockHotKeyRegistrar(),
-            restoreHotKeyRegistrar: MockHotKeyRegistrar(),
+            cancelHotKeyRegistrar: cancelHotKeyRegistrar,
+            restoreHotKeyRegistrar: restoreHotKeyRegistrar,
+            applicationRestarter: applicationRestarter ?? WorkspaceApplicationRestarter(),
             permissionManager: MockPermissionManager(),
             recorder: recorder,
             systemAudioRecorder: recorder,
@@ -6474,6 +7322,8 @@ struct FlowDictateTests {
             focusTargetBox: focusTargetBox,
             processActivityManager: processActivityManager,
             dictationHotKeyRegistrar: dictationHotKeyRegistrar,
+            cancelHotKeyRegistrar: cancelHotKeyRegistrar,
+            restoreHotKeyRegistrar: restoreHotKeyRegistrar,
             recordingLocationStore: recordingLocationStore,
             historyStore: historyStore,
             jobStore: jobStore
@@ -7315,6 +8165,8 @@ private struct CoordinatorHarness {
     let focusTargetBox: FocusTargetBox
     let processActivityManager: MockProcessActivityManager
     let dictationHotKeyRegistrar: MockHotKeyRegistrar
+    let cancelHotKeyRegistrar: MockHotKeyRegistrar
+    let restoreHotKeyRegistrar: MockHotKeyRegistrar
     let recordingLocationStore: RecordingLocationStore
     let historyStore: DictationHistoryStore
     let jobStore: DictationJobStore
@@ -7450,6 +8302,7 @@ private nonisolated final class SequenceTranscriptionProvider: TranscriptionProv
         guard transcribeCount < texts.count else { throw TranscriptionProviderError.emptyTranscript }
         let text = texts[transcribeCount]
         transcribeCount += 1
+        guard !text.isEmpty else { throw TranscriptionProviderError.emptyTranscript }
         return TranscriptionResult(text: text, provider: providerID, model: modelID)
     }
 }
@@ -7491,12 +8344,16 @@ private final class MockTextInserter: TextInserting {
 private final class MockHotKeyRegistrar: HotKeyRegistering {
     private var pressHandler: (@MainActor () -> Void)?
     private var releaseHandler: (@MainActor () -> Void)?
+    private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
+    var isRegistered: Bool { pressHandler != nil }
 
     func register(
         _ configuration: HotKeyConfiguration,
         pressed: @escaping @MainActor () -> Void,
         released: @escaping @MainActor () -> Void
     ) throws {
+        registerCount += 1
         pressHandler = pressed
         releaseHandler = released
     }
@@ -7505,8 +8362,27 @@ private final class MockHotKeyRegistrar: HotKeyRegistering {
     func release() { releaseHandler?() }
 
     func unregister() {
+        unregisterCount += 1
         pressHandler = nil
         releaseHandler = nil
+    }
+}
+
+@MainActor
+private final class MockApplicationRestarter: ApplicationRestarting {
+    var onOpen: (() -> Void)?
+    var openError: Error?
+    private(set) var openCount = 0
+    private(set) var terminateCount = 0
+
+    func openNewInstance() async throws {
+        openCount += 1
+        onOpen?()
+        if let openError { throw openError }
+    }
+
+    func terminateCurrentInstance() {
+        terminateCount += 1
     }
 }
 
@@ -7771,6 +8647,7 @@ private final class MockRecordingOverlay: RecordingOverlayPresenting {
     private(set) var hideCount = 0
     private(set) var previewStates: [LivePreviewState] = []
     private(set) var meetingLevels: [(microphone: Float, systemAudio: Float)] = []
+    private(set) var configurations: [(size: OverlaySize, position: OverlayPosition)] = []
 
     func show(status: OverlayStatus, level: Float, reposition: Bool) {
         presentations.append(status)
@@ -7784,7 +8661,9 @@ private final class MockRecordingOverlay: RecordingOverlayPresenting {
 
     func updatePreview(_ state: LivePreviewState) { previewStates.append(state) }
 
-    func configure(size: OverlaySize, position: OverlayPosition) {}
+    func configure(size: OverlaySize, position: OverlayPosition) {
+        configurations.append((size, position))
+    }
 
     func hide() {
         hideCount += 1

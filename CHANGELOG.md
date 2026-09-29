@@ -4,6 +4,30 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ## [Unreleased]
 
+## [4.1.0] - release candidate
+
+### Added
+
+- Opt-in `Microphone + System Audio` meetings with a separate recording-consent confirmation, visible recording state and independent microphone/system levels and warnings.
+- Two preserved original audio tracks per meeting, a role-labelled timeline (`You` and `System Audio`), track playback, partial/retry processing and restart recovery. These labels identify capture sources, not individual speakers.
+- Meeting History archiving, confirmed session deletion and retention that keeps recoverable work protected.
+
+### Changed
+
+- Mixed recording uses the audio-only Core Audio process tap on macOS 14.2+ and a ScreenCaptureKit audio-only compatibility path on macOS 14.0/14.1. Neither path records video.
+- A silent long-form segment can complete without aborting the remaining track; available speech before and after it remains recoverable.
+- Long-form local word timings are retained across segments so completed meeting transcripts can be placed chronologically rather than as whole-track blocks.
+
+### Fixed
+
+- A model-change restart releases global hotkeys before launching the replacement app, avoiding the one-restart `-9878` collision.
+- Overlay size and position changes apply during an active recording. Returning from `Compact` to a text-capable size restarts local microphone Live Preview without restarting it for position-only changes.
+- The Standard recording overlay is slightly wider and keeps `RECORDING` on one line when the live badge, source label and level meter are visible.
+
+### Known limitation
+
+- The real 30-, 60- and 120-minute mixed tests preserved both original tracks but recorded short System Audio gaps: 65 ms, 33 ms and 422 ms total respectively, with a maximum individual gap of 137 ms. A gap can omit part of a word; zero-loss capture is not claimed.
+
 ## [4.0.2] - 2026-09-10
 
 ### Fixed

@@ -24,6 +24,29 @@ final class SystemProcessActivityManager: ProcessActivityManaging {
     }
 }
 
+@MainActor
+protocol ApplicationRestarting: AnyObject {
+    func openNewInstance() async throws
+    func terminateCurrentInstance()
+}
+
+@MainActor
+final class WorkspaceApplicationRestarter: ApplicationRestarting {
+    func openNewInstance() async throws {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        _ = try await NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        )
+    }
+
+    func terminateCurrentInstance() {
+        NSApplication.shared.terminate(nil)
+    }
+}
+
 /// Prevents a freshly signed XCTest host from presenting a macOS Keychain
 /// authorization dialog before the test bundle can materialize. Normal app
 /// launches continue to use `KeychainCredentialStore`.
@@ -100,6 +123,7 @@ final class DictationCoordinator: ObservableObject {
     private let dictationHotKeyRegistrar: HotKeyRegistering
     private let cancelHotKeyRegistrar: HotKeyRegistering
     private let restoreHotKeyRegistrar: HotKeyRegistering
+    private let applicationRestarter: any ApplicationRestarting
     private let permissionManager: PermissionManaging
     private let microphoneRecorder: AudioRecording
     private let systemAudioRecorder: AudioRecording
@@ -146,6 +170,7 @@ final class DictationCoordinator: ObservableObject {
     private var focusTarget: FocusTarget?
     private var lastExternalFocusTarget: FocusTarget?
     private var isHandlingToggle = false
+    private var isRestarting = false
     private var lastHotKeyDate = Date.distantPast
     private var overlayDismissTask: Task<Void, Never>?
     private var onboardingWindowController: NSWindowController?
@@ -159,7 +184,8 @@ final class DictationCoordinator: ObservableObject {
         (any MixedRecordingSessionCoordinating)?
     private var mixedMicrophoneLevel: Float = 0
     private var mixedSystemAudioLevel: Float = 0
-    private var mixedCaptureWarnings: [MixedRecordingWarning] = []
+    private var mixedCaptureWarningState = MixedCaptureWarningState()
+    private var mixedClippingWarningExpiryTask: Task<Void, Never>?
     private var localModelInstallTask: Task<Void, Never>?
     private var didLogLivePreviewText = false
     private var cachedAPIKey: String?
@@ -233,6 +259,7 @@ final class DictationCoordinator: ObservableObject {
         dictationHotKeyRegistrar: HotKeyRegistering,
         cancelHotKeyRegistrar: HotKeyRegistering,
         restoreHotKeyRegistrar: HotKeyRegistering,
+        applicationRestarter: (any ApplicationRestarting)? = nil,
         permissionManager: PermissionManaging,
         recorder: AudioRecording,
         systemAudioRecorder: AudioRecording? = nil,
@@ -274,6 +301,7 @@ final class DictationCoordinator: ObservableObject {
         self.dictationHotKeyRegistrar = dictationHotKeyRegistrar
         self.cancelHotKeyRegistrar = cancelHotKeyRegistrar
         self.restoreHotKeyRegistrar = restoreHotKeyRegistrar
+        self.applicationRestarter = applicationRestarter ?? WorkspaceApplicationRestarter()
         self.permissionManager = permissionManager
         microphoneRecorder = recorder
         self.systemAudioRecorder = systemAudioRecorder
@@ -774,19 +802,23 @@ final class DictationCoordinator: ObservableObject {
             setupMessage = "Finish or cancel the current dictation before restarting FlowDictate."
             return
         }
-
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.createsNewApplicationInstance = true
-        Task {
+        guard !isRestarting else { return }
+        isRestarting = true
+        unregisterAllHotKeys()
+        Task { [weak self] in
+            guard let self else { return }
             do {
-                _ = try await NSWorkspace.shared.openApplication(
-                    at: Bundle.main.bundleURL,
-                    configuration: configuration
-                )
-                NSApplication.shared.terminate(nil)
-            } catch {
-                setupMessage = "FlowDictate could not restart: \(error.localizedDescription)"
+                try await applicationRestarter.openNewInstance()
+                applicationRestarter.terminateCurrentInstance()
+            } catch let launchError {
+                isRestarting = false
+                do {
+                    try registerConfiguredHotKeys()
+                    setupMessage = "FlowDictate could not restart: \(launchError.localizedDescription)"
+                } catch let restoreError {
+                    state = .failed(message: restoreError.localizedDescription, retainedAudioURL: nil)
+                    setupMessage = "FlowDictate could not restart (\(launchError.localizedDescription)) or restore its hotkeys: \(restoreError.localizedDescription)"
+                }
             }
         }
     }
@@ -858,24 +890,32 @@ final class DictationCoordinator: ObservableObject {
             }
             .store(in: &settingsCancellables)
 
-        Publishers.Merge(
-            settings.$overlaySize.map { _ in () },
-            settings.$overlayPosition.map { _ in () }
-        )
-        .sink { [weak self] _ in
-            guard let self else { return }
-            overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
-            if !settings.overlaySize.showsLivePreviewText {
-                recorder.previewBufferHandler = nil
-                livePreviewCoordinator.cancel()
-                overlay.updatePreview(.disabled)
-                return
+        settings.$overlaySize
+            .combineLatest(settings.$overlayPosition)
+            .sink { [weak self] configuration in
+                guard let self else { return }
+                let (size, position) = configuration
+                overlay.configure(size: size, position: position)
+                if !size.showsLivePreviewText {
+                    recorder.previewBufferHandler = nil
+                    livePreviewCoordinator.cancel()
+                    overlay.updatePreview(.disabled)
+                    return
+                }
+                if state == .recording,
+                   settings.recordingAudioSource == .microphone,
+                   recorder.isRecording,
+                   recorder.previewBufferHandler == nil,
+                   livePreviewCoordinator.state == .disabled,
+                   settings.livePreviewEnabled {
+                    startLivePreviewIfAvailable(size: size)
+                    return
+                }
+                livePreviewCoordinator.updateCharacterLimit(
+                    size.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
+                )
             }
-            livePreviewCoordinator.updateCharacterLimit(
-                settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
-            )
-        }
-        .store(in: &settingsCancellables)
+            .store(in: &settingsCancellables)
     }
 
     private func requireRestartForTranscriptionChange() {
@@ -1634,14 +1674,38 @@ final class DictationCoordinator: ObservableObject {
         mixedMicrophoneLevel = 0
         mixedSystemAudioLevel = 0
         overlay.updateMeetingLevels(microphone: 0, systemAudio: 0)
-        mixedCaptureWarnings = []
+        mixedClippingWarningExpiryTask?.cancel()
+        mixedClippingWarningExpiryTask = nil
+        mixedCaptureWarningState.reset()
         overlay.updateMeetingWarnings([])
     }
 
     private func handleMixedCaptureWarning(_ warning: MixedRecordingWarning) {
-        guard !mixedCaptureWarnings.contains(warning) else { return }
-        mixedCaptureWarnings.append(warning)
-        overlay.updateMeetingWarnings(mixedCaptureWarnings)
+        let isNew = mixedCaptureWarningState.receive(
+            warning,
+            at: ProcessInfo.processInfo.systemUptime
+        )
+        if warning.isTransientClipping, mixedClippingWarningExpiryTask == nil {
+            mixedClippingWarningExpiryTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard !Task.isCancelled, let self else { return }
+                    if self.mixedCaptureWarningState.expire(
+                        at: ProcessInfo.processInfo.systemUptime
+                    ) {
+                        self.overlay.updateMeetingWarnings(
+                            self.mixedCaptureWarningState.warnings
+                        )
+                    }
+                    if !self.mixedCaptureWarningState.hasTransientWarnings {
+                        self.mixedClippingWarningExpiryTask = nil
+                        return
+                    }
+                }
+            }
+        }
+        guard isNew else { return }
+        overlay.updateMeetingWarnings(mixedCaptureWarningState.warnings)
         FlowLogger.audio.warning(
             "Mixed capture warning: \(warning.message, privacy: .public)"
         )
@@ -2456,12 +2520,27 @@ final class DictationCoordinator: ObservableObject {
 
     private func registerInitialHotKeys() {
         do {
+            try registerConfiguredHotKeys()
+        } catch {
+            state = .failed(message: error.localizedDescription, retainedAudioURL: nil)
+        }
+    }
+
+    private func registerConfiguredHotKeys() throws {
+        do {
             try registerDictationHotKey(settings.dictationHotKey)
             try registerCancelHotKey(settings.cancelHotKey)
             try registerRestoreHotKey(settings.restoreHotKey)
         } catch {
-            state = .failed(message: error.localizedDescription, retainedAudioURL: nil)
+            unregisterAllHotKeys()
+            throw error
         }
+    }
+
+    private func unregisterAllHotKeys() {
+        dictationHotKeyRegistrar.unregister()
+        cancelHotKeyRegistrar.unregister()
+        restoreHotKeyRegistrar.unregister()
     }
     private func registerDictationHotKey(_ value: HotKeyConfiguration) throws {
         try dictationHotKeyRegistrar.register(
@@ -3035,9 +3114,19 @@ final class DictationCoordinator: ObservableObject {
             return
         }
 
+        FlowLogger.transcription.info(
+            "Post-stop History persistence completed in \(String(describing: stopStarted.duration(to: .now)), privacy: .public)"
+        )
+
         do {
             let job = try await makeJob(record: record)
+            FlowLogger.transcription.info(
+                "Post-stop job creation completed in \(String(describing: stopStarted.duration(to: .now)), privacy: .public)"
+            )
             queueSnapshot = try await processingQueue.commit(job)
+            FlowLogger.transcription.info(
+                "Post-stop queue commit completed in \(String(describing: stopStarted.duration(to: .now)), privacy: .public)"
+            )
             hasQueueReservation = false
             record.jobID = job.id
             record.jobStatus = job.status
@@ -3231,10 +3320,14 @@ final class DictationCoordinator: ObservableObject {
     private func drainJobQueue() async {
         while !Task.isCancelled {
             let job: DictationJob
+            let queueReadStarted = ContinuousClock.now
             do {
                 guard let next = try await processingQueue.next() else { break }
                 job = next
                 queueSnapshot = try await processingQueue.snapshot()
+                FlowLogger.transcription.info(
+                    "Queue next/snapshot completed in \(String(describing: queueReadStarted.duration(to: .now)), privacy: .public)"
+                )
             } catch {
                 FlowLogger.app.error(
                     "Could not read next dictation job: \(error.localizedDescription, privacy: .public)"
@@ -3654,6 +3747,10 @@ final class DictationCoordinator: ObservableObject {
         livePreviewCoordinator.cancel()
         didLogLivePreviewText = false
         overlay.configure(size: settings.overlaySize, position: settings.overlayPosition)
+        startLivePreviewIfAvailable(size: settings.overlaySize)
+    }
+
+    private func startLivePreviewIfAvailable(size: OverlaySize) {
         if settings.recordingAudioSource == .systemAudio {
             overlay.updatePreview(.unavailable(RecordingAudioSource.systemAudioPreviewGuidance))
             FlowLogger.audio.info("Live Preview skipped for System Audio")
@@ -3662,7 +3759,7 @@ final class DictationCoordinator: ObservableObject {
         FlowLogger.audio.info(
             "Preparing Live Preview: enabled=\(self.settings.livePreviewEnabled, privacy: .public), speechPermission=\(self.speechPermissionState.rawValue, privacy: .public)"
         )
-        guard settings.overlaySize.showsLivePreviewText else {
+        guard size.showsLivePreviewText else {
             overlay.updatePreview(.disabled)
             FlowLogger.audio.info("Live Preview skipped for Compact overlay")
             return
@@ -3690,7 +3787,7 @@ final class DictationCoordinator: ObservableObject {
             recorder.previewBufferHandler = try livePreviewCoordinator.start(
                 configuration: LivePreviewConfiguration(
                     localeIdentifier: localeIdentifier,
-                    characterLimit: settings.overlaySize.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
+                    characterLimit: size.clampedLivePreviewCharacterLimit(settings.livePreviewCharacterLimit)
                 )
             )
         } catch {

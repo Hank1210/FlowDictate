@@ -2,14 +2,14 @@
 
 Diese Ausgabe ist kostenlos und ad hoc signiert. Sie wurde nicht von Apple notarisiert. macOS zeigt deshalb beim ersten Start eine Sicherheitswarnung an.
 
-Diese Anleitung gilt für FlowDictate 3.3.0 Community.
+Diese Anleitung gilt für FlowDictate 4.1.0 Community.
 
 ## Download prüfen
 
 Lade die ZIP-Datei und die gleichnamige `.sha256`-Datei aus demselben GitHub Release. Öffne anschließend Terminal, wechsle in den Download-Ordner und prüfe das Archiv:
 
 ```sh
-shasum -a 256 -c FlowDictate-3.3.0-Community-macOS.zip.sha256
+shasum -a 256 -c FlowDictate-4.1.0-Community-macOS.zip.sha256
 ```
 
 Terminal muss `OK` melden. Installiere die App nicht, wenn die Prüfung fehlschlägt.
@@ -30,11 +30,13 @@ Gib FlowDictate nur frei, wenn du die ZIP-Datei direkt von einer Person erhalten
 2. Wähle die Transkription: Auf einem Apple-Silicon-Mac kannst du das lokale Parakeet-Modell herunterladen und ohne API-Key arbeiten. Alternativ trägst du deinen eigenen OpenAI API-Key ein; er wird ausschließlich im macOS-Schlüsselbund gespeichert. Auf Intel-Macs bleibt OpenAI der verfügbare finale Transkriptionsweg.
 3. Erlaube Mikrofonzugriff und Bedienungshilfen.
 4. Erlaube Spracherkennung nur, wenn du die optionale lokale Live Preview verwenden möchtest.
-5. Wenn du Systemaudio aufnehmen möchtest, erlaube FlowDictate unter `Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme` den Zugriff. Je nach macOS-Version kann die Berechtigung auch als `Bildschirmaufnahme` oder `Nur Systemaudio` bezeichnet sein.
+5. Für einzelne Systemaudio-Diktate benötigt FlowDictate die Freigabe unter `Bildschirm- & Systemaudioaufnahme`. Für kombinierte Mikrofon- und Systemaudioaufnahmen auf macOS 14.2 oder neuer verwende den getrennten Schalter `Nur Systemaudioaufnahme`/`System Audio Recording Only`; auf macOS 14.0/14.1 wird der ScreenCaptureKit-Pfad verwendet. FlowDictate nimmt dabei nur Audio und kein Video auf.
 6. Beende und öffne FlowDictate erneut, wenn macOS nach einer neuen Berechtigung dazu auffordert.
 7. Lege die gewünschten Tastenkürzel fest.
 
 Die ZIP-Datei enthält weder einen API-Key noch ein Sprachmodell oder Zugangsdaten des Erstellers. Der optionale Modelldownload wird in den Transkriptions-Einstellungen mit Quelle, Größe und Lizenz angezeigt.
+
+Für `Microphone + System Audio` musst du die Quelle ausdrücklich auswählen und vor der ersten Aufnahme einen gesonderten Hinweis zu Information und nötiger Zustimmung aller Beteiligten bestätigen. Die Bestätigung startet noch keine Aufnahme. Im gewählten Aufnahmeordner legt FlowDictate pro Meeting zwei getrennte Originalspuren sowie Arbeits- und Transkriptdateien im Unterordner `MeetingSessions` ab. Bei 48 kHz benötigen allein die Originale ungefähr 1,4 GB pro Stunde; plane für Arbeitsdateien zusätzlichen Platz ein. Kurze Systemaudio-Lücken sind möglich und werden in History als Qualitätswarnung angezeigt. `You` bezeichnet die Mikrofonspur, nicht eine Sprechererkennung.
 
 ## Aktualisierung
 
@@ -52,7 +54,7 @@ Verwende zum Testen immer genau die Community-ZIP, die später veröffentlicht w
 6. Erneuere nur die Berechtigung, deren Funktion tatsächlich nicht mehr arbeitet. Folge dazu dem Abschnitt **Berechtigungen reparieren** weiter unten.
 7. Beende und starte FlowDictate nach Änderungen an den Berechtigungen einmal vollständig neu.
 
-Wenn du von einer Version vor 3.2.0 aktualisierst, werden vorhandene History-Daten automatisch erweitert. Vor der ersten Speicherung im neuen Format legt FlowDictate einmalig eine Sicherung namens `dictations-pre-3.2.json` im lokalen History-Ordner an. Aufnahmen und der gewählte Aufnahmeordner werden nicht verschoben.
+Bei der ersten Speicherung des neuen History-Schemas legt FlowDictate einmalig `dictations-pre-4.1.json` im lokalen History-Ordner an. Bestehende Einzelspuraufnahmen bleiben Einzelspuraufnahmen; der gewählte Aufnahmeordner wird nicht verschoben.
 
 Live Preview ist optional und nutzt ausschließlich Apples lokale Spracherkennung. Lokale finale Transkription, gesprochene Korrekturen, Formatierung und das persönliche Wörterbuch arbeiten auf dem Mac. Im Modus `Fully offline` blockiert FlowDictate Transkriptions-, Enhancement- und Update-Netzwerkzugriffe. Nur ein bewusst gewählter Cloudpfad sendet Audio oder Text an OpenAI; ein lokaler Fehler löst niemals automatisch einen Cloud-Upload aus.
 
@@ -76,6 +78,7 @@ Zuordnung der Funktionen:
 - Keine Mikrofonaufnahme: **Mikrofon**
 - Aufnahme startet, aber Tastenkürzel oder Texteinfügung funktionieren nicht: **Bedienungshilfen**
 - Keine lokale Live Preview: **Spracherkennung**
-- Keine Systemaudioaufnahme oder keine auswählbaren Audioquellen: **Bildschirm- & Systemaudioaufnahme**
+- Keine einzelne Systemaudioaufnahme: **Bildschirm- & Systemaudioaufnahme**
+- Keine kombinierte Systemaudiospur: unter macOS 14.2+ **Nur Systemaudioaufnahme**; unter 14.0/14.1 **Bildschirm- & Systemaudioaufnahme**
 
 Setze nicht alle Datenschutzrechte gleichzeitig zurück. So bleiben bereits funktionierende Freigaben erhalten und der Update-Aufwand bleibt möglichst gering.

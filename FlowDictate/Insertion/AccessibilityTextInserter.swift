@@ -90,12 +90,12 @@ final class AccessibilityTextInserter: TextInserting {
 
 @MainActor
 final class FallbackTextInserter: TextInserting {
-    /// Word's Accessibility tree can accept the focus lookup while blocking
-    /// selected-text inspection for several seconds. Word already needs the
-    /// clipboard path in that state, so avoid putting its known-slow AX probe
-    /// on the interactive insertion path.
+    /// Word's Accessibility tree can block selected-text inspection. ChatGPT's
+    /// composer can report a successful AX selected-text write without showing
+    /// the text. Both need the clipboard path; other apps keep the AX-first path.
     private static let clipboardPreferredBundleIdentifiers: Set<String> = [
-        "com.microsoft.Word"
+        "com.microsoft.Word",
+        "com.openai.codex"
     ]
 
     private let direct: TextInserting
@@ -110,7 +110,7 @@ final class FallbackTextInserter: TextInserting {
         if let bundleIdentifier = target.bundleIdentifier,
            Self.clipboardPreferredBundleIdentifiers.contains(bundleIdentifier) {
             FlowLogger.insertion.info(
-                "Skipping known-slow Accessibility insertion for \(bundleIdentifier, privacy: .public); using clipboard"
+                "Using clipboard insertion for \(bundleIdentifier, privacy: .public)"
             )
             try await clipboard.insert(text, into: target)
             return

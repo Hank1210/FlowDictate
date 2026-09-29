@@ -191,3 +191,48 @@ nonisolated final class SilenceBoundaryDetector: @unchecked Sendable {
         return count > 0 ? sqrt(sum / Double(count)) : 1
     }
 }
+
+/// A provider's empty response is only treated as an intentional no-speech
+/// segment when every original PCM sample is below the capture silence floor.
+/// Checking the original (not the lossy working copy) keeps this conservative.
+nonisolated final class SilentAudioSegmentDetector: @unchecked Sendable {
+    func isSilent(in url: URL, segment: TranscriptionSegment) async throws -> Bool {
+        try await Task.detached(priority: .utility) {
+            let file = try AVAudioFile(forReading: url)
+            let format = file.processingFormat
+            guard format.sampleRate > 0,
+                  segment.endMilliseconds > segment.startMilliseconds else {
+                return false
+            }
+            let startFrame = min(max(AVAudioFramePosition(
+                Double(segment.startMilliseconds) * format.sampleRate / 1_000
+            ), 0), file.length)
+            let endFrame = min(max(AVAudioFramePosition(
+                Double(segment.endMilliseconds) * format.sampleRate / 1_000
+            ), startFrame), file.length)
+            guard endFrame > startFrame,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32_768) else {
+                return false
+            }
+            file.framePosition = startFrame
+            while file.framePosition < endFrame {
+                try Task.checkCancellation()
+                let remaining = endFrame - file.framePosition
+                try file.read(
+                    into: buffer,
+                    frameCount: AVAudioFrameCount(min(Int64(buffer.frameCapacity), remaining))
+                )
+                guard buffer.frameLength > 0,
+                      let channels = buffer.floatChannelData else { return false }
+                for channel in 0..<Int(format.channelCount) {
+                    for frame in 0..<Int(buffer.frameLength) {
+                        if abs(channels[channel][frame]) >= PCMTrackMetrics.silenceThreshold {
+                            return false
+                        }
+                    }
+                }
+            }
+            return true
+        }.value
+    }
+}

@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-FlowDictate 4.0 uses the following separately licensed components. FlowDictate itself remains available under the MIT License.
+FlowDictate 4.1 uses the following separately licensed components. FlowDictate itself remains available under the MIT License.
 
 ## FluidAudio
 

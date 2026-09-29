@@ -5,7 +5,15 @@ SCRIPT_DIRECTORY=${0:A:h}
 PROJECT_DIRECTORY=${SCRIPT_DIRECTORY:h}
 DERIVED_DATA_DIRECTORY=${FLOWDICTATE_COMMUNITY_DERIVED_DATA:-${PROJECT_DIRECTORY}/build/CommunityDerivedData}
 DIST_DIRECTORY=${PROJECT_DIRECTORY}/dist
-VERSION=${FLOWDICTATE_VERSION:-4.0.2}
+VERSION=${FLOWDICTATE_VERSION:-4.1.0}
+PACKAGE_CLONE_DIRECTORY=${FLOWDICTATE_PACKAGE_CLONE_DIRECTORY:-}
+PACKAGE_RESOLUTION_ARGUMENTS=()
+if [[ -n ${PACKAGE_CLONE_DIRECTORY} ]]; then
+    PACKAGE_RESOLUTION_ARGUMENTS=(
+        -clonedSourcePackagesDirPath "${PACKAGE_CLONE_DIRECTORY}"
+        -disableAutomaticPackageResolution
+    )
+fi
 PACKAGE_NAME=FlowDictate-${VERSION}-Community
 STAGING_ROOT=$(/usr/bin/mktemp -d /private/tmp/FlowDictateCommunity.XXXXXX)
 STAGING_DIRECTORY=${STAGING_ROOT}/${PACKAGE_NAME}
@@ -46,6 +54,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
     -configuration Release \
     -destination 'generic/platform=macOS' \
     -derivedDataPath "${DERIVED_DATA_DIRECTORY}" \
+    "${PACKAGE_RESOLUTION_ARGUMENTS[@]}" \
     CODE_SIGNING_ALLOWED=NO \
     ONLY_ACTIVE_ARCH=NO \
     ARCHS='arm64 x86_64'

@@ -489,7 +489,7 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
     private var acceptsAudio = false
     private var levelHandler: MixedTrackLevelHandler?
     private var warningHandler: MixedTrackWarningHandler?
-    private var didReportClipping = false
+    private var clippingWarningGate = AudioLevelUpdateGate(updatesPerSecond: 1)
     private var didReportFailure = false
     private let levelUpdateGate = AudioLevelUpdateGate(updatesPerSecond: 10)
 
@@ -541,7 +541,7 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             sampleRate: outputFormat.sampleRate
         )
         failure = nil
-        didReportClipping = false
+        clippingWarningGate = AudioLevelUpdateGate(updatesPerSecond: 1)
         didReportFailure = false
         hasBegun = true
         acceptsAudio = true
@@ -574,10 +574,8 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
             )
             let clippedFrameCount = metrics.clippedFrameCount
             metrics.record(buffer: outputBuffer, time: audioTime)
-            if !didReportClipping,
-               clippedFrameCount == 0,
-               metrics.clippedFrameCount > 0 {
-                didReportClipping = true
+            if metrics.clippedFrameCount > clippedFrameCount,
+               clippingWarningGate.shouldPublish(at: ProcessInfo.processInfo.systemUptime) {
                 warningHandler?(.clipping)
             }
             publishLevelIfNeeded(from: outputBuffer)
@@ -587,7 +585,10 @@ nonisolated final class SystemAudioTrackCaptureSink: @unchecked Sendable {
         } catch {
             let writerError = SystemAudioTrackRecorderError.writerFailed(
                 error.localizedDescription,
-                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(error)
+                outOfSpace: MixedRecordingWriteFailure.isOutOfSpace(
+                    error,
+                    writingTo: outputURL
+                )
             )
             failure = writerError
             reportFailureIfNeeded(writerError)

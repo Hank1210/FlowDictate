@@ -137,7 +137,7 @@ private final class RecordingOverlayModel: ObservableObject {
     var contentSize: CGSize {
         let configuredSize: CGSize = switch size {
         case .compact: CGSize(width: 320, height: 60)
-        case .standard: CGSize(width: 390, height: 136)
+        case .standard: CGSize(width: 420, height: 136)
         case .expanded: CGSize(width: 500, height: 236)
         }
         if status == .recording, source == .mixed, !meetingWarnings.isEmpty,
@@ -414,6 +414,7 @@ private struct RecordingOverlayView: View {
             Text(model.status.title.uppercased())
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .tracking(1.15)
+                .fixedSize(horizontal: model.status == .recording, vertical: false)
                 .foregroundStyle(Color.white.opacity(0.94))
             if showsLiveBadge, model.size != .compact {
                 Text("LIVE")
