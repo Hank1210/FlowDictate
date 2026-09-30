@@ -226,7 +226,10 @@ struct OnboardingView: View {
 
     private var ready: some View {
         VStack(spacing: 18) {
-            let prerequisitesReady = coordinator.apiKeyConfigured && coordinator.recordingLocationConfigured
+            let prerequisitesReady = Self.isReady(
+                recordingLocationConfigured: coordinator.recordingLocationConfigured,
+                transcriptionSetupReady: coordinator.transcriptionSetupReady
+            )
             Image(systemName: prerequisitesReady ? "checkmark.circle.fill" : "exclamationmark.triangle")
                 .font(.system(size: 72)).foregroundStyle(prerequisitesReady ? .green : .orange)
             Text(prerequisitesReady ? "FlowDictate is ready" : "Setup needs attention")
@@ -242,11 +245,30 @@ struct OnboardingView: View {
     }
 
     private var canContinue: Bool {
+        Self.canContinue(
+            step: step,
+            recordingLocationConfigured: coordinator.recordingLocationConfigured,
+            transcriptionSetupReady: coordinator.transcriptionSetupReady
+        )
+    }
+
+    static func canContinue(
+        step: Int,
+        recordingLocationConfigured: Bool,
+        transcriptionSetupReady: Bool
+    ) -> Bool {
         switch step {
-        case 1: coordinator.recordingLocationConfigured
-        case 2: coordinator.apiKeyConfigured
+        case 1: recordingLocationConfigured
+        case 2: transcriptionSetupReady
         default: true
         }
+    }
+
+    static func isReady(
+        recordingLocationConfigured: Bool,
+        transcriptionSetupReady: Bool
+    ) -> Bool {
+        recordingLocationConfigured && transcriptionSetupReady
     }
 
     private func statusRow(_ title: String, value: String, ready: Bool) -> some View {

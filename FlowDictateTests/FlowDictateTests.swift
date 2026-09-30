@@ -6830,6 +6830,36 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func onboardingAcceptsReadySelectedProviderWithoutRequiringTheOther() {
+        // The selected-provider readiness is true for an installed local model
+        // even when no OpenAI API key exists; it is false for an unconfigured
+        // OpenAI selection even when a local model happens to be installed.
+        #expect(OnboardingView.canContinue(
+            step: 2,
+            recordingLocationConfigured: true,
+            transcriptionSetupReady: true
+        ))
+        #expect(OnboardingView.isReady(
+            recordingLocationConfigured: true,
+            transcriptionSetupReady: true
+        ))
+        #expect(!OnboardingView.canContinue(
+            step: 2,
+            recordingLocationConfigured: true,
+            transcriptionSetupReady: false
+        ))
+        #expect(!OnboardingView.isReady(
+            recordingLocationConfigured: true,
+            transcriptionSetupReady: false
+        ))
+        #expect(!OnboardingView.canContinue(
+            step: 1,
+            recordingLocationConfigured: false,
+            transcriptionSetupReady: true
+        ))
+    }
+
+    @MainActor
     @Test func offlineLocalDictationWithAIStyleStillInsertsLocalText() async {
         let harness = makeCoordinatorHarness(
             credentialStore: EmptyCredentialStore(),

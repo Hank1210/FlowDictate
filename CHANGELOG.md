@@ -20,6 +20,7 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ### Fixed
 
+- Onboarding now accepts the selected transcription provider alone: an installed local model needs no OpenAI API key, and an OpenAI setup needs only its configured key. The final Ready screen uses the same provider-aware check.
 - Local model installation now creates its destination before checking available storage, so the download starts for a new macOS user without an existing FlowDictate Application Support folder.
 - A model-change restart releases global hotkeys before launching the replacement app, avoiding the one-restart `-9878` collision.
 - Overlay size and position changes apply during an active recording. Returning from `Compact` to a text-capable size restarts local microphone Live Preview without restarting it for position-only changes.
