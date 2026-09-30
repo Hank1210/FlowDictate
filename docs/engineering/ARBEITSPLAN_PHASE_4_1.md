@@ -5,9 +5,9 @@
 **Stand:** 30. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
-**Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
+**Anforderungsgrundlage:** [FlowDictate PRD Phase 4.1](../requirements/FlowDictate_PRD_Phase_4_1.md)
 **Private Testnotizen:** `TESTING_4_1.md`, nicht versionieren
-**Ablage:** öffentlich und versioniert; die Ausnahme in `.gitignore` gilt ausschließlich für diesen Plan
+**Ablage:** öffentlich und versioniert unter `docs/engineering/`; die Ausnahme in `.gitignore` gilt ausschließlich für diesen Plan
 
 ## 1. Zweck des Arbeitsplans
 
@@ -848,7 +848,7 @@ Die Testphase ist nach Bestätigung des Nutzers abgeschlossen. Die folgende Bewe
 | Migration Schema 6 → 7 und Backup | Automatisiert geprüft; bestehende Einzelspur-History blieb bei den Installations-/Update-Tests erhalten. |
 | Sessionlöschung ohne Fremddatenverlust | Manuelle Löschabnahme und pfadbegrenzte Regression bestanden. |
 | ZIP-Architekturen, Signatur, SHA-256 und Privatausschluss | Build 32 aus Commit `7804e30` verifiziert; SHA-256 `c18e5d29d5cafcfcabfa877e039bd89d39f2b273ffa79db1e3d56edbe73adc1c`. Die installierte App stimmt in ausführbarer Datei, Info.plist, Assets und Signaturressourcen byteweise mit der entpackten ZIP-App überein. |
-| Öffentliche Dokumentation und Release Notes | README, Privacy, Installationshinweise und Changelog beschreiben Verhalten und bekannte Lücken; `RELEASE_NOTES_4.1.0.md` vorbereitet. |
+| Öffentliche Dokumentation und Release Notes | README, Privacy, Installationshinweise und Changelog beschreiben Verhalten und bekannte Lücken; `docs/releases/RELEASE_NOTES_4.1.0.md` vorbereitet. |
 
 Ein separater mehrtägiger Praxistest *genau* von Build 32 wurde nicht mit Dauer und Ergebnis protokolliert. Der Nutzer beendet die Testphase dennoch; dies ist eine Abweichung vom früheren Soll, keine nachträglich bestandene Prüfung. Vor Publikation sind diese Restrisiken bewusst freizugeben. Änderungen an der gebündelten App oder den ZIP-Dateien würden die exakte Artefaktabnahme erneuern.
 

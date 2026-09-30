@@ -10,51 +10,14 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 
 ## Current features
 
-- global start/stop and cancel shortcuts
-- microphone recording with local WAV backup
-- selectable audio input and live level metering
-- optional local final transcription with FluidAudio and Parakeet TDT 0.6B v3 on Apple Silicon
-- OpenAI transcription remains available as an explicit BYOK cloud option
-- Fully offline, local-with-optional-enhancement and cloud-transcription privacy modes
-- compact M4A upload preparation with file-based multipart transfer and an early size check
-- clipboard-safe insertion into the application that originally had focus
-- a non-activating recording and processing overlay on the display containing the mouse
-- API credentials stored in macOS Keychain
-- microphone and Accessibility permission guidance
-- configurable clipboard restoration delay
-- launch at login enabled on first installed start, with a Settings toggle to disable it
-- first-run setup for storage, the selected local or OpenAI transcription provider, permissions and hotkeys
-- user-selected sandboxed recordings folder with `Documents/Recordings` as the recommended default
-- persistent searchable history with audio playback and text export
-- crash recovery and orphaned-recording detection
-- manual retry plus bounded automatic retry for temporary provider failures
-- automatic long-recording segmentation with ordered partial transcripts, per-segment progress, retry and restart-safe continuation
-- a persistent job manifest for safe restart recovery and deferred insertion when the original target is unavailable
-- provider selection globally and per app profile; provider, model, language and insertion target are frozen for each job
-- deterministic German and English in-dictation correction commands before formatting and dictionary processing
-- configurable Restore Last Dictation hotkey
-- separate, configurable retention for successful audio and visible history while failed recordings remain protected
-- optional on-device Apple Speech Live Preview while recording
-- compact, standard and expanded non-activating overlays with configurable placement
-- an explicit five-second Preview test that never calls OpenAI or writes to History
-- deterministic spoken formatting commands for German and English
-- a local personal dictionary with language, case and whole-word rules
-- built-in and custom writing styles with optional OpenAI text enhancement
-- separate Original, Formatted, Dictionary and Final stages in History
-- enhancement retry, reprocessing and safe local/original fallbacks without retranscribing audio
-- versioned dictionary and writing-style JSON import/export
-- a dedicated macOS app icon for Finder, Accessibility settings and installed builds
-- selectable microphone or digital System Audio recording, with separate permission guidance and a local five-second source test
-- opt-in `Microphone + System Audio` meetings with a separate consent confirmation, two original audio tracks, independent level and quality warnings, a shared timeline and partial/retry recovery
-- meeting History actions for separate track playback, export, non-destructive archiving, confirmed session deletion and retention that protects unfinished work
-- recording-source metadata in the overlay and History; microphone remains the migration-safe default
-- app-specific profiles selected by bundle identifier for language, transcription model, writing style, spoken formatting and insertion preference
-- automatic direct Accessibility insertion with a bounded clipboard fallback; Microsoft Word uses its reliable clipboard path immediately, `Clipboard only` remains available per app and protected password fields are never written
-- selectable toggle or press-and-hold shortcut activation
-- optional local usage statistics calculated from History, with Total, 30-day and 14-day views plus a non-destructive reset
-- a daily, disableable GitHub release check that only opens the release page and never installs automatically
+- Global shortcuts for microphone dictation, with safe insertion into the app that had focus.
+- Local transcription on Apple Silicon or explicit OpenAI BYOK transcription.
+- Optional live preview, spoken formatting, personal dictionary, writing styles and per-app profiles.
+- Opt-in microphone-plus-System-Audio meetings with separate original tracks and a role-labelled transcript.
+- Searchable History, configurable retention, archiving, export and restart-safe recovery.
+- Source and permission tests, recording quality warnings and a non-activating overlay.
 
-Mixed recording does not create a combined original audio file or identify individual remote speakers: `You` means the microphone track and `System Audio` means the captured output. Bulk export and profile import/export remain follow-up scope. Cloud audio streaming is not used.
+The full [feature and settings reference](docs/FEATURES.md) describes behavior and limits. Mixed recording does not create a combined original audio file or identify individual remote speakers: `You` means the microphone track and `System Audio` means the captured output. Bulk export and profile import/export remain follow-up scope. Cloud audio streaming is not used.
 
 Known 4.1 limitation: in the real 30-, 60- and 120-minute meeting tests, short gaps occurred on the System Audio track (65 ms, 33 ms and 422 ms total respectively; the longest single gap was 137 ms). A gap can omit part of a word. The app keeps both originals, reports capture quality and supports recovery; it does not claim lossless capture on every Mac or audio route.
 
@@ -84,15 +47,7 @@ During development only, `OPENAI_API_KEY` and `FLOWDICTATE_TRANSCRIPTION_MODEL` 
 
 ## Settings
 
-- **General:** launch at login and permission status
-- **Dictation:** shortcuts, toggle/press-and-hold activation, Live Preview, overlay size, position, text limit and Preview test
-- **Audio:** microphone, System Audio or mixed source, source-specific permissions, five-second source tests, input device, live levels and meeting consent
-- **Transcription:** privacy mode, local/OpenAI provider, local model management, optional Keychain credential and language
-- **Smart Dictation:** spoken formatting, personal dictionary, writing styles, optional enhancement model and fallback behavior
-- **Storage:** recordings folder, retention and Phase 1 migration
-- **App Profiles:** per-app language, model, style, formatting and insertion overrides
-- **Productivity:** local usage statistics and Community update notices
-- **Advanced:** clipboard restoration delay and automatic retries
+Settings cover shortcuts, recording sources, transcription, Smart Dictation, storage, app profiles and privacy. See the [feature and settings reference](docs/FEATURES.md) for the full list.
 
 If a selected microphone disappears, FlowDictate falls back to the current system input device. Recordings are stored before upload in the folder selected during setup. Mixed sessions keep their two originals and derived/transcription files in a `MeetingSessions` subfolder there. History metadata remains local in the app's Application Support container.
 
@@ -117,9 +72,9 @@ For version 4.1.0 the generated files are:
 
 Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history. Phase 4.1 implementation and release gates are described in [ARBEITSPLAN_PHASE_4_1.md](ARBEITSPLAN_PHASE_4_1.md).
+See [CHANGELOG.md](CHANGELOG.md) for version history and the [documentation index](docs/README.md) for requirements, engineering notes and release notes.
 
-The 4.1.0 release description is prepared in [RELEASE_NOTES_4.1.0.md](RELEASE_NOTES_4.1.0.md). It is kept separate from the tested ZIP so documentation-only preparation does not change that archive.
+The 4.1.0 release description is prepared in [RELEASE_NOTES_4.1.0.md](docs/releases/RELEASE_NOTES_4.1.0.md). It is kept separate from the tested ZIP so documentation-only preparation does not change that archive.
 
 ## Updating an existing installation
 
@@ -164,34 +119,4 @@ The `FlowDictateUITests` target contains an optional menu bar launch test. It is
 
 ## Manual verification
 
-Test short, long, German, English and mixed-language dictation in Notes, Safari, Chrome, Mail, VS Code and Word or an equivalent editor. Also verify:
-
-- rapid shortcut presses do not create overlapping recordings
-- cancel does not call the transcription provider
-- the overlay appears on the display containing the mouse and never steals focus
-- microphone switching and default-device fallback
-- text and non-text clipboard restoration
-- invalid key and offline errors retain the audio file
-- interrupted transcription is recoverable from History
-- `Documents/Recordings` access survives an app restart
-- Restore Last Dictation inserts at the current cursor
-- launch at login works from an installed, consistently signed build; if macOS requires approval, follow the link to Login Items shown in Settings
-- Live Preview works for German and English and is clearly marked as provisional
-- denying Speech Recognition or using an unsupported locale does not interrupt recording or final transcription
-- disabling Live Preview causes no Speech prompt and leaves normal dictation unchanged
-- Compact, Standard and Expanded remain non-activating at every supported position
-- the five-second Preview test deletes its temporary recording and creates no History entry
-- Original style performs only local processing and makes no enhancement request
-- German and English formatting commands, literal escape and URL preservation
-- dictionary word boundaries, capitalization, language filters and overlapping rules
-- every writing style, custom style creation and dictionary/style import/export
-- failed enhancement retains every text stage and supports Retry, Local and Original recovery
-- numbers, URLs and dictionary terms remain intact after AI enhancement
-- System Audio permission denial leaves microphone dictation usable
-- the five-second System Audio test creates no History entry, makes no OpenAI request and removes its temporary file
-- System Audio captures another app's playback without storing video and produces a transcribable M4A
-- two app profiles apply different settings by bundle identifier and remain frozen for each recording
-- direct insertion works where supported, falls back safely, and never writes into password fields
-- toggle and press-and-hold both produce exactly one recording per gesture
-- local statistics match History and disappear when disabled
-- release checks ignore equal, older, draft and prerelease versions and never install anything
+Use the [manual verification checklist](docs/MANUAL_VERIFICATION.md) for cross-app, permission, recording, recovery and release checks. Automated tests do not replace these macOS checks.
