@@ -4105,6 +4105,27 @@ struct FlowDictateTests {
         #expect(settings.transcriptionProviderID == .local)
     }
 
+    @Test func localModelStoragePreparationWorksForFreshUser() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateFreshUser-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelsRoot = root.appendingPathComponent(
+            "Library/Application Support/FlowDictate/Models",
+            isDirectory: true
+        )
+        let manager = LocalModelManager(modelsRoot: modelsRoot)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+
+        let modelParent = try await manager.prepareModelStorage()
+
+        #expect(modelParent == modelsRoot.appendingPathComponent(
+            LocalModelCatalog.parakeetV3.id,
+            isDirectory: true
+        ))
+        #expect(FileManager.default.fileExists(atPath: modelParent.path))
+        #expect(try await manager.prepareModelStorage() == modelParent)
+    }
+
     @Test func localModelPromotionMovesFluidAudioRepositoryAndPreservesReplacement() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateModelPromotion-\(UUID().uuidString)")

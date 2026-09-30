@@ -88,15 +88,12 @@ actor LocalModelManager {
                 reason: "Local transcription requires an Apple Silicon Mac."
             )
         }
-        try ensureFreeSpace()
-
-        let modelParent = activeDirectory.deletingLastPathComponent()
+        let modelParent = try prepareModelStorage()
         let stagingRoot = modelParent.appendingPathComponent(
             "staging-\(UUID().uuidString)",
             isDirectory: true
         )
         let stagingAnchor = stagingRoot.appendingPathComponent("anchor", isDirectory: true)
-        try fileManager.createDirectory(at: modelParent, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: stagingRoot) }
 
@@ -183,8 +180,12 @@ actor LocalModelManager {
         }
     }
 
-    private func ensureFreeSpace() throws {
-        let values = try modelsRoot.deletingLastPathComponent().resourceValues(
+    /// A fresh user's Application Support/FlowDictate directory does not exist
+    /// yet. Create the model destination before querying its volume capacity.
+    func prepareModelStorage() throws -> URL {
+        let modelParent = activeDirectory.deletingLastPathComponent()
+        try fileManager.createDirectory(at: modelParent, withIntermediateDirectories: true)
+        let values = try modelParent.resourceValues(
             forKeys: [.volumeAvailableCapacityForImportantUsageKey]
         )
         if let available = values.volumeAvailableCapacityForImportantUsage,
@@ -194,6 +195,7 @@ actor LocalModelManager {
                 userInfo: [NSLocalizedDescriptionKey: "At least \(byteCount(descriptor.installedBytes * 2)) of free storage is required for the model download."]
             )
         }
+        return modelParent
     }
 
     private func byteCount(_ value: Int64) -> String {

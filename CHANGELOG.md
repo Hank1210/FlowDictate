@@ -20,6 +20,7 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ### Fixed
 
+- Local model installation now creates its destination before checking available storage, so the download starts for a new macOS user without an existing FlowDictate Application Support folder.
 - A model-change restart releases global hotkeys before launching the replacement app, avoiding the one-restart `-9878` collision.
 - Overlay size and position changes apply during an active recording. Returning from `Compact` to a text-capable size restarts local microphone Live Preview without restarting it for position-only changes.
 - The Standard recording overlay is slightly wider and keeps `RECORDING` on one line when the live badge, source label and level meter are visible.
