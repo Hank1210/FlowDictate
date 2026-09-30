@@ -192,8 +192,15 @@ struct OnboardingView: View {
                     set: { coordinator.settings.livePreviewEnabled = $0 }
                 )
             )
+            if coordinator.settings.livePreviewEnabled {
+                Text("Live Preview also needs macOS Dictation enabled in System Settings → Keyboard → Dictation. Speech Recognition permission alone may not be enough. Final transcription still works without Live Preview.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack {
-                Button("Request Permissions") { coordinator.requestRequiredPermissions() }
+                Button("Microphone Permissions") {
+                    Task { await coordinator.requestMicrophonePermission() }
+                }
                 if coordinator.settings.livePreviewEnabled
                     && coordinator.speechPermissionState == .notDetermined {
                     Button("Allow Live Preview") {

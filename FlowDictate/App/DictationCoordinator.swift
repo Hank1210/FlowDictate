@@ -2016,16 +2016,13 @@ final class DictationCoordinator: ObservableObject {
         }
     }
 
-    func requestRequiredPermissions() {
-        Task {
-            do {
-                try await permissionManager.ensureMicrophoneAccess()
-                try permissionManager.ensureEventPostingAccess()
-            } catch {
-                setupMessage = error.localizedDescription
-            }
-            refreshPermissionStatus()
+    func requestMicrophonePermission() async {
+        do {
+            try await permissionManager.ensureMicrophoneAccess()
+        } catch {
+            setupMessage = error.localizedDescription
         }
+        refreshPermissionStatus()
     }
 
     func toggleDictation() async {

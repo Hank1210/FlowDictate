@@ -29,7 +29,7 @@ Only approve FlowDictate if you received the ZIP file directly from someone you 
 1. Choose the recordings folder. `Documents/Recordings` is recommended.
 2. Choose transcription: on Apple Silicon, you can download the local Parakeet model and work without an API key. Alternatively, enter your own OpenAI API key; it is stored exclusively in the macOS Keychain. On Intel Macs, OpenAI remains the available final-transcription path.
 3. Grant Microphone and Accessibility permissions.
-4. Grant Speech Recognition only if you want to use the optional local Live Preview.
+4. Grant Speech Recognition only if you want to use the optional local Live Preview. If Preview still reports `Siri and Dictation are disabled`, also enable macOS Dictation under `System Settings → Keyboard → Dictation`. Final transcription works without Live Preview.
 5. Standalone System Audio dictation needs `Screen & System Audio Recording` permission. Combined microphone-plus-system-audio recording uses the separate `System Audio Recording Only` switch on macOS 14.2+; on macOS 14.0/14.1 it uses the ScreenCaptureKit permission. FlowDictate captures audio only, never video.
 6. Quit and reopen FlowDictate if macOS asks you to do so after granting a new permission.
 7. Configure your preferred keyboard shortcuts.
@@ -77,8 +77,10 @@ Feature-to-permission reference:
 
 - No microphone recording: **Microphone**
 - Recording starts, but keyboard shortcuts or text insertion do not work: **Accessibility**
-- No local Live Preview: **Speech Recognition**
+- No local Live Preview: check **Speech Recognition**; for `Siri and Dictation are disabled`, also enable `Keyboard → Dictation`.
 - No standalone System Audio recording: **Screen & System Audio Recording**
 - No System Audio track in a combined recording: on macOS 14.2+ **System Audio Recording Only**; on 14.0/14.1 **Screen & System Audio Recording**
+
+For **standalone System Audio**, macOS may show a Screen & System Audio Recording prompt even though FlowDictate processes audio only. After a new ad hoc signed build, its switch can still appear on while macOS no longer accepts the older code identity. In that case remove FlowDictate from **Screen & System Audio Recording**, add the exact `/Applications/FlowDictate.app` again, and fully restart the app. This is separate from **Accessibility** permission.
 
 Do not reset every privacy permission at once. This preserves permissions that still work and keeps the update process as short as possible.

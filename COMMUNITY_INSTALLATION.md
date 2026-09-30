@@ -29,7 +29,7 @@ Gib FlowDictate nur frei, wenn du die ZIP-Datei direkt von einer Person erhalten
 1. Wähle den Aufnahmeordner. Empfohlen wird `Dokumente/Recordings`.
 2. Wähle die Transkription: Auf einem Apple-Silicon-Mac kannst du das lokale Parakeet-Modell herunterladen und ohne API-Key arbeiten. Alternativ trägst du deinen eigenen OpenAI API-Key ein; er wird ausschließlich im macOS-Schlüsselbund gespeichert. Auf Intel-Macs bleibt OpenAI der verfügbare finale Transkriptionsweg.
 3. Erlaube Mikrofonzugriff und Bedienungshilfen.
-4. Erlaube Spracherkennung nur, wenn du die optionale lokale Live Preview verwenden möchtest.
+4. Erlaube Spracherkennung nur, wenn du die optionale lokale Live Preview verwenden möchtest. Wenn die Preview trotz Freigabe `Siri and Dictation are disabled` meldet, aktiviere zusätzlich die macOS-Diktierfunktion unter `Systemeinstellungen → Tastatur → Diktierfunktion`. Die finale Transkription funktioniert auch ohne Live Preview.
 5. Für einzelne Systemaudio-Diktate benötigt FlowDictate die Freigabe unter `Bildschirm- & Systemaudioaufnahme`. Für kombinierte Mikrofon- und Systemaudioaufnahmen auf macOS 14.2 oder neuer verwende den getrennten Schalter `Nur Systemaudioaufnahme`/`System Audio Recording Only`; auf macOS 14.0/14.1 wird der ScreenCaptureKit-Pfad verwendet. FlowDictate nimmt dabei nur Audio und kein Video auf.
 6. Beende und öffne FlowDictate erneut, wenn macOS nach einer neuen Berechtigung dazu auffordert.
 7. Lege die gewünschten Tastenkürzel fest.
@@ -77,8 +77,10 @@ Zuordnung der Funktionen:
 
 - Keine Mikrofonaufnahme: **Mikrofon**
 - Aufnahme startet, aber Tastenkürzel oder Texteinfügung funktionieren nicht: **Bedienungshilfen**
-- Keine lokale Live Preview: **Spracherkennung**
+- Keine lokale Live Preview: **Spracherkennung** prüfen; bei `Siri and Dictation are disabled` zusätzlich `Tastatur → Diktierfunktion` aktivieren.
 - Keine einzelne Systemaudioaufnahme: **Bildschirm- & Systemaudioaufnahme**
 - Keine kombinierte Systemaudiospur: unter macOS 14.2+ **Nur Systemaudioaufnahme**; unter 14.0/14.1 **Bildschirm- & Systemaudioaufnahme**
+
+Bei einer **einzelnen Systemaudioaufnahme** zeigt macOS gegebenenfalls eine Abfrage für Bildschirm- & Systemaudioaufnahme, obwohl FlowDictate nur Audio verarbeitet. Der Schalter kann nach einem neuen ad-hoc signierten Build noch eingeschaltet aussehen, obwohl macOS die alte Code-Identität nicht mehr akzeptiert. Entferne in diesem Fall FlowDictate aus **Bildschirm- & Systemaudioaufnahme**, füge exakt `/Applications/FlowDictate.app` wieder hinzu und starte die App vollständig neu. Dies ist eine andere Freigabe als **Bedienungshilfen**.
 
 Setze nicht alle Datenschutzrechte gleichzeitig zurück. So bleiben bereits funktionierende Freigaben erhalten und der Update-Aufwand bleibt möglichst gering.

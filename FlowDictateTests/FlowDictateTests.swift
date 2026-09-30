@@ -6860,6 +6860,18 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func onboardingMicrophoneActionDoesNotRequestAccessibility() async {
+        let permissions = CountingPermissionManager()
+        let harness = makeCoordinatorHarness(permissionManager: permissions)
+
+        await harness.coordinator.requestMicrophonePermission()
+
+        #expect(permissions.microphoneRequestCount == 1)
+        #expect(permissions.eventPostingRequestCount == 0)
+        #expect(harness.coordinator.microphonePermissionGranted)
+    }
+
+    @MainActor
     @Test func offlineLocalDictationWithAIStyleStillInsertsLocalText() async {
         let harness = makeCoordinatorHarness(
             credentialStore: EmptyCredentialStore(),
@@ -7269,6 +7281,7 @@ struct FlowDictateTests {
     @MainActor
     private func makeCoordinatorHarness(
         credentialStore: any CredentialStoring = MockCredentialStore(),
+        permissionManager: (any PermissionManaging)? = nil,
         transcriptEnhancerFactory: @escaping @MainActor (String) -> any TranscriptEnhancing = {
             OpenAITranscriptEnhancer(apiKey: $0)
         },
@@ -7337,7 +7350,7 @@ struct FlowDictateTests {
             cancelHotKeyRegistrar: cancelHotKeyRegistrar,
             restoreHotKeyRegistrar: restoreHotKeyRegistrar,
             applicationRestarter: applicationRestarter ?? WorkspaceApplicationRestarter(),
-            permissionManager: MockPermissionManager(),
+            permissionManager: permissionManager ?? MockPermissionManager(),
             recorder: recorder,
             systemAudioRecorder: recorder,
             provider: provider,
@@ -8477,6 +8490,26 @@ private struct MockPermissionManager: PermissionManaging {
     var hasMicrophoneAccess: Bool { true }
     var hasEventPostingAccess: Bool { true }
     var speechRecognitionStatus: SpeechPermissionState { .authorized }
+    func requestSpeechRecognitionAccess() async -> SpeechPermissionState { .authorized }
+    func openMicrophoneSettings() {}
+    func openAccessibilitySettings() {}
+    func openSpeechRecognitionSettings() {}
+}
+
+@MainActor
+private final class CountingPermissionManager: PermissionManaging {
+    var microphoneRequestCount = 0
+    var eventPostingRequestCount = 0
+    private var microphoneAuthorized = false
+
+    func ensureMicrophoneAccess() async throws {
+        microphoneRequestCount += 1
+        microphoneAuthorized = true
+    }
+    func ensureEventPostingAccess() throws { eventPostingRequestCount += 1 }
+    var hasMicrophoneAccess: Bool { microphoneAuthorized }
+    var hasEventPostingAccess: Bool { false }
+    var speechRecognitionStatus: SpeechPermissionState { .notDetermined }
     func requestSpeechRecognitionAccess() async -> SpeechPermissionState { .authorized }
     func openMicrophoneSettings() {}
     func openAccessibilitySettings() {}
