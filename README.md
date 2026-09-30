@@ -23,7 +23,7 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 - microphone and Accessibility permission guidance
 - configurable clipboard restoration delay
 - launch at login enabled on first installed start, with a Settings toggle to disable it
-- first-run setup for storage, OpenAI credentials, permissions and hotkeys
+- first-run setup for storage, the selected local or OpenAI transcription provider, permissions and hotkeys
 - user-selected sandboxed recordings folder with `Documents/Recordings` as the recommended default
 - persistent searchable history with audio playback and text export
 - crash recovery and orphaned-recording detection
@@ -74,7 +74,7 @@ Long or oversized recordings are prepared as local M4A segments and transcribed 
 2. Follow the first-run setup assistant.
 3. Confirm `Documents/Recordings` or choose another recordings folder.
 4. Choose local transcription and download the model, or enter the owner's OpenAI API key; the key is stored in macOS Keychain.
-5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for microphone Live Preview. Standalone System Audio uses Screen & System Audio Recording; mixed meetings use System Audio Recording Only on macOS 14.2+ and the ScreenCaptureKit permission on macOS 14.0/14.1.
+5. Grant Microphone and Accessibility permissions. Speech Recognition is optional and only needed for microphone Live Preview; macOS Dictation must also be enabled for that Preview. Standalone System Audio uses Screen & System Audio Recording; mixed meetings use System Audio Recording Only on macOS 14.2+ and the ScreenCaptureKit permission on macOS 14.0/14.1.
 6. Place the cursor in another application and press Option + Space.
 7. Speak, then press Option + Space again to transcribe and insert the text.
 
@@ -118,6 +118,8 @@ For version 4.1.0 the generated files are:
 Prebuilt Community editions are published separately under [GitHub Releases](https://github.com/Hank1210/FlowDictate/releases). Release archives are not committed to the source repository.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history. Phase 4.1 implementation and release gates are described in [ARBEITSPLAN_PHASE_4_1.md](ARBEITSPLAN_PHASE_4_1.md).
+
+The 4.1.0 release description is prepared in [RELEASE_NOTES_4.1.0.md](RELEASE_NOTES_4.1.0.md). It is kept separate from the tested ZIP so documentation-only preparation does not change that archive.
 
 ## Updating an existing installation
 

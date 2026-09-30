@@ -1,8 +1,8 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Aktiver Umsetzungsplan; Capture, Synchronisierung, Track-Processing, Merge sowie UX, History und Retention abgeschlossen, Hardening in Arbeit
-**Stand:** 22. September 2026
+**Status:** Releasevorbereitung; Testphase abgeschlossen, bekannte Gate-Abweichungen in 14.3 dokumentiert, Veröffentlichung nicht autorisiert
+**Stand:** 30. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
 **Anforderungsgrundlage:** `FlowDictate_PRD_Phase_4_1.md`
@@ -489,7 +489,7 @@ Beide Tracks einer mehrsegmentigen Testsession können lokal und über einen Ope
 
 ## 11. Schritt 4.1.5 – Zeitbasierter Transcript-Merge
 
-**Status:** `IN ARBEIT` – persistierte rollenmarkierte Timeline, ehrliche Zeitpräzision, deterministischer Merge, Recovery und Exactly-once-Insertion-Gate sind implementiert; die korrigierte Lesbarkeit bei Überlappung wartet auf manuelle Bestätigung
+**Status:** `ERLEDIGT` – persistierte rollenmarkierte Timeline, ehrliche Zeitpräzision, deterministischer Merge und Recovery implementiert; die chronologische Position eigener Beiträge im realen 120-Minuten-Take vom Nutzer bestätigt, ohne eine allgemeine Erkennungsgenauigkeit zu behaupten
 
 `TimedTranscriptMerger` bildet beide validierten Tracktranskripte über ihre monotone Startanker-, Gap- und Driftinformation auf eine gemeinsame Sessionzeit ab. Sortiert wird deterministisch nach Startzeit, Rolle und Quellindex; echte Überlappungen und identischer Text auf beiden Tracks bleiben erhalten. Eine automatische Zusammenführung wird bei fehlender oder unzuverlässiger Synchronisation abgewiesen. Das Ergebnis wird atomar als `transcription/merged-timeline.json` gespeichert, bevor die Session mit einem rollenmarkierten Finaltext abgeschlossen wird. Ein Mergefehler pausiert recoverbar und erhält beide Trackartefakte.
 
@@ -614,7 +614,7 @@ Ein Nutzer kann Quelle, Consent, Berechtigungen, Aufnahme, Verarbeitung, Teilfeh
 
 ## 13. Schritt 4.1.7 – Performance, Recovery und Langzeittests
 
-**Status:** `IN ARBEIT`
+**Status:** `TESTPHASE ABGESCHLOSSEN MIT ABWEICHUNGEN` – Langläufe, Recovery und Sicherheitsnachweise vorhanden; Nullverlustziel verfehlt und mehrere Performancebudgets unbelegt (14.3)
 
 ### 13.1 Signposts und inhaltsfreie Diagnostik
 
@@ -782,7 +782,7 @@ Alle Pflichtszenarien sind bestanden oder mit freigegebener, öffentlich dokumen
 
 ## 14. Schritt 4.1.8 – Dokumentation, Packaging und Release-Gate
 
-**Status:** `OFFEN`
+**Status:** `RELEASEVORBEREITUNG` – Testphase auf Nutzerwunsch abgeschlossen; Veröffentlichung separat freizugeben
 
 ### 14.1 Dokumentation
 
@@ -830,23 +830,27 @@ Dokumentieren:
 
 **Sichtbestätigung:** Der Nutzer bestätigte nach Neustart genau dieses korrigierten Test-Builds, dass `RECORDING` im Standard-Overlay nicht mehr umbricht und die Darstellung gut aussieht. Das visuelle Gate ist damit bestanden. Der aus dem alten Stand erzeugte ZIP-Kandidat bleibt ausgesondert; nur eine danach aus dem korrigierten Stand neu erzeugte und entpackt geprüfte ZIP kommt für den Erstnutzer-Test infrage.
 
-### 14.3 Finale Gates
+### 14.3 Finale Gate-Bewertung für 4.1.0/32
 
-- [ ] vollständige Unit- und Integrationstests grün,
-- [ ] Debug- und Release-Build grün,
-- [ ] Single-Mic und Single-Systemaudio regressionsfrei,
-- [ ] Local- und OpenAI-Mixed-Pfad bestanden,
-- [ ] Offline-Mixed-Pfad ohne Netzwerkrequest nachgewiesen,
-- [ ] 60- und 120-Minuten-Test mit exakt der ZIP-App bestanden,
-- [ ] Sync-, Drift-, Gap- und Clippingziele nachgewiesen,
-- [ ] Mic- und Systemausfall jeweils sicher degradiert,
-- [ ] Force-Quit plus Resume ohne Wiederholung erfolgreicher Segmente,
-- [ ] Consent, Permission und sichtbarer Status manuell abgenommen,
-- [ ] Migration Schema 6 → 7 und Backup geprüft,
-- [ ] Löschung aller Sessionartefakte ohne Fremddatenverlust geprüft,
-- [ ] Architekturen und Signatur der ZIP verifiziert,
-- [ ] SHA-256 erzeugt und dokumentiert,
-- [ ] öffentliche Dokumentation entspricht dem getesteten Verhalten.
+Die Testphase ist nach Bestätigung des Nutzers abgeschlossen. Die folgende Bewertung unterscheidet Nachweis, bekannte Abweichung und noch ausstehende **Releaseentscheidung**; nicht durchgeführte Tests werden nicht als bestanden gezählt.
+
+| Gate | Bewertung |
+|---|---|
+| Vollständige Unit-/Integrationstests | Bestanden: isolierte serielle macOS-Suite 222/222, keine Fehler, Skips oder Runtime-Warnungen. |
+| Debug- und Universal-Release-Build | Bestanden; Release-App enthält `arm64 x86_64`. |
+| Single-Mic, Single-Systemaudio und Mixed-Grundpfad | Nutzerbestätigte Realtests; Build 32 besteht auch Mixed mit nur Mikrofonsprachsignal. |
+| Local-/OpenAI-Mixed-Pfad | Lokal real und beide Provider automatisiert einschließlich kontrollierter OpenAI-HTTP-Uploads geprüft; ein separater realer OpenAI-Mixed-Lauf exakt mit Build 32 ist nicht dokumentiert. Kein weiterer Test gewünscht, Restrisiko für Releaseentscheidung. |
+| Fully-offline-Mixed ohne Netzwerk | Reale Offline-/Cloud-Gegenläufe mit Debug-Build und automatisierte Provider-Policy-/HTTP-Tests bestanden. |
+| 60/120 Minuten mit exakt der Build-32-ZIP | Nicht wiederholt, auf ausdrücklichen Nutzerwunsch. Frühere reale 60-/120-Minuten-Läufe sind vorhanden; die Abweichung bleibt vor Veröffentlichung als solche zu akzeptieren. |
+| Sync, Drift, Gaps, Clipping und Performancebudgets | Qualitätsmetriken und Recovery nachgewiesen; Null-Bufferverlust verfehlt, mehrere Drift-/p95-/Main-Actor-Ziele nicht gemessen. Kurze Systemaudio-Lücken öffentlich dokumentiert. Kein weiterer Test gewünscht; Restrisiko vor Veröffentlichung entscheiden. |
+| Mic-/Systemausfall, Force Quit und Resume | Deterministische Regression und realer Force-Quit-/Resume-Lauf bestanden; erfolgreiche Segmente werden nicht wiederholt. |
+| Consent, Permissions und sichtbarer Status | In Setup-, Overlay- und Mixed-Realtests abgenommen; ad-hoc-Builds können macOS-Freigaben nach Update erneut benötigen. |
+| Migration Schema 6 → 7 und Backup | Automatisiert geprüft; bestehende Einzelspur-History blieb bei den Installations-/Update-Tests erhalten. |
+| Sessionlöschung ohne Fremddatenverlust | Manuelle Löschabnahme und pfadbegrenzte Regression bestanden. |
+| ZIP-Architekturen, Signatur, SHA-256 und Privatausschluss | Build 32 aus Commit `7804e30` verifiziert; SHA-256 `c18e5d29d5cafcfcabfa877e039bd89d39f2b273ffa79db1e3d56edbe73adc1c`. Die installierte App stimmt in ausführbarer Datei, Info.plist, Assets und Signaturressourcen byteweise mit der entpackten ZIP-App überein. |
+| Öffentliche Dokumentation und Release Notes | README, Privacy, Installationshinweise und Changelog beschreiben Verhalten und bekannte Lücken; `RELEASE_NOTES_4.1.0.md` vorbereitet. |
+
+Ein separater mehrtägiger Praxistest *genau* von Build 32 wurde nicht mit Dauer und Ergebnis protokolliert. Der Nutzer beendet die Testphase dennoch; dies ist eine Abweichung vom früheren Soll, keine nachträglich bestandene Prüfung. Vor Publikation sind diese Restrisiken bewusst freizugeben. Änderungen an der gebündelten App oder den ZIP-Dateien würden die exakte Artefaktabnahme erneuern.
 
 ### 14.4 Exit
 
@@ -911,4 +915,4 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Press & Hold, Cancel, Deferred Insertion, Restart-Recovery einschließlich `Continue Processing`, getrennte Originalspurwiedergabe, bestätigtes Sessionlöschen, Partial-/Retry, Warnzustände für Trackverlust und Clipping sowie Retention und Archivierung sind bestanden. Schritt 4.1.7 läuft: Die inhaltsfreien Messpunkte einschließlich typisierter Trackverlust-Herkunft, der Zehn-Sessions-Test, das Stop-Rennen und die vollständige Status-Recovery-Matrix sind implementiert. Der bereits vorhandene Zwei-Track-Long-Form-Test prüft Restart nach erfolgreichen Segmenten mit lokalen und OpenAI-Providern; die Low-Storage-Regression schützt erfolgreiche Segmente während Verarbeitung und Resume. Vor Mixed Capture gilt nur ein kleines Sicherheitsminimum; unter 500 MB wird gewarnt statt pauschal blockiert, Writerfehler erhalten eine eigene Warnung und persistierte Kategorie, und Settings zeigen eine erste Größenordnung. Die Provider-Policy-Matrix ist an der Resolver-Grenze und mit lokal abgefangenen HTTP-Uploads automatisiert geprüft; synthetische Multipart-Bodys enthalten nur die jeweils ausgewählte Audiodatei. Bei einer beschädigten oder fehlenden Originalspur nach Restart bleibt die intakte Gegenspur automatisiert recoverbar. Reale Netzwerk-Gegenläufe mit Offline-Null-Traffic und positiver Cloud-Kontrolle sowie der isolierte Real-Low-Disk-Lauf sind für den Debug-Build bestanden. Die realen 30-, 60- und 120-Minuten-Aufnahmen sind durchgeführt; alle haben dokumentierte Qualitätsabweichungen und erfüllen das Null-Bufferverlust-Ziel nicht. Die 120-Minuten-Session wurde aus den erhaltenen Originalen erneut verarbeitet und mit 22.516 ausschließlich wortpräzisen Timeline-Einträgen abgeschlossen; der Nutzer bestätigte die passende Position seiner Beiträge zwischen den Systemaudio-Blöcken. Die sichtbare chronologische Reihenfolge dieses Takes ist damit abgenommen, nicht die allgemeine Erkennungsgenauigkeit. Eine weitere lange Aufnahme ist derzeit nicht vorgesehen. Offen bleiben Recovery-, Performance- und die separate Release-Abnahme mit der finalen ZIP-App. Bis dahin kein Releasekandidat.
+Die Testphase wurde auf Wunsch des Nutzers nach dem real bestätigten Silent-Track-Fix beendet. Der Build-32-Kandidat und die noch nicht als Tests bestandenen Gate-Abweichungen sind in 14.3 bewertet. Nächster Schritt ist die bewusste Releaseentscheidung über diese dokumentierten Restrisiken; erst ein separater Auftrag autorisiert Merge nach `main`, Tag, Push, GitHub Release und Asset-Upload. Bis dahin bleibt die geprüfte ZIP unverändert.
