@@ -2330,6 +2330,134 @@ struct FlowDictateTests {
     }
 
     @MainActor
+    @Test func shortMeetingWithOnlyMicrophoneSpeechSkipsSilentSystemTrack() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSilentShortTrack-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeLongFormTrackTranscriptionFixture(
+            rootURL: root,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: TranscriptionProviderRegistry.local.capabilities.engineID,
+            modelID: "parakeet-tdt-0.6b-v3-coreml",
+            privacyMode: .offline
+        )
+        let microphoneURL = fixture.paths.sessionDirectory.appendingPathComponent(
+            "tracks/microphone.caf"
+        )
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 16_000, channels: 1
+        ))
+        do {
+            let file = try AVAudioFile(forWriting: microphoneURL, settings: format.settings)
+            let buffer = try #require(AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: 80_000
+            ))
+            buffer.frameLength = buffer.frameCapacity
+            let samples = try #require(buffer.floatChannelData?[0])
+            for frame in 0..<Int(buffer.frameLength) { samples[frame] = 0.05 }
+            try file.write(from: buffer)
+        }
+
+        let microphone = SequenceTranscriptionProvider(
+            texts: ["Only the microphone has speech."],
+            providerID: TranscriptionProviderID.local.rawValue,
+            modelID: fixture.session.modelID
+        )
+        let systemAudio = SequenceTranscriptionProvider(texts: ["Should not be requested."])
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { request in
+            request.role == .localSpeaker ? microphone : systemAudio
+        }
+        let transcribed = try await TrackTranscriptionRunner(
+            store: fixture.store, executor: executor
+        ).run(sessionID: fixture.session.id)
+
+        #expect(transcribed.status == .merging)
+        #expect(transcribed.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(microphone.requestCount == 1)
+        #expect(systemAudio.requestCount == 0)
+        let systemTrack = try #require(
+            transcribed.tracks.first { $0.role == .systemAudio }
+        )
+        let systemTranscriptPath = try #require(systemTrack.transcriptRelativePath)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let systemTranscript = try decoder.decode(
+            MeetingTrackTranscript.self,
+            from: Data(contentsOf: fixture.paths.sessionDirectory.appendingPathComponent(
+                systemTranscriptPath
+            ))
+        )
+        #expect(systemTranscript.isSilent == true)
+        #expect(systemTranscript.transcript.isEmpty)
+
+        let completed = try await MeetingTranscriptMergeRunner(store: fixture.store)
+            .run(sessionID: fixture.session.id)
+        #expect(completed.status == .completed)
+        #expect(completed.finalTranscript == "[You] Only the microphone has speech.")
+        #expect(FileManager.default.fileExists(atPath: microphoneURL.path))
+        let systemAudioPath = try #require(systemTrack.audioRelativePath)
+        #expect(FileManager.default.fileExists(atPath: fixture.paths.sessionDirectory
+            .appendingPathComponent(systemAudioPath).path))
+    }
+
+    @MainActor
+    @Test func retryOfPreviouslyFailedSilentTrackKeepsMicrophoneTranscript() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowDictateSilentTrackRetry-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await makeLongFormTrackTranscriptionFixture(
+            rootURL: root,
+            providerID: TranscriptionProviderID.local.rawValue,
+            engineID: TranscriptionProviderRegistry.local.capabilities.engineID,
+            modelID: "parakeet-tdt-0.6b-v3-coreml",
+            privacyMode: .offline
+        )
+        var session = fixture.session
+        session.status = .partial
+        let microphoneIndex = try #require(session.tracks.firstIndex { $0.role == .localSpeaker })
+        let systemIndex = try #require(session.tracks.firstIndex { $0.role == .systemAudio })
+        session.tracks[microphoneIndex].status = .transcribed
+        session.tracks[microphoneIndex].transcriptionSessionID = UUID()
+        session.tracks[microphoneIndex].transcriptRelativePath =
+            "transcription/localSpeaker-transcript.json"
+        session.tracks[systemIndex].status = .failed
+        session.tracks[systemIndex].errorCategory = .providerPermanent
+        session.tracks[systemIndex].errorMessage = "The transcription service returned no text."
+        session.lastErrorCategory = .providerPermanent
+        session.lastErrorMessage = session.tracks[systemIndex].errorMessage
+        try await fixture.store.save(session)
+
+        let microphoneTranscript = makeMeetingTrackTranscript(
+            session: session,
+            role: .localSpeaker,
+            text: "Previously transcribed microphone speech.",
+            entries: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let transcriptURL = fixture.paths.sessionDirectory.appendingPathComponent(
+            try #require(session.tracks[microphoneIndex].transcriptRelativePath)
+        )
+        let originalTranscriptData = try encoder.encode(microphoneTranscript)
+        try originalTranscriptData.write(to: transcriptURL)
+
+        let provider = SequenceTranscriptionProvider(texts: ["Should not be requested."])
+        let executor = LongFormTrackTranscriptionExecutor(maximumAttempts: 1) { _ in provider }
+        let transcribed = try await TrackTranscriptionRunner(
+            store: fixture.store, executor: executor
+        ).run(sessionID: session.id)
+        #expect(transcribed.status == .merging)
+        #expect(transcribed.tracks.allSatisfy { $0.status == .transcribed })
+        #expect(provider.requestCount == 0)
+        #expect(try Data(contentsOf: transcriptURL) == originalTranscriptData)
+
+        let completed = try await MeetingTranscriptMergeRunner(store: fixture.store)
+            .run(sessionID: session.id)
+        #expect(completed.status == .completed)
+        #expect(completed.finalTranscript == "[You] Previously transcribed microphone speech.")
+    }
+
+    @MainActor
     @Test func longFormTrackExecutorBlocksCloudBeforeResolvingProviderWhenOffline() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FlowDictateTrackPrivacy-\(UUID())", isDirectory: true)
@@ -2432,7 +2560,8 @@ struct FlowDictateTests {
                 providerID: TranscriptionProviderID.openAI.rawValue,
                 engineID: TranscriptionProviderRegistry.openAI.capabilities.engineID,
                 modelID: "gpt-4o-mini-transcribe",
-                privacyMode: privacyMode
+                privacyMode: privacyMode,
+                sampleAmplitude: 0.05
             )
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [MeetingPolicyOpenAIURLProtocol.self]
@@ -7428,7 +7557,8 @@ struct FlowDictateTests {
         providerID: String,
         engineID: String,
         modelID: String,
-        privacyMode: PrivacyMode
+        privacyMode: PrivacyMode,
+        sampleAmplitude: Float = 0
     ) async throws -> (
         store: MeetingSessionStore,
         session: MixedRecordingSession,
@@ -7458,6 +7588,12 @@ struct FlowDictateTests {
                     frameCapacity: frameCount
                 ))
                 buffer.frameLength = frameCount
+                if sampleAmplitude != 0 {
+                    let samples = try #require(buffer.floatChannelData?[0])
+                    for frame in 0..<Int(frameCount) {
+                        samples[frame] = sampleAmplitude
+                    }
+                }
                 try file.write(from: buffer)
             }
             session.tracks[index].durationMilliseconds = 5_000

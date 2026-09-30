@@ -196,6 +196,13 @@ nonisolated final class SilenceBoundaryDetector: @unchecked Sendable {
 /// segment when every original PCM sample is below the capture silence floor.
 /// Checking the original (not the lossy working copy) keeps this conservative.
 nonisolated final class SilentAudioSegmentDetector: @unchecked Sendable {
+    func isSilent(in url: URL) async throws -> Bool {
+        try await Task.detached(priority: .utility) {
+            let file = try AVAudioFile(forReading: url)
+            return try Self.isSilent(file, from: 0, to: file.length)
+        }.value
+    }
+
     func isSilent(in url: URL, segment: TranscriptionSegment) async throws -> Bool {
         try await Task.detached(priority: .utility) {
             let file = try AVAudioFile(forReading: url)
@@ -210,29 +217,38 @@ nonisolated final class SilentAudioSegmentDetector: @unchecked Sendable {
             let endFrame = min(max(AVAudioFramePosition(
                 Double(segment.endMilliseconds) * format.sampleRate / 1_000
             ), startFrame), file.length)
-            guard endFrame > startFrame,
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32_768) else {
-                return false
-            }
-            file.framePosition = startFrame
-            while file.framePosition < endFrame {
-                try Task.checkCancellation()
-                let remaining = endFrame - file.framePosition
-                try file.read(
-                    into: buffer,
-                    frameCount: AVAudioFrameCount(min(Int64(buffer.frameCapacity), remaining))
-                )
-                guard buffer.frameLength > 0,
-                      let channels = buffer.floatChannelData else { return false }
-                for channel in 0..<Int(format.channelCount) {
-                    for frame in 0..<Int(buffer.frameLength) {
-                        if abs(channels[channel][frame]) >= PCMTrackMetrics.silenceThreshold {
-                            return false
-                        }
+            return try Self.isSilent(file, from: startFrame, to: endFrame)
+        }.value
+    }
+
+    private static func isSilent(
+        _ file: AVAudioFile,
+        from startFrame: AVAudioFramePosition,
+        to endFrame: AVAudioFramePosition
+    ) throws -> Bool {
+        let format = file.processingFormat
+        guard endFrame > startFrame,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32_768) else {
+            return false
+        }
+        file.framePosition = startFrame
+        while file.framePosition < endFrame {
+            try Task.checkCancellation()
+            let remaining = endFrame - file.framePosition
+            try file.read(
+                into: buffer,
+                frameCount: AVAudioFrameCount(min(Int64(buffer.frameCapacity), remaining))
+            )
+            guard buffer.frameLength > 0,
+                  let channels = buffer.floatChannelData else { return false }
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<Int(buffer.frameLength) {
+                    if abs(channels[channel][frame]) >= PCMTrackMetrics.silenceThreshold {
+                        return false
                     }
                 }
             }
-            return true
-        }.value
+        }
+        return true
     }
 }

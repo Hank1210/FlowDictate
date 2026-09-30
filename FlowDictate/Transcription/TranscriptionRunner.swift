@@ -68,6 +68,24 @@ final class TranscriptionRunner {
             return result
         }
         var updated = record
+        if allowsEmptyTranscript,
+           (try? await SilentAudioSegmentDetector().isSilent(in: audioURL)) == true {
+            try Task.checkCancellation()
+            updated.status = .transcribed
+            updated.originalTranscript = ""
+            updated.finalText = ""
+            updated.transcriptionSegmentCount = 1
+            updated.completedTranscriptionSegmentCount = 1
+            updated.errorCategory = nil
+            updated.errorCode = nil
+            updated.errorMessage = nil
+            updated.updatedAt = Date()
+            try await store(updated, persistToDisk: !deferSuccessfulPersistence)
+            FlowLogger.transcription.info(
+                "Verified silent short meeting track; provider request skipped"
+            )
+            return updated
+        }
         let maximumAttempts = max(maximumAttempts, 1)
 
         for attempt in 1...maximumAttempts {

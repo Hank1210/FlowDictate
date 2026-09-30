@@ -20,6 +20,7 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ### Fixed
 
+- A short Microphone + System Audio meeting now treats a verified silent track as having no speech, so microphone-only speech can complete without a false partial-transcription error. Existing partial meetings can retry the silent track without repeating successful microphone work.
 - The onboarding microphone button now names and requests only Microphone permission. The optional Live Preview setup explains that macOS Dictation may also need to be enabled even when Speech Recognition permission is allowed.
 - Onboarding now accepts the selected transcription provider alone: an installed local model needs no OpenAI API key, and an OpenAI setup needs only its configured key. The final Ready screen uses the same provider-aware check.
 - Local model installation now creates its destination before checking available storage, so the download starts for a new macOS user without an existing FlowDictate Application Support folder.
