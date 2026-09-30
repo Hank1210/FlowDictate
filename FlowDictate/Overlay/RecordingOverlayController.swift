@@ -162,7 +162,7 @@ final class RecordingOverlayController: RecordingOverlayPresenting {
     private var overlayPosition: OverlayPosition = .bottomTrailing
     private var currentScreen: NSScreen?
     private static let successHideQueue = DispatchQueue(
-        label: "de.euler.FlowDictate.success-overlay-hide",
+        label: "de.mcc.FlowDictate.success-overlay-hide",
         qos: .userInitiated
     )
 

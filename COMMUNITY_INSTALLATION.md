@@ -40,6 +40,8 @@ Für `Microphone + System Audio` musst du die Quelle ausdrücklich auswählen un
 
 ## Aktualisierung
 
+**Wichtig beim Wechsel von einer älteren Installation:** FlowDictate 4.1.0 verwendet `de.mcc.FlowDictate` statt `de.euler.FlowDictate`. macOS behandelt das als neue App. Einstellungen, History, lokales Modell, Aufnahmeordner-Freigabe und API-Key werden nicht automatisch übernommen. Sichere oder exportiere benötigte alte History, bevor du die bisherige App ersetzt, und lösche den alten App-Container nicht vorsorglich. Dateien im separat gewählten Aufnahmeordner werden durch den Identitätswechsel nicht gelöscht; wähle diesen Ordner bei der erneuten Einrichtung wieder aus.
+
 Community-Ausgaben sind ad hoc signiert. Da sich ihre Code-Identität mit einem neuen Build ändern kann, behandelt macOS eine Aktualisierung gelegentlich wie eine neue App. Dadurch können insbesondere **Bedienungshilfen** sowie **Bildschirm- & Systemaudioaufnahme** erneut freigegeben werden müssen. Das lässt sich bei einer kostenlosen, nicht notarisierten Community-Ausgabe nicht zuverlässig vermeiden.
 
 Verwende zum Testen immer genau die Community-ZIP, die später veröffentlicht werden soll. Ein separat gebauter oder anders signierter Test-Build ist nicht identisch mit dem Release-Artefakt.
@@ -50,17 +52,17 @@ Verwende zum Testen immer genau die Community-ZIP, die später veröffentlicht w
 2. Entpacke die neue Community-ZIP.
 3. Ziehe die neue `FlowDictate.app` nach `Programme` und bestätige `Ersetzen`. Behalte den Namen `FlowDictate.app` und den Speicherort `/Applications/FlowDictate.app` bei.
 4. Öffne FlowDictate wie bei der Erstinstallation mit Rechtsklick und `Öffnen`.
-5. Teste zunächst Mikrofonaufnahme, Texteinfügung und – falls verwendet – Systemaudio. Lösche funktionierende Berechtigungen nicht vorsorglich.
+5. Nach dem Wechsel der Bundle-ID durchlaufe die Ersteinrichtung erneut: Aufnahmeordner wählen, lokales Modell laden oder eigenen API-Key neu eingeben und Berechtigungen erteilen. Teste dann Mikrofonaufnahme, Texteinfügung und – falls verwendet – Systemaudio. Lösche funktionierende Berechtigungen nicht vorsorglich.
 6. Erneuere nur die Berechtigung, deren Funktion tatsächlich nicht mehr arbeitet. Folge dazu dem Abschnitt **Berechtigungen reparieren** weiter unten.
 7. Beende und starte FlowDictate nach Änderungen an den Berechtigungen einmal vollständig neu.
 
-Bei der ersten Speicherung des neuen History-Schemas legt FlowDictate einmalig `dictations-pre-4.1.json` im lokalen History-Ordner an. Bestehende Einzelspuraufnahmen bleiben Einzelspuraufnahmen; der gewählte Aufnahmeordner wird nicht verschoben.
+Der Identitätswechsel importiert die History des alten App-Containers nicht. Der separat gewählte Aufnahmeordner wird weder verschoben noch gelöscht; die neue App benötigt aber eine neue Ordnerfreigabe. Lösche den alten Container nicht, solange du seine History noch benötigst.
 
 Live Preview ist optional und nutzt ausschließlich Apples lokale Spracherkennung. Lokale finale Transkription, gesprochene Korrekturen, Formatierung und das persönliche Wörterbuch arbeiten auf dem Mac. Im Modus `Fully offline` blockiert FlowDictate Transkriptions-, Enhancement- und Update-Netzwerkzugriffe. Nur ein bewusst gewählter Cloudpfad sendet Audio oder Text an OpenAI; ein lokaler Fehler löst niemals automatisch einen Cloud-Upload aus.
 
 ### Schlüsselbund nach einem Update
 
-macOS kann beim ersten Start einer neuen Community-Ausgabe einmal nach dem Anmeldepasswort fragen, weil sich die ad-hoc Signatur geändert hat. Falls die Abfrage wiederholt erscheint, öffne `Settings → Transcription`, entferne dort den bisherigen API-Key und speichere ihn anschließend erneut. Dadurch wird der Schlüsselbund-Eintrag für die aktuell installierte Ausgabe neu angelegt. FlowDictate lädt ihn danach nur einmal pro App-Sitzung.
+Beim Wechsel von `de.euler.FlowDictate` zu `de.mcc.FlowDictate` ist der alte API-Key für die neue App nicht eingerichtet; gib deinen eigenen Key bei Bedarf erneut ein. Bei späteren Updates innerhalb derselben Bundle-ID kann macOS wegen der geänderten ad-hoc Signatur einmal nach dem Anmeldepasswort fragen. Falls die Abfrage wiederholt erscheint, öffne `Settings → Transcription`, entferne dort den bisherigen API-Key und speichere ihn anschließend erneut. Dadurch wird der Schlüsselbund-Eintrag für die aktuell installierte Ausgabe neu angelegt. FlowDictate lädt ihn danach nur einmal pro App-Sitzung.
 
 ### Berechtigungen reparieren
 

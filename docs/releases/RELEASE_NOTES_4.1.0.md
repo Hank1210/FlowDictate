@@ -22,6 +22,8 @@ The 30-, 60- and 120-minute mixed tests preserved both original tracks but obser
 
 ## Installation and privacy
 
+Version 4.1.0 uses the new bundle identifier `de.mcc.FlowDictate` instead of `de.euler.FlowDictate`. This is a fresh macOS app identity: complete setup and permissions again, reselect the recordings folder, and reinstall the local model or re-enter your own OpenAI key. The old app's settings and History are not imported automatically; back up or export any old History you need before replacing it. Existing recordings in the separately selected folder are not deleted by the identifier change.
+
 FlowDictate 4.1.0 supports macOS 14 or later. Local final transcription requires Apple Silicon and an approximately 650 MB model download; OpenAI transcription is available with the user's own API key. Mixed originals alone can require roughly 1.4 GB per hour, plus working files. This Community build is ad hoc signed and not notarized, so macOS may require manual first-launch approval or renewed permissions after an update. Follow the installation guide included in the ZIP.
 
 No video is captured or saved. Local transcription does not upload audio; the explicitly selected OpenAI path sends the selected audio to OpenAI when the privacy mode permits it. Meeting recording consent remains the user's responsibility.

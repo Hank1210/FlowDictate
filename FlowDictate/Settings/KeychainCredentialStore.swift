@@ -25,7 +25,7 @@ struct KeychainCredentialStore: CredentialStoring {
     private let service: String
     private let account = "openai-api-key"
 
-    init(service: String = Bundle.main.bundleIdentifier ?? "de.euler.FlowDictate") {
+    init(service: String = Bundle.main.bundleIdentifier ?? "de.mcc.FlowDictate") {
         self.service = service
     }
 

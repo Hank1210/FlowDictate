@@ -143,7 +143,7 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
             )
             self.sink = sink
 
-            let aggregateUID = "de.euler.FlowDictate.mixed-system-audio.\(UUID().uuidString)"
+            let aggregateUID = "de.mcc.FlowDictate.mixed-system-audio.\(UUID().uuidString)"
             self.aggregateUID = aggregateUID
             let aggregateDescription: [String: Any] = [
                 kAudioAggregateDeviceNameKey: "FlowDictate Mixed System Audio",
@@ -166,7 +166,7 @@ actor CoreAudioSystemTrackRecorder: MixedTrackRecording {
             )
 
             let callbackQueue = DispatchQueue(
-                label: "de.euler.FlowDictate.mixed-system-audio",
+                label: "de.mcc.FlowDictate.mixed-system-audio",
                 qos: .userInitiated
             )
             self.callbackQueue = callbackQueue

@@ -9,7 +9,7 @@ actor DictationJobStore {
     private let directory: URL
     private let sequenceURL: URL
     private let fileManager: FileManager
-    private let fileIO = SerialFileIO(label: "de.euler.FlowDictate.job-file-io", qos: .userInitiated)
+    private let fileIO = SerialFileIO(label: "de.mcc.FlowDictate.job-file-io", qos: .userInitiated)
 
     init(directory: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager

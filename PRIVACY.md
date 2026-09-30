@@ -5,6 +5,7 @@ FlowDictate does not include analytics, advertising, telemetry or a developer-op
 ## Data stored on the Mac
 
 - The OpenAI API key is stored in the user's macOS Keychain.
+- The bundle identifier `de.mcc.FlowDictate` identifies the app to macOS; it is not a remote address and does not give the developer access to the user's Keychain. FlowDictate has no developer-operated credential service.
 - Recordings are stored in the folder selected during setup. The recommended default is `Documents/Recordings`.
 - Dictation history and recovery metadata remain in the app's local Application Support container.
 - Ordinary resumable long-form session manifests and temporary audio segments remain in Application Support. A temporary segment is deleted after successful transcription; the manifest is deleted after the complete transcript is safely stored.

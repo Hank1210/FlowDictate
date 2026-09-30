@@ -40,6 +40,8 @@ For `Microphone + System Audio`, explicitly select that source and confirm the s
 
 ## Updating
 
+**Important when moving from an older installation:** FlowDictate 4.1.0 uses `de.mcc.FlowDictate` instead of `de.euler.FlowDictate`. macOS treats it as a new app. Settings, History, the local model, recordings-folder permission and API key are not imported automatically. Back up or export any old History you need before replacing the previous app, and do not delete its app container preemptively. Files in the separately selected recordings folder are not deleted by this identity change; select that folder again during setup.
+
 Community editions are signed ad hoc. Because their code identity can change with a new build, macOS may occasionally treat an update as a new app. In particular, **Accessibility** and **Screen & System Audio Recording** may need to be granted again. This cannot be avoided reliably for a free, non-notarized Community edition.
 
 Always test the exact Community ZIP that will be published. A separately built or differently signed test build is not identical to the release artifact.
@@ -50,17 +52,17 @@ Always test the exact Community ZIP that will be published. A separately built o
 2. Extract the new Community ZIP.
 3. Drag the new `FlowDictate.app` into `Applications` and confirm `Replace`. Keep the name `FlowDictate.app` and the location `/Applications/FlowDictate.app` unchanged.
 4. Open FlowDictate as described for the initial installation by right-clicking it and selecting `Open`.
-5. First test microphone recording, text insertion, and system audio if you use it. Do not remove permissions that are still working.
+5. After the bundle-ID change, complete setup again: choose the recordings folder, download the local model or re-enter your own API key, and grant permissions. Then test microphone recording, text insertion, and system audio if you use it. Do not remove permissions that are still working.
 6. Renew only the permission for the feature that is actually failing. Follow **Repairing permissions** below.
 7. After changing permissions, quit FlowDictate completely and open it again.
 
-Before writing the new History schema for the first time, FlowDictate creates a one-time `dictations-pre-4.1.json` backup in the local History folder. Existing single-track entries remain single-track; the selected recordings folder is not moved.
+The identity change does not import History from the old app container. The separately selected recordings folder is neither moved nor deleted, but the new app needs fresh permission for it. Do not delete the old container while you still need its History.
 
 Live Preview is optional and requires Apple's on-device speech recognition. Local final transcription, spoken corrections, formatting and the personal dictionary run on the Mac. `Fully offline` blocks transcription, enhancement and update-check network access. Only an explicitly selected cloud path sends audio or text to OpenAI; a local failure never triggers an automatic cloud upload.
 
 ### Keychain access after an update
 
-The first launch of a new Community edition may ask for your macOS login password once because its ad hoc signature has changed. If the prompt keeps appearing, open `Settings → Transcription`, remove the existing API key, and then save it again. This recreates the Keychain entry for the currently installed edition. FlowDictate will then load it only once per app session.
+When moving from `de.euler.FlowDictate` to `de.mcc.FlowDictate`, the old API key is not configured for the new app; enter your own key again if needed. For later updates with the same bundle ID, macOS may ask for your login password once because the ad hoc signature has changed. If the prompt keeps appearing, open `Settings → Transcription`, remove the existing API key, and then save it again. This recreates the Keychain entry for the currently installed edition. FlowDictate will then load it only once per app session.
 
 ### Repairing permissions
 

@@ -14,6 +14,7 @@ All notable user-facing changes to FlowDictate are documented here.
 
 ### Changed
 
+- The app's bundle identifier changes to `de.mcc.FlowDictate`. macOS treats this as a new app; older settings, History, the local model, folder permission and Keychain entry are not imported automatically. Existing files in a separately selected recordings folder are not deleted.
 - Mixed recording uses the audio-only Core Audio process tap on macOS 14.2+ and a ScreenCaptureKit audio-only compatibility path on macOS 14.0/14.1. Neither path records video.
 - A silent long-form segment can complete without aborting the remaining track; available speech before and after it remains recoverable.
 - Long-form local word timings are retained across segments so completed meeting transcripts can be placed chronologically rather than as whole-track blocks.

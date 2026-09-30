@@ -1,7 +1,7 @@
 # FlowDictate – Arbeitsplan Phase 4.1
 
 **Phase:** 4.1 – Synchronized Meeting Capture
-**Status:** Releasevorbereitung; Testphase abgeschlossen, bekannte Gate-Abweichungen in 14.3 dokumentiert, Veröffentlichung nicht autorisiert
+**Status:** Releasevorbereitung; Build-32-Testphase abgeschlossen, Build-33-Identitätswechsel separat zu prüfen, Veröffentlichung nicht autorisiert
 **Stand:** 30. September 2026
 **Ausgangsbasis:** FlowDictate 4.0.2, Build 27, Tag `v4.0.2`, Release-Commit `5bfc957`
 **Arbeitsbranch:** `codex/phase-4-1-prep`, Basis-Commit `5095b38`
@@ -830,9 +830,9 @@ Dokumentieren:
 
 **Sichtbestätigung:** Der Nutzer bestätigte nach Neustart genau dieses korrigierten Test-Builds, dass `RECORDING` im Standard-Overlay nicht mehr umbricht und die Darstellung gut aussieht. Das visuelle Gate ist damit bestanden. Der aus dem alten Stand erzeugte ZIP-Kandidat bleibt ausgesondert; nur eine danach aus dem korrigierten Stand neu erzeugte und entpackt geprüfte ZIP kommt für den Erstnutzer-Test infrage.
 
-### 14.3 Finale Gate-Bewertung für 4.1.0/32
+### 14.3 Historische Gate-Bewertung für 4.1.0/32
 
-Die Testphase ist nach Bestätigung des Nutzers abgeschlossen. Die folgende Bewertung unterscheidet Nachweis, bekannte Abweichung und noch ausstehende **Releaseentscheidung**; nicht durchgeführte Tests werden nicht als bestanden gezählt.
+Die Testphase für Build 32 ist nach Bestätigung des Nutzers abgeschlossen. Die folgende Bewertung unterscheidet Nachweis, bekannte Abweichung und noch ausstehende **Releaseentscheidung**; nicht durchgeführte Tests werden nicht als bestanden gezählt. Nach dem Bundle-ID-Wechsel ist Build 32 nicht mehr der aktuelle Releasekandidat.
 
 | Gate | Bewertung |
 |---|---|
@@ -851,6 +851,8 @@ Die Testphase ist nach Bestätigung des Nutzers abgeschlossen. Die folgende Bewe
 | Öffentliche Dokumentation und Release Notes | README, Privacy, Installationshinweise und Changelog beschreiben Verhalten und bekannte Lücken; `docs/releases/RELEASE_NOTES_4.1.0.md` vorbereitet. |
 
 Ein separater mehrtägiger Praxistest *genau* von Build 32 wurde nicht mit Dauer und Ergebnis protokolliert. Der Nutzer beendet die Testphase dennoch; dies ist eine Abweichung vom früheren Soll, keine nachträglich bestandene Prüfung. Vor Publikation sind diese Restrisiken bewusst freizugeben. Änderungen an der gebündelten App oder den ZIP-Dateien würden die exakte Artefaktabnahme erneuern.
+
+**Nachtrag Bundle-ID-Wechsel, Build 33:** Die App-ID wurde vor Veröffentlichung bewusst von `de.euler.FlowDictate` auf `de.mcc.FlowDictate` geändert. Die alte ZIP bleibt lokal als Rückkehrpunkt erhalten; der neue Universal-Kandidat hat SHA-256 `e22b1b4d73e0cea50986569bc14bc16ea0dd0be37a48b4e7b09ece12906b5002`. Die entpackte App meldet Version 4.1.0/33 und die neue ID; `arm64`, `x86_64` und strenge ad-hoc Signatur sind geprüft. Die serielle Suite bestand mit 222/222 Tests ohne Fehler, Skips oder Runtime-Warnungen. Das neue App-Container-/Berechtigungsverhalten ist damit noch **nicht** real bestätigt. Erforderlich ist ein kurzer Erststart- und Berechtigungs-Smoke-Test mit exakt dieser ZIP einschließlich lokalem oder OpenAI-Setup, Mikrofonaufnahme, Einfügen und kurzem Mixed-Recording. Alte Einstellungen, History, Modell, Ordner-Bookmark und Keychain-Eintrag werden nicht automatisch übernommen; die Installationsdokumente benennen dies. Die früheren Langzeittests und ihre akzeptanzpflichtigen Abweichungen bleiben als Nachweis bestehen, gelten aber nicht als neue Build-33-Langläufe.
 
 ### 14.4 Exit
 
@@ -915,4 +917,4 @@ Die Fertigstellung dieses Arbeitsplans ist kein Release. Sie autorisiert weder P
 
 ## 18. Unmittelbar nächster Schritt
 
-Die Testphase wurde auf Wunsch des Nutzers nach dem real bestätigten Silent-Track-Fix beendet. Der Build-32-Kandidat und die noch nicht als Tests bestandenen Gate-Abweichungen sind in 14.3 bewertet. Nächster Schritt ist die bewusste Releaseentscheidung über diese dokumentierten Restrisiken; erst ein separater Auftrag autorisiert Merge nach `main`, Tag, Push, GitHub Release und Asset-Upload. Bis dahin bleibt die geprüfte ZIP unverändert.
+Die Build-32-Testphase wurde auf Wunsch des Nutzers nach dem real bestätigten Silent-Track-Fix beendet. Nach dem bewussten Bundle-ID-Wechsel ist Build 33 der neue Kandidat; zuerst steht dessen kurzer realer Erststart-/Berechtigungs-Smoke-Test mit exakt der neuen ZIP an. Anschließend ist die bewusste Releaseentscheidung über die dokumentierten Restrisiken nötig. Erst ein separater Auftrag autorisiert Merge nach `main`, Tag, GitHub Release und Asset-Upload. Bis dahin wird die Build-33-ZIP nicht erneut gebaut oder verändert.

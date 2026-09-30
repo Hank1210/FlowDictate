@@ -74,11 +74,11 @@ Prebuilt Community editions are published separately under [GitHub Releases](htt
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and the [documentation index](docs/README.md) for requirements, engineering notes and release notes.
 
-The 4.1.0 release description is prepared in [RELEASE_NOTES_4.1.0.md](docs/releases/RELEASE_NOTES_4.1.0.md). It is kept separate from the tested ZIP so documentation-only preparation does not change that archive.
+The 4.1.0 release description is prepared in [RELEASE_NOTES_4.1.0.md](docs/releases/RELEASE_NOTES_4.1.0.md). A bundle-identifier change requires a new ZIP and fresh packaged-app verification; the earlier Build 32 archive is retained only as a rollback candidate.
 
 ## Updating an existing installation
 
-Quit FlowDictate, replace the existing app in `Applications`, and open the new app once using right-click → Open. Settings, the selected recordings folder and the Keychain credential remain local. Before the first schema-7 History write, FlowDictate creates a one-time `dictations-pre-4.1.json` backup. Existing single-track entries remain single-track. macOS may request Accessibility, Microphone, System Audio, Speech Recognition or Keychain approval again because Community builds use an ad hoc signature.
+Version 4.1.0 changes the app's bundle identifier from `de.euler.FlowDictate` to `de.mcc.FlowDictate`. macOS treats this as a new app: quit the older installation before replacing it, then complete onboarding again. The new app does not automatically inherit the old settings, History, local model, recordings-folder bookmark or Keychain entry. Files already in the separately selected recordings folder are not deleted; select that folder again if you want to continue using it. Back up or export any old History you need before replacing the app. Grant the required macOS permissions again. See the [installation guide](COMMUNITY_INSTALLATION_EN.md) for details.
 
 ## Privacy
 
@@ -111,7 +111,7 @@ xcodebuild test \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.euler.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.euler.FlowDictate` app. Do not override the test command with `-configuration Debug`.
+The scheme's Test action uses the dedicated `DebugTests` configuration and the bundle identifier `de.mcc.FlowDictate.TestHost`. This prevents XCTest builds in temporary DerivedData folders from invalidating the Accessibility permission of the normal `de.mcc.FlowDictate` app. Do not override the test command with `-configuration Debug`.
 
 The automated tests cover configuration, compact upload preparation, multipart construction, upload-size protection, long-form planning/export/merge/session recovery, state rules, start/stop/cancel orchestration, shared retry execution, history persistence and migration (including audio-source defaults), retention and recovery, bounded Preview buffering, spoken formatting, Smart Dictation, app-profile persistence, statistics and release comparison. Microphone and System Audio permissions, Speech Recognition, Accessibility, folder authorization, overlay placement, live OpenAI responses and insertion into third-party applications require manual macOS testing.
 

@@ -11,7 +11,7 @@ actor ScreenCaptureKitSystemTrackRecorder: MixedTrackRecording {
     private let permissionService: SystemAudioPermissionService
     private let firstBufferTimeout: Duration
     private let captureQueue = DispatchQueue(
-        label: "de.euler.FlowDictate.mixed-screen-capture-audio",
+        label: "de.mcc.FlowDictate.mixed-screen-capture-audio",
         qos: .userInitiated
     )
     private var stream: SCStream?

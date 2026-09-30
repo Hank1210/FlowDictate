@@ -39,7 +39,7 @@ Do not commit the generated `dist/` or `build/` directories. They are intentiona
 
 ## Updating an existing installation
 
-The 4.1.0 app keeps the stable bundle identifier `de.euler.FlowDictate`. Existing settings, the recordings bookmark and the Keychain credential are reused; existing installations remain on their selected provider until changed deliberately. History creates a one-time `dictations-pre-4.1.json` backup before writing schema 7, and existing single-track entries remain unchanged. Because the Community signature changes between builds, macOS may nevertheless require permissions or the Keychain credential to be approved again.
+The 4.1.0 app changes its bundle identifier from `de.euler.FlowDictate` to `de.mcc.FlowDictate`. This is a deliberate fresh app identity: the old settings, recordings bookmark, Keychain credential, local model and History are not imported automatically. A user must reselect the recordings folder, choose the provider and grant permissions again. Existing files in the separately selected recordings folder are not deleted. Back up or export any old History needed before replacing the previous app; do not delete its app container as part of installation. The schema-7 backup applies only when migrating History already visible to the same app identity, not to this bundle-ID transition.
 
 The following sections describe the optional paid Developer ID workflow.
 
@@ -56,7 +56,7 @@ The following sections describe the optional paid Developer ID workflow.
 ./scripts/build-release.sh
 ```
 
-The versioned ZIP is written to `dist/`. The build uses the stable bundle identifier `de.euler.FlowDictate`, the Release configuration, App Sandbox, outgoing network access, microphone access, and user-selected read/write folder access.
+The versioned ZIP is written to `dist/`. The build uses the bundle identifier `de.mcc.FlowDictate`, the Release configuration, App Sandbox, outgoing network access, microphone access, and user-selected read/write folder access.
 
 ## Notarize
 
@@ -95,10 +95,18 @@ Before calling the 4.1.0 ZIP final, review the exact extracted archive on a fres
 
 The earlier real 30-, 60- and 120-minute mixed sessions establish original-track preservation, bounded capture RAM and recoverability, but they recorded short System Audio gaps (65 ms, 33 ms and 422 ms total). The zero-buffer-loss budget was not met. The project owner does not plan additional long recordings solely to repeat those scenarios with the exact ZIP. This is an explicit release-gate deviation, not a pass; its product impact and the public known limitation must be accepted before publication. Any remaining unmeasured latency or drift targets likewise require an explicit decision rather than a checked box without evidence. Publication, merge to `main`, tag and asset upload require a separate instruction.
 
-### 4.1.0 release preparation, Build 32
+### Superseded 4.1.0 release preparation, Build 32
 
-The project owner ended the test phase after confirming that the installed 4.1.0/32 build completes a mixed recording with microphone speech and silent System Audio. The complete isolated macOS suite passed 222/222 tests with no failures, skips or runtime warnings. The installed app's executable, Info.plist, assets and code-signature resources are byte-identical to the app extracted from the current ZIP. The ZIP passed checksum and strict code-signature verification, contains `arm64` and `x86_64`, and excludes private test notes, recordings, transcripts, credentials and models.
+The project owner ended the test phase after confirming that the installed 4.1.0/32 build completes a mixed recording with microphone speech and silent System Audio. The complete isolated macOS suite passed 222/222 tests with no failures, skips or runtime warnings. The installed app's executable, Info.plist, assets and code-signature resources were byte-identical to the app extracted from the then-current Build 32 ZIP. That ZIP passed checksum and strict code-signature verification, contains `arm64` and `x86_64`, and excludes private test notes, recordings, transcripts, credentials and models.
 
-Release candidate: commit `7804e30`, `dist/FlowDictate-4.1.0-Community-macOS.zip`, SHA-256 `c18e5d29d5cafcfcabfa877e039bd89d39f2b273ffa79db1e3d56edbe73adc1c`. Use [RELEASE_NOTES_4.1.0.md](docs/releases/RELEASE_NOTES_4.1.0.md) for the release description. Do not rebuild this ZIP for documentation-only edits: any new archive has a new checksum and needs its own exact-artifact acceptance.
+Former release candidate: commit `7804e30`, original `FlowDictate-4.1.0-Community-macOS.zip`, SHA-256 `c18e5d29d5cafcfcabfa877e039bd89d39f2b273ffa79db1e3d56edbe73adc1c`. It remains a rollback candidate, not the publishable archive after the bundle-ID change. A replacement ZIP needs a new checksum and its own exact-artifact acceptance. Use [RELEASE_NOTES_4.1.0.md](docs/releases/RELEASE_NOTES_4.1.0.md) for the updated release description.
 
-The owner requests no further tests. Accordingly, the earlier requirement to repeat 60/120-minute recordings with precisely this ZIP, a separate several-day trial of this exact build, and unmeasured p95/latency/drift budgets remain documented deviations, **not passed tests**. The measured System Audio gaps can be considered minor in practical use, but they do not satisfy the zero-buffer-loss target. The known gaps are stated in the public Changelog, README and release notes. The source remains on `codex/phase-4-1-prep`; pushing this preparation branch does not authorize a merge to `main`, a tag, GitHub Release or asset upload.
+The owner requests no further long-duration tests. Accordingly, the earlier requirement to repeat 60/120-minute recordings with precisely this ZIP, a separate several-day trial of this exact build, and unmeasured p95/latency/drift budgets remain documented deviations, **not passed tests**. The measured System Audio gaps can be considered minor in practical use, but they do not satisfy the zero-buffer-loss target. The known gaps are stated in the public Changelog, README and release notes. The source remains on `codex/phase-4-1-prep`; pushing this preparation branch does not authorize a merge to `main`, a tag, GitHub Release or asset upload.
+
+### Bundle-identity candidate, Build 33
+
+The new `de.mcc.FlowDictate` identity intentionally starts with a fresh macOS sandbox, preferences and Keychain service. Build 32's ZIP was preserved locally at `dist/previous-candidates/build32/FlowDictate-4.1.0-Community-macOS-build32.zip` with its original SHA-256 `c18e5d29d5cafcfcabfa877e039bd89d39f2b273ffa79db1e3d56edbe73adc1c`; it is not the current release candidate.
+
+The replacement `dist/FlowDictate-4.1.0-Community-macOS.zip` has SHA-256 `e22b1b4d73e0cea50986569bc14bc16ea0dd0be37a48b4e7b09ece12906b5002`. The archive's extracted app reports version 4.1.0, build 33 and bundle ID `de.mcc.FlowDictate`; `arm64` and `x86_64` slices and the strict ad hoc code signature were verified. Its bundled installation guides, Privacy notice and Changelog explain the identity break. The serial macOS suite passed 222/222 with no failures, skips or runtime warnings. The ZIP contains no private test notes, recordings, transcripts, credentials or downloaded model.
+
+This static and automated verification does **not** establish fresh-user behavior for the new identity. Before publication, install and run this exact ZIP on a fresh macOS account or equivalent isolated setup: complete the selected local or OpenAI provider, folder selection and permissions, then verify a short microphone dictation, insertion and one short mixed recording. Do not infer that Build 32's prior live approval transfers to Build 33. The existing long-duration and performance deviations remain documented; no repeat 60/120-minute session is planned solely for this identifier change. No merge, tag, GitHub Release or asset upload is authorized yet.
