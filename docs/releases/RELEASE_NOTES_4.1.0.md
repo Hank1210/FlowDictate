@@ -20,6 +20,8 @@ FlowDictate 4.1 adds opt-in meetings with separate microphone and System Audio o
 
 The 30-, 60- and 120-minute mixed tests preserved both original tracks but observed short System Audio gaps: 65 ms, 33 ms and 422 ms in total, respectively, with a longest individual gap of 137 ms. A gap can omit part of a word. FlowDictate reports capture-quality warnings and keeps the originals for review and recovery; zero-loss capture is not claimed for every Mac or audio route.
 
+Build 33 passed six recording-source/provider smoke tests on the existing macOS account. Installation in an independently fresh account with this exact build, and some long-duration performance targets, were not re-tested before release; these are accepted verification gaps, not passed tests.
+
 ## Installation and privacy
 
 Version 4.1.0 uses the new bundle identifier `de.mcc.FlowDictate` instead of `de.euler.FlowDictate`. This is a fresh macOS app identity: complete setup and permissions again, reselect the recordings folder, and reinstall the local model or re-enter your own OpenAI key. The old app's settings and History are not imported automatically; back up or export any old History you need before replacing it. Existing recordings in the separately selected folder are not deleted by the identifier change.
