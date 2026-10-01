@@ -19,9 +19,23 @@ FlowDictate is an independent open-source project. It is not affiliated with or 
 
 The full [feature and settings reference](docs/FEATURES.md) describes behavior and limits. Mixed recording does not create a combined original audio file or identify individual remote speakers: `You` means the microphone track and `System Audio` means the captured output. Bulk export and profile import/export remain follow-up scope. Cloud audio streaming is not used.
 
+
+
+https://github.com/user-attachments/assets/e3a96d0b-2b04-46cb-8bbf-cce8e257a373
+
+
+
+
+
+
 Known 4.1 limitation: in the real 30-, 60- and 120-minute meeting tests, short gaps occurred on the System Audio track (65 ms, 33 ms and 422 ms total respectively; the longest single gap was 137 ms). A gap can omit part of a word. The app keeps both originals, reports capture quality and supports recovery; it does not claim lossless capture on every Mac or audio route.
 
 Long or oversized recordings are prepared as local M4A segments and transcribed sequentially. Successful segments are persisted before the next upload, so a pause, temporary failure or app restart continues at the first unfinished segment.
+
+## Install Community App
+
+https://github.com/user-attachments/assets/b81e4dbd-4fce-4563-8d0f-58665f705e03
+
 
 ## Requirements
 
